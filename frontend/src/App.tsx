@@ -1716,6 +1716,31 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function DataSourcePanel({ snapshot }: { snapshot: DashboardSnapshot }) {
+  const clv = snapshot.clv_tracking;
+  const marketSummary = snapshot.market_snapshot_summary;
+  const calibrationSampleCount = snapshot.strategy_state.sample_count ?? snapshot.prediction_kpis.settled_count ?? 0;
+  const clvText = clv ? `${clv.available_count}/${clv.tracked_count}` : "0/0";
+  return (
+    <section className="panel data-source-panel" aria-label="当前数据源">
+      <div className="panel-title">
+        <Database size={18} />
+        <h2>当前数据源</h2>
+        <span className="status-pill neutral">后端实际读取</span>
+      </div>
+      <div className="data-source-grid">
+        <Metric label="学习库" value={snapshot.db_path || "未返回"} />
+        <Metric label="赔率库" value={marketSummary?.db_path || "未返回"} />
+        <Metric label="校准样本" value={`${calibrationSampleCount} 场`} />
+        <Metric label="CLV 样本" value={clvText} />
+      </div>
+      <p className="panel-note">
+        这里展示本次接口实际读取的数据路径，用于区分本机临时库、容器运行库和赔率快照库。
+      </p>
+    </section>
+  );
+}
+
 function FilterPanel({ snapshot }: { snapshot: DashboardSnapshot }) {
   const view = buildDashboardView(snapshot);
   return (
@@ -2107,6 +2132,7 @@ function DataSection({
 }) {
   return (
     <div className="dashboard-section">
+      <DataSourcePanel snapshot={snapshot} />
       <section className="data-grid">
         <SnapshotCoveragePanel view={view} />
         <ClvTrackingPanel view={view} />
@@ -2246,7 +2272,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [detailLedgerId, snapshot?.generated_at_utc]);
+  }, [detailLedgerId]);
 
   const view = useMemo(() => snapshot ? buildDashboardView(snapshot) : null, [snapshot]);
   const isMatchPage = route.page === "match";

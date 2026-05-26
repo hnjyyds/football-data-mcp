@@ -964,6 +964,11 @@ export interface DashboardProductionReadiness {
     roi: number | null;
     learning_improved: boolean;
     beats_market: boolean;
+    clv_available_count?: number | null;
+    clv_tracked_count?: number | null;
+    avg_clv_return?: number | null;
+    positive_clv_rate?: number | null;
+    clv_ready?: boolean | null;
     formal_recommendation_enabled: boolean;
     blocked_count: number;
     warning_count: number;

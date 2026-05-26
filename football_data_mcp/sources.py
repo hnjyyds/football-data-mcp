@@ -12494,6 +12494,7 @@ def _dashboard_production_readiness(
     learning_effectiveness: dict[str, Any],
     recommendation_opportunity: dict[str, Any],
     dashboard_contract: dict[str, Any],
+    clv_tracking: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     total_predictions = int(prediction_kpis.get("total_count") or 0)
     settled_count = int(prediction_kpis.get("settled_count") or 0)
@@ -12515,6 +12516,18 @@ def _dashboard_production_readiness(
     shadow_walk_blocked = bool(shadow_walk_gate and str(shadow_walk_gate.get("status") or "") == "blocked")
     contract_status = str(dashboard_contract.get("status") or "")
     contract_ok = contract_status not in {"error", "missing"}
+    clv_required = clv_tracking is not None
+    clv_available_count = int((clv_tracking or {}).get("available_count") or 0)
+    clv_tracked_count = int((clv_tracking or {}).get("tracked_count") or 0)
+    avg_clv_return = parse_float((clv_tracking or {}).get("avg_clv_return"))
+    positive_clv_rate = parse_float((clv_tracking or {}).get("positive_clv_rate"))
+    clv_ready = bool(
+        clv_available_count >= 20
+        and avg_clv_return is not None
+        and avg_clv_return >= 0
+        and positive_clv_rate is not None
+        and positive_clv_rate >= 0.5
+    )
     is_empty_loop = total_predictions <= 0
     production_ready = bool(
         total_predictions > 0
@@ -12522,6 +12535,7 @@ def _dashboard_production_readiness(
         and learning_improved
         and beats_market
         and (roi is not None and roi >= 0)
+        and (not clv_required or clv_ready)
         and formal_enabled
         and not shadow_walk_blocked
         and contract_ok
@@ -12601,6 +12615,36 @@ def _dashboard_production_readiness(
             ratio=None if roi is None else (1.0 if roi >= 0 else 0.0),
         ),
     ]
+    if clv_required:
+        if clv_ready:
+            clv_status = "ok"
+            clv_title = "收盘价验证通过"
+        elif clv_available_count < 20:
+            clv_status = "blocked"
+            clv_title = "收盘价样本不足"
+        elif avg_clv_return is None or avg_clv_return < 0:
+            clv_status = "blocked"
+            clv_title = "平均 CLV 为负"
+        else:
+            clv_status = "blocked"
+            clv_title = "正 CLV 比例不足"
+        gates.append(
+            gate(
+                "closing_line_value",
+                "CLV 收盘价",
+                clv_status,
+                clv_title,
+                (
+                    f"已对齐 {clv_available_count}/{clv_tracked_count} 条收盘价；"
+                    f"平均 CLV {_percent_text(avg_clv_return) or '暂无'}，"
+                    f"正 CLV {_percent_text(positive_clv_rate) or '暂无'}。"
+                    "生产发布至少需要 20 条可计算 CLV，且平均 CLV 非负、正 CLV 不低于 50%。"
+                ),
+                current=clv_available_count,
+                target=20,
+                ratio=_dashboard_ratio(clv_available_count, 20),
+            )
+        )
     if shadow_walk_gate:
         gates.append(
             gate(
@@ -12649,7 +12693,11 @@ def _dashboard_production_readiness(
         status = "production_candidate"
         severity = "ok"
         title = "可进入生产推荐候选"
-        detail = "预测、回测、学习效果、市场基准、收益和推荐闸门均通过。"
+        detail = (
+            "预测、回测、学习效果、市场基准、收益、CLV 和推荐闸门均通过。"
+            if clv_required
+            else "预测、回测、学习效果、市场基准、收益和推荐闸门均通过。"
+        )
     else:
         status = "paper_validation"
         severity = "warning" if blocked_count else "info"
@@ -12681,6 +12729,11 @@ def _dashboard_production_readiness(
             "roi": round_metric(roi, 4),
             "learning_improved": learning_improved,
             "beats_market": beats_market,
+            "clv_available_count": clv_available_count if clv_required else None,
+            "clv_tracked_count": clv_tracked_count if clv_required else None,
+            "avg_clv_return": round_metric(avg_clv_return) if clv_required else None,
+            "positive_clv_rate": round_metric(positive_clv_rate) if clv_required else None,
+            "clv_ready": clv_ready if clv_required else None,
             "formal_recommendation_enabled": formal_enabled,
             "blocked_count": blocked_count,
             "warning_count": warning_count,
@@ -14360,6 +14413,7 @@ def dashboard_match_detail(
     *,
     db_path: str | None = None,
     market_db_path: str | None = None,
+    enrich_live_context: bool = False,
 ) -> dict[str, Any]:
     """Return the full persisted sample detail behind one prediction ledger row."""
     resolved = _dashboard_record_from_ledger_id(ledger_id, db_path=db_path)
@@ -14396,7 +14450,11 @@ def dashboard_match_detail(
         db_path=market_db_path,
         limit=1,
     )
-    match_context = _dashboard_context_with_leisu_snapshot_enrichment(record, odds_snapshot=odds_snapshot)
+    match_context = (
+        _dashboard_context_with_leisu_snapshot_enrichment(record, odds_snapshot=odds_snapshot)
+        if enrich_live_context
+        else _dashboard_match_context(record, odds_snapshot=odds_snapshot)
+    )
     detail_odds_coverage = {
         "snapshot_count": odds_snapshot.get("snapshot_count") or 0,
         "bookmaker_count": odds_snapshot.get("bookmaker_count") or 0,
@@ -14461,7 +14519,11 @@ def dashboard_match_detail(
         "policy": {
             "read_only": True,
             "no_real_bet": True,
-            "data_rule": "Match details read persisted prediction samples, context, and odds snapshots only.",
+            "data_rule": (
+                "Match details read persisted prediction samples, context, and odds snapshots only."
+                if not enrich_live_context
+                else "Match details read persisted samples and explicitly requested supplemental context enrichment."
+            ),
         },
     }
 
@@ -14684,6 +14746,7 @@ def dashboard_snapshot(
         learning_effectiveness=learning_effectiveness,
         recommendation_opportunity=recommendation_opportunity,
         dashboard_contract=dashboard_contract,
+        clv_tracking=clv_tracking,
     )
     prediction_accountability = _dashboard_prediction_accountability(
         prediction_kpis=prediction_kpis,
