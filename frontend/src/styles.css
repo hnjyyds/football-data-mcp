@@ -2101,6 +2101,27 @@ h2 {
   grid-column: span 2;
 }
 
+.data-source-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.data-source-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) minmax(220px, 1.4fr) repeat(2, minmax(130px, 0.7fr));
+  gap: 10px;
+}
+
+.data-source-panel .metric {
+  min-width: 0;
+}
+
+.data-source-panel .metric strong {
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .dashboard-column {
   display: grid;
   gap: 12px;
@@ -3394,6 +3415,7 @@ th {
 
   .contract-section-list,
   .readiness-gate-list,
+  .data-source-grid,
   .adaptive-action-list {
     grid-template-columns: 1fr;
   }

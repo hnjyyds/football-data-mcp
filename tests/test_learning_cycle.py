@@ -2786,6 +2786,45 @@ def test_shadow_walk_forward_failure_blocks_formal_gate_and_production_readiness
     assert "走步验证" in readiness_gates["shadow_walk_forward"]["detail"]
 
 
+def test_clv_guard_blocks_production_readiness_after_formal_gate_opens():
+    readiness = sources_module._dashboard_production_readiness(
+        prediction_kpis={
+            "total_count": 32,
+            "settled_count": 30,
+            "open_count": 2,
+            "hit_rate": 0.6,
+            "roi": 0.08,
+        },
+        learning_effectiveness={
+            "learning_improved": True,
+            "beats_market": True,
+            "detail": "学习后概率已优于原始模型和市场。",
+        },
+        recommendation_opportunity={
+            "release_gate": {
+                "formal_enabled": True,
+                "detail": "正式推荐闸门已开放。",
+                "gates": [],
+            },
+        },
+        dashboard_contract={"status": "ok", "detail": "数据契约可用。"},
+        clv_tracking={
+            "tracked_count": 30,
+            "available_count": 22,
+            "avg_clv_return": -0.004,
+            "positive_clv_rate": 0.45,
+        },
+    )
+    gates = {gate["key"]: gate for gate in readiness["gates"]}
+
+    assert readiness["production_ready"] is False
+    assert readiness["summary"]["avg_clv_return"] == -0.004
+    assert readiness["summary"]["clv_ready"] is False
+    assert gates["closing_line_value"]["status"] == "blocked"
+    assert gates["closing_line_value"]["title"] == "平均 CLV 为负"
+    assert "生产发布至少需要 20 条可计算 CLV" in gates["closing_line_value"]["detail"]
+
+
 def test_probability_governance_explains_shadow_guardrail_after_beating_market():
     rows = [
         {
@@ -3993,6 +4032,90 @@ def test_dashboard_match_detail_explains_source_attempts_when_leisu_has_only_odd
     assert leisu_attempt["urls"]["mobile_detail"].endswith("/live/detail-4528570")
 
 
+def test_dashboard_match_detail_does_not_call_live_context_by_default(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    market_db_path = str(tmp_path / "snapshots.sqlite3")
+    learning_store.save_recommendation_records(
+        [
+            {
+                "run_id": "cycle-no-live-detail-context",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "league": "乌兹杯",
+                "home_team": "纳萨夫",
+                "away_team": "古佐尔警察",
+                "match_id": "54435613",
+                "kickoff_utc_plus_8": "2026-05-26T03:51:00+08:00",
+                "market": "asian_handicap",
+                "selection": "纳萨夫 -1.5",
+                "selection_key": "home_cover",
+                "line": -1.5,
+                "decimal_odds": 1.90,
+                "model_probability": 0.52,
+                "calibrated_probability": 0.52,
+                "market_probability": 0.50,
+                "recommendation": "no_value",
+                "raw": {
+                    "context_source_name": "dongqiudi",
+                    "match_context": {
+                        "match_id": "54435613",
+                        "lineup": {
+                            "base": {
+                                "field": "暂无信息",
+                                "weather": "暂无信息",
+                                "referee": "暂无信息",
+                            },
+                            "lineup_status": {"lineup_basis": "unavailable"},
+                            "lineup_analysis": {"available": False},
+                        },
+                    },
+                },
+            }
+        ],
+        db_path=db_path,
+    )
+    record = learning_store.list_recommendation_records(db_path=db_path, limit=1)[0]
+    snapshot_store.save_market_snapshots(
+        [
+            snapshot_store.MarketSnapshot(
+                provider="leisu",
+                source_key="leisu:4528570",
+                event_id="4528570",
+                league="乌兹杯",
+                home_team="纳萨夫",
+                away_team="古佐尔警察",
+                kickoff_utc="",
+                bookmaker="公司A",
+                market_type="asian_handicap",
+                selection="纳萨夫 -1.5",
+                decimal_odds=1.90,
+                line=-1.5,
+                source_time_utc="2026-05-25T19:50:00+00:00",
+                fetched_at_utc="2026-05-25T19:55:00+00:00",
+                raw={"match_resolution_reason": "direct_snapshot_match"},
+            )
+        ],
+        db_path=market_db_path,
+    )
+
+    async def fail_if_called(match_id):
+        raise AssertionError(f"unexpected live context fetch: {match_id}")
+
+    monkeypatch.setenv("FOOTBALL_DATA_LEISU_CONTEXT_ENABLED", "true")
+    monkeypatch.setattr(sources_module, "leisu_match_context", fail_if_called)
+
+    detail = sources_module.dashboard_match_detail(
+        f"recommendation:{record['id']}",
+        db_path=db_path,
+        market_db_path=market_db_path,
+    )
+
+    assert detail["policy"]["data_rule"] == "Match details read persisted prediction samples, context, and odds snapshots only."
+    leisu_attempt = next(item for item in detail["match_context"]["source_attempts"] if item["provider"] == "leisu")
+    assert leisu_attempt["status"] == "odds_matched_context_not_collected"
+
+
 def test_dashboard_match_detail_enriches_missing_context_from_leisu_snapshot(monkeypatch, tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
     market_db_path = str(tmp_path / "snapshots.sqlite3")
@@ -4085,6 +4208,7 @@ def test_dashboard_match_detail_enriches_missing_context_from_leisu_snapshot(mon
         f"recommendation:{record['id']}",
         db_path=db_path,
         market_db_path=market_db_path,
+        enrich_live_context=True,
     )
 
     assert detail["match_context"]["source"]["label"] == "多源融合"
@@ -4197,6 +4321,7 @@ def test_dashboard_match_detail_marks_blocked_leisu_context_access(monkeypatch, 
         f"recommendation:{record['id']}",
         db_path=db_path,
         market_db_path=market_db_path,
+        enrich_live_context=True,
     )
 
     leisu_attempt = next(item for item in detail["match_context"]["source_attempts"] if item["provider"] == "leisu")
