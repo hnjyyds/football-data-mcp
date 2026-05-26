@@ -2058,6 +2058,138 @@ describe("dashboard model", () => {
     expect(view.snapshotEmptyText).toBe("已探测 2 场，0 场可访问；需要雷速登录凭据或代理。");
   });
 
+  it("summarizes data collection health without exposing backend status codes", () => {
+    const blockedSnapshot = {
+      ...snapshot,
+      market_snapshot_summary: {
+        ...snapshot.market_snapshot_summary,
+        total_snapshot_count: 0,
+        event_count: 0,
+        bookmaker_count: 0,
+        provider_count: 0,
+        providers: [],
+        latest_fetched_at_utc: null,
+        last_sync: {
+          provider: "leisu",
+          status: "partial",
+          saved_snapshot_count: 0,
+          probed_match_count: 2,
+          accessible_match_count: 0,
+          promotable_match_count: 0,
+          hard_flags: ["leisu_access_waf_challenge"],
+          soft_flags: ["leisu_requires_cookie_or_proxy"],
+          at_utc: "2026-05-25T05:29:00+00:00"
+        }
+      },
+      auto_learning_state: {
+        enabled: true,
+        interval_seconds: 120,
+        asian_window_minutes: 10,
+        run_count: 5,
+        last_market_snapshot_sync: {
+          provider: "leisu",
+          status: "partial",
+          saved_snapshot_count: 0,
+          probed_match_count: 2,
+          accessible_match_count: 0,
+          hard_flags: ["leisu_access_waf_challenge"],
+          soft_flags: ["leisu_requires_cookie_or_proxy"],
+          at_utc: "2026-05-25T05:29:00+00:00"
+        },
+        last_snapshot_reanalysis: {
+          skipped_count: 3
+        }
+      }
+    } as unknown as DashboardSnapshot;
+
+    const view = buildDashboardView(blockedSnapshot);
+
+    expect(view.dataSourceHealth.title).toBe("数据采集需要关注");
+    expect(view.dataSourceHealth.statusCards.map((card) => `${card.label}:${card.value}:${card.caption}`)).toContain(
+      "赔率源:部分受限:探测 2 场 · 可访问 0 场 · 保存 0 条"
+    );
+    expect(view.dataSourceHealth.statusCards.map((card) => `${card.label}:${card.value}:${card.caption}`)).toContain(
+      "采集窗口:10 分钟:2 分钟轮询 · 5 轮"
+    );
+    expect(view.dataSourceHealth.checkRows.map((row) => `${row.label}:${row.title}:${row.statusText}`)).toEqual([
+      "赔率抓取:赔率抓取受限:注意",
+      "赛前窗口:候选不在分析窗口:注意",
+      "台账覆盖:部分预测缺少赔率快照:注意",
+      "赛事情报:赛事情报待补齐:注意",
+      "收盘价追踪:收盘价样本不足:阻断"
+    ]);
+    expect(view.dataSourceHealth.issueText).toBe("雷速访问受限；需要雷速登录凭据或代理");
+    expect(JSON.stringify(view.dataSourceHealth)).not.toMatch(
+      /partial|leisu_access_waf_challenge|leisu_requires_cookie_or_proxy|outside_near_kickoff_window|odds_matched_context_not_collected/
+    );
+  });
+
+  it("shows healthy data collection cadence when snapshots and coverage are available", () => {
+    const healthySnapshot = {
+      ...snapshot,
+      market_snapshot_summary: {
+        ...snapshot.market_snapshot_summary,
+        last_sync: {
+          provider: "leisu",
+          status: "ok",
+          saved_snapshot_count: 42,
+          probed_match_count: 4,
+          accessible_match_count: 4,
+          at_utc: "2026-05-25T05:29:00+00:00"
+        }
+      },
+      auto_learning_state: {
+        enabled: true,
+        interval_seconds: 120,
+        asian_window_minutes: 10,
+        run_count: 5,
+        last_market_snapshot_sync: {
+          provider: "leisu",
+          status: "ok",
+          saved_snapshot_count: 42,
+          probed_match_count: 4,
+          accessible_match_count: 4,
+          at_utc: "2026-05-25T05:29:00+00:00"
+        },
+        last_snapshot_reanalysis: {
+          skipped_count: 0
+        }
+      },
+      clv_tracking: {
+        ...snapshot.clv_tracking,
+        tracked_count: 32,
+        available_count: 31,
+        readiness: {
+          status: "ok",
+          severity: "ok",
+          title: "收盘价样本充足",
+          detail: "CLV 样本已达到最低门槛。",
+          current: 31,
+          target: 30,
+          ratio: 1
+        }
+      }
+    } as unknown as DashboardSnapshot;
+
+    const view = buildDashboardView(healthySnapshot);
+
+    expect(view.dataSourceHealth.title).toBe("数据采集正常");
+    expect(view.dataSourceHealth.statusCards.map((card) => `${card.label}:${card.value}`)).toEqual([
+      "赔率源:正常",
+      "赔率快照:139 条",
+      "台账覆盖:1/2",
+      "采集窗口:10 分钟"
+    ]);
+    expect(view.dataSourceHealth.checkRows.map((row) => `${row.label}:${row.title}:${row.statusText}`)).toEqual([
+      "赔率抓取:上一轮已保存赔率快照:通过",
+      "赛前窗口:仅分析赛前窗口内比赛:通过",
+      "台账覆盖:赔率覆盖可追溯:注意",
+      "赛事情报:赛事情报待补齐:注意",
+      "收盘价追踪:收盘价样本可用:通过"
+    ]);
+    expect(view.dataSourceHealth.issueText).toBe("2 项需要关注");
+  });
+
   it("summarizes match context coverage without raw status codes", () => {
     const view = buildDashboardView(snapshot);
 
@@ -2142,7 +2274,7 @@ describe("dashboard model", () => {
         status: "retrain_required",
         severity: "warning",
         title: "需要优化或冻结部分策略",
-        detail: "发现 2 个阻断动作、2 个采样动作；推荐发布继续关闭，观察样本和回测继续运行。",
+        detail: "发现 2 个阻断动作、2 个采样动作；正式推荐继续关闭，纸面预测和回测继续运行。",
         summary: {
           action_count: 5,
           blocked_action_count: 2,
@@ -2184,6 +2316,7 @@ describe("dashboard model", () => {
     const view = buildDashboardView(adaptiveSnapshot);
 
     expect(view.adaptiveLearningPlan.title).toBe("需要优化或冻结部分策略");
+    expect(view.adaptiveLearningPlan.detail).toBe("发现 2 个阻断动作、2 个采样动作；推荐发布继续关闭，观察样本和回测继续运行。");
     expect(view.adaptiveLearningPlan.metrics.map((metric) => `${metric.label}:${metric.value}`)).toEqual([
       "动作总数:5",
       "阻断动作:2",
@@ -2194,7 +2327,7 @@ describe("dashboard model", () => {
       "冻结影子重校准:走步验证未过:走步 Brier 变化 +0.0072:冻结升级，只继续样本回测",
       "降权无正向边际:降权过滤:无正向边际 已回测 63 场，收益率 -15.8%:推荐发布前权重 0.50"
     ]);
-    expect(JSON.stringify(view.adaptiveLearningPlan)).not.toMatch(/freeze_shadow_recalibration|shadow_walk_forward_failed|shadow_recalibration|prediction_quality_segment|blocked/);
+    expect(JSON.stringify(view.adaptiveLearningPlan)).not.toMatch(/freeze_shadow_recalibration|shadow_walk_forward_failed|shadow_recalibration|prediction_quality_segment|blocked|正式推荐|纸面预测|重训/);
   });
 
   it("shows calibration inversion as a paper-only counter signal without raw model codes", () => {

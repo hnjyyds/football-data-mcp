@@ -1520,6 +1520,29 @@ export interface ProductionOpsView {
   }>;
 }
 
+export interface DataSourceHealthView {
+  tone: KpiCard["tone"];
+  title: string;
+  detail: string;
+  issueText: string;
+  statusCards: Array<{
+    label: string;
+    value: string;
+    caption: string;
+    tone: KpiCard["tone"];
+  }>;
+  checkRows: Array<{
+    key: string;
+    label: string;
+    title: string;
+    detail: string;
+    statusText: string;
+    metaText: string;
+    width: string;
+    tone: KpiCard["tone"];
+  }>;
+}
+
 export interface PredictionAccountabilityView {
   tone: KpiCard["tone"];
   headline: string;
@@ -1698,6 +1721,7 @@ export interface DashboardView {
   dashboardContract: DashboardContractView;
   productionReadiness: ProductionReadinessView;
   productionOps: ProductionOpsView;
+  dataSourceHealth: DataSourceHealthView;
   predictionAccountability: PredictionAccountabilityView;
   recommendationOpportunity: RecommendationOpportunityView;
   recommendationFunnel: RecommendationFunnelView[];
