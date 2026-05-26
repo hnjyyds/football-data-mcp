@@ -701,9 +701,44 @@ h2 {
 
 .contract-metrics,
 .production-metrics,
+.model-governance-metrics,
+.clv-metrics,
 .adaptive-metrics,
 .prediction-quality-metrics {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.model-governance,
+.clv-tracking {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.model-method-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.model-method-line span,
+.model-method-line em {
+  min-width: 0;
+  border: 1px solid #dbe5ef;
+  border-radius: 999px;
+  background: #fbfdff;
+  color: #475569;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+  padding: 6px 10px;
+}
+
+.model-method-line em {
+  border-radius: 8px;
+  line-height: 1.35;
 }
 
 .contract-section-list,
@@ -723,6 +758,62 @@ h2 {
   border-radius: 8px;
   background: #fbfdff;
   padding: 10px;
+}
+
+.clv-record-list {
+  display: grid;
+  gap: 8px;
+}
+
+.clv-record-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(92px, auto) minmax(58px, auto) minmax(76px, auto);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid #e1e7ef;
+  border-radius: 8px;
+  background: #fbfdff;
+  padding: 10px;
+}
+
+.clv-record-row div {
+  min-width: 0;
+}
+
+.clv-record-row strong,
+.clv-record-row span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.clv-record-row strong {
+  color: #17202a;
+  font-size: 13px;
+}
+
+.clv-record-row span,
+.clv-record-row time {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.clv-record-row b,
+.clv-record-row em {
+  color: #17202a;
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 900;
+  text-align: right;
+}
+
+.clv-record-row.tone-good em {
+  color: #087f5b;
+}
+
+.clv-record-row.tone-bad em {
+  color: #b42318;
 }
 
 .contract-section-row span,
@@ -2424,6 +2515,78 @@ th {
   background: #fffaf0;
 }
 
+.clv-detail-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #dbe5ef;
+  border-radius: 8px;
+  background: #fbfdff;
+  padding: 11px;
+}
+
+.clv-detail-card.tone-good {
+  border-color: #aad7c3;
+  background: #f2fbf6;
+}
+
+.clv-detail-card.tone-bad {
+  border-color: #f0b8ad;
+  background: #fff6f4;
+}
+
+.clv-detail-card.tone-caution {
+  border-color: #f0d58a;
+  background: #fffaf0;
+}
+
+.clv-detail-card > div:first-child,
+.clv-detail-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.clv-detail-card span,
+.clv-detail-card time {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.clv-detail-card strong {
+  color: #17202a;
+  font-size: 14px;
+}
+
+.clv-detail-card p {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.clv-detail-metrics b,
+.clv-detail-metrics strong,
+.clv-detail-metrics time {
+  border: 1px solid #dbe5ef;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 900;
+  padding: 5px 9px;
+}
+
+.clv-detail-card.tone-good .clv-detail-metrics strong {
+  color: #087f5b;
+}
+
+.clv-detail-card.tone-bad .clv-detail-metrics strong {
+  color: #b42318;
+}
+
 .prediction-diagnostic-head {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
@@ -3352,8 +3515,14 @@ th {
   .model-explanation-grid,
   .lineup-grid,
   .settlement-grid,
+  .clv-record-row,
   .adaptive-action-list {
     grid-template-columns: 1fr;
+  }
+
+  .clv-record-row b,
+  .clv-record-row em {
+    text-align: left;
   }
 
   .detail-heading b {

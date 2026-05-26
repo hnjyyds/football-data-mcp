@@ -373,6 +373,54 @@ export interface DashboardOddsSnapshotDetail {
   consensus: Record<string, unknown>;
 }
 
+export interface DashboardClvResult {
+  status: string;
+  method: string;
+  reason?: string;
+  home_team?: string;
+  away_team?: string;
+  selection?: string;
+  market_type?: string;
+  line?: number | null;
+  prediction_decimal_odds?: number;
+  closing_decimal_odds?: number;
+  clv_decimal_delta?: number;
+  clv_return?: number;
+  clv_implied_probability_delta?: number;
+  closing_bookmaker_count?: number;
+  closing_snapshot_count?: number;
+  closing_window_minutes?: number;
+  latest_closing_snapshot_utc?: string;
+  prediction_snapshot_count?: number;
+  rule?: string;
+}
+
+export interface DashboardClvRecord {
+  record_id: number | string | null;
+  record_key: string | null;
+  home_team: string;
+  away_team: string;
+  market: string;
+  selection: string;
+  selection_key: string;
+  status: string;
+  clv: DashboardClvResult;
+}
+
+export interface DashboardClvTracking {
+  status: string;
+  method: string;
+  record_count: number;
+  tracked_count: number;
+  skipped_count: number;
+  available_count: number;
+  positive_clv_count: number;
+  positive_clv_rate: number | null;
+  avg_clv_return: number | null;
+  records: DashboardClvRecord[];
+  rule: string;
+}
+
 export interface DashboardMatchDetail {
   status: string;
   tool: string;
@@ -380,6 +428,7 @@ export interface DashboardMatchDetail {
   record: PredictionLedgerRow;
   match_context: DashboardMatchContext;
   odds_snapshot: DashboardOddsSnapshotDetail;
+  clv_tracking?: DashboardClvTracking;
   evidence: DashboardRecordDetail["evidence"];
   strategy_state: StrategyState;
   timeline: DashboardRecordDetail["timeline"];
@@ -963,6 +1012,66 @@ export interface DashboardPredictionAccountability {
   };
 }
 
+export interface DashboardModelGovernanceCheck {
+  key: string;
+  label: string;
+  status: Severity;
+  title: string;
+  detail: string;
+  current: number | null;
+  target: number | null;
+  ratio: number | null;
+}
+
+export interface DashboardModelGovernance {
+  status: string;
+  severity: Severity;
+  title: string;
+  detail: string;
+  summary: {
+    record_count: number;
+    model_engine_count: number;
+    model_available_count: number;
+    historical_rho_count: number;
+    market_anchor_count: number;
+    fallback_count: number;
+    calibration_sample_count: number;
+    clv_tracked_count: number;
+    clv_available_count: number;
+    avg_clv_return: number | null;
+    positive_clv_rate: number | null;
+  };
+  rho: {
+    source_counts: Record<string, number>;
+    avg_rho: number | null;
+    historical_avg_rho: number | null;
+    historical_avg_sample_count: number | null;
+  };
+  calibration: {
+    status: string;
+    title: string;
+    detail: string;
+    sample_count: number;
+    learning_improved: boolean;
+    beats_market: boolean;
+    active_probability_source: string;
+    shadow_method: string;
+    shadow_status: string;
+    walk_forward_sample_count: number;
+    walk_forward_brier_delta: number | null;
+  };
+  clv: {
+    status: string;
+    available_count: number;
+    positive_clv_rate: number | null;
+    avg_clv_return: number | null;
+  };
+  method_counts: Record<string, number>;
+  version_counts: Record<string, number>;
+  checks: DashboardModelGovernanceCheck[];
+  rule: string;
+}
+
 export interface DashboardBacktestCurvePoint {
   index: number;
   ledger_id: string;
@@ -1017,6 +1126,8 @@ export interface DashboardSnapshot {
   decision_audit?: DashboardDecisionAudit;
   learning_diagnostics?: DashboardLearningDiagnostics;
   learning_effectiveness?: DashboardLearningEffectiveness;
+  model_governance?: DashboardModelGovernance;
+  clv_tracking?: DashboardClvTracking;
   backtest_curve?: DashboardBacktestCurve;
   prediction_quality?: DashboardPredictionQuality;
   adaptive_learning_plan?: DashboardAdaptiveLearningPlan;
@@ -1191,6 +1302,55 @@ export interface LearningEffectivenessView {
     qualityText: string;
     hitWidth: string;
     probabilityWidth: string;
+    tone: KpiCard["tone"];
+  }>;
+}
+
+export interface ModelGovernanceView {
+  severity: Severity;
+  tone: KpiCard["tone"];
+  title: string;
+  detail: string;
+  methodText: string;
+  ruleText: string;
+  metrics: Array<{
+    label: string;
+    value: string;
+    caption: string;
+    tone: KpiCard["tone"];
+  }>;
+  checkRows: Array<{
+    key: string;
+    label: string;
+    title: string;
+    detail: string;
+    statusText: string;
+    progressText: string;
+    width: string;
+    tone: KpiCard["tone"];
+  }>;
+}
+
+export interface ClvTrackingView {
+  severity: Severity;
+  tone: KpiCard["tone"];
+  title: string;
+  detail: string;
+  ruleText: string;
+  metrics: Array<{
+    label: string;
+    value: string;
+    caption: string;
+    tone: KpiCard["tone"];
+  }>;
+  recordRows: Array<{
+    id: string;
+    matchup: string;
+    marketText: string;
+    selectionText: string;
+    priceText: string;
+    clvText: string;
+    timeText: string;
     tone: KpiCard["tone"];
   }>;
 }
@@ -1448,6 +1608,14 @@ export interface MatchDetailView extends RecordDetailView {
     warnings: string[];
   };
   oddsSummary: string;
+  clvTracking: {
+    title: string;
+    detail: string;
+    priceText: string;
+    clvText: string;
+    timeText: string;
+    tone: KpiCard["tone"];
+  };
   oddsRows: OddsSnapshotRowView[];
   oddsGroups: OddsSnapshotBookmakerGroup[];
 }
@@ -1484,6 +1652,8 @@ export interface DashboardView {
   settlementAudit: AuditBlockView;
   oddsAudit: AuditBlockView;
   learningDiagnostics: LearningDiagnosticsView;
+  modelGovernance: ModelGovernanceView;
+  clvTracking: ClvTrackingView;
   learningEffectiveness: LearningEffectivenessView;
   backtestCurve: BacktestCurveView;
   predictionQuality: PredictionQualityView;

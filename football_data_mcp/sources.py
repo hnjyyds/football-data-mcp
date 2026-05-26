@@ -12247,6 +12247,247 @@ def _dashboard_contract_health(
     }
 
 
+def _dashboard_record_model_engine(record: dict[str, Any]) -> dict[str, Any]:
+    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    candidate_paths = (
+        ("model_engine",),
+        ("model_card", "model_engine"),
+        ("professional_scorecard", "model_inputs", "model_engine"),
+        ("professional_scorecard", "agent_brief", "model_engine"),
+        ("betting_decision_support", "model_engine"),
+        ("analysis_pack", "model_engine"),
+    )
+    for path in candidate_paths:
+        value = _dashboard_get_path(raw, path)
+        if isinstance(value, dict) and value:
+            return value
+    return {}
+
+
+def _dashboard_model_governance_check(
+    key: str,
+    label: str,
+    status: str,
+    title: str,
+    detail: str,
+    *,
+    current: int | float | None = None,
+    target: int | float | None = None,
+) -> dict[str, Any]:
+    ratio = None
+    if current is not None and target not in (None, 0):
+        try:
+            ratio = max(0.0, min(float(current) / float(target), 1.0))
+        except (TypeError, ValueError, ZeroDivisionError):
+            ratio = None
+    return {
+        "key": key,
+        "label": label,
+        "status": status,
+        "title": title,
+        "detail": detail,
+        "current": round_metric(current, 6) if isinstance(current, float) else current,
+        "target": round_metric(target, 6) if isinstance(target, float) else target,
+        "ratio": round_metric(ratio, 6),
+    }
+
+
+def _dashboard_model_governance(
+    records: list[dict[str, Any]],
+    *,
+    learning_effectiveness: dict[str, Any],
+    clv_tracking: dict[str, Any],
+) -> dict[str, Any]:
+    model_rows = []
+    for record in records:
+        engine = _dashboard_record_model_engine(record)
+        if engine:
+            model_rows.append((record, engine))
+
+    record_count = len(records)
+    model_engine_count = len(model_rows)
+    available_count = sum(1 for _record, engine in model_rows if bool(engine.get("available", True)))
+    method_counts = Counter(str(engine.get("method") or "unknown") for _record, engine in model_rows)
+    version_counts = Counter(str(engine.get("version") or "unknown") for _record, engine in model_rows)
+    rho_source_counts: Counter[str] = Counter()
+    rho_values: list[float] = []
+    historical_rho_values: list[float] = []
+    historical_sample_counts: list[int] = []
+    market_anchor_count = 0
+    fallback_count = 0
+    for _record, engine in model_rows:
+        dixon_coles = engine.get("dixon_coles") if isinstance(engine.get("dixon_coles"), dict) else {}
+        rho_source = str(dixon_coles.get("rho_source") or "unknown")
+        rho_source_counts[rho_source] += 1
+        rho_value = parse_float(dixon_coles.get("rho"))
+        if rho_value is not None:
+            rho_values.append(rho_value)
+        historical_rho = dixon_coles.get("historical_rho") if isinstance(dixon_coles.get("historical_rho"), dict) else {}
+        historical_value = parse_float(historical_rho.get("rho"))
+        if historical_value is not None:
+            historical_rho_values.append(historical_value)
+        historical_sample_count = int(historical_rho.get("sample_count") or 0)
+        if historical_sample_count > 0:
+            historical_sample_counts.append(historical_sample_count)
+        fitted_targets = engine.get("fitted_market_targets") if isinstance(engine.get("fitted_market_targets"), dict) else {}
+        if any(bool(value) for value in fitted_targets.values()):
+            market_anchor_count += 1
+        quality = engine.get("model_quality") if isinstance(engine.get("model_quality"), dict) else {}
+        if bool(quality.get("fallback_used")):
+            fallback_count += 1
+
+    historical_rho_count = len(historical_rho_values)
+    calibration_sample_count = int(learning_effectiveness.get("sample_count") or 0)
+    learning_improved = bool(learning_effectiveness.get("learning_improved"))
+    beats_market = bool(learning_effectiveness.get("beats_market"))
+    probability_governance = (
+        learning_effectiveness.get("probability_governance")
+        if isinstance(learning_effectiveness.get("probability_governance"), dict)
+        else {}
+    )
+    shadow_recalibration = (
+        learning_effectiveness.get("shadow_recalibration")
+        if isinstance(learning_effectiveness.get("shadow_recalibration"), dict)
+        else {}
+    )
+    shadow_quality = shadow_recalibration.get("quality") if isinstance(shadow_recalibration.get("quality"), dict) else {}
+    clv_available_count = int(clv_tracking.get("available_count") or 0)
+    clv_tracked_count = int(clv_tracking.get("tracked_count") or 0)
+    avg_clv_return = parse_float(clv_tracking.get("avg_clv_return"))
+    positive_clv_rate = parse_float(clv_tracking.get("positive_clv_rate"))
+
+    rho_status = "ok" if historical_rho_count > 0 else "warning" if model_engine_count > 0 else "missing"
+    calibration_status = (
+        "ok"
+        if calibration_sample_count >= 20 and learning_improved and beats_market
+        else "warning"
+        if calibration_sample_count > 0
+        else "missing"
+    )
+    clv_status = "ok" if clv_available_count > 0 else "warning" if clv_tracked_count > 0 else "missing"
+    checks = [
+        _dashboard_model_governance_check(
+            "dixon_coles_rho",
+            "Dixon-Coles rho",
+            rho_status,
+            "历史联赛 rho 已接入" if historical_rho_count > 0 else "等待历史 rho 样本" if model_engine_count > 0 else "未发现模型证据",
+            (
+                f"{historical_rho_count}/{model_engine_count} 条模型记录使用历史联赛 MLE rho；"
+                f"其余记录继续使用盘口网格拟合。"
+                if model_engine_count
+                else "台账样本尚未持久化模型引擎输出。"
+            ),
+            current=historical_rho_count,
+            target=max(1, model_engine_count),
+        ),
+        _dashboard_model_governance_check(
+            "market_anchoring",
+            "盘口锚定",
+            "ok" if market_anchor_count > 0 else "warning" if model_engine_count > 0 else "missing",
+            "模型读取盘口目标" if market_anchor_count > 0 else "盘口目标不足",
+            f"{market_anchor_count}/{model_engine_count} 条模型记录带有 1X2、亚盘或大小球盘口锚定。",
+            current=market_anchor_count,
+            target=max(1, model_engine_count),
+        ),
+        _dashboard_model_governance_check(
+            "holdout_calibration",
+            "样本外校准",
+            calibration_status,
+            "校准通过发布评估" if calibration_status == "ok" else "校准仍在验证",
+            (
+                f"已结算可评估样本 {calibration_sample_count} 场；"
+                f"学习改善：{'是' if learning_improved else '否'}；市场基准：{'已跑赢' if beats_market else '未跑赢'}。"
+                "历史回测工具使用留出集分桶校准，实时面板展示当前样本的走步/分桶校准状态。"
+            ),
+            current=calibration_sample_count,
+            target=20,
+        ),
+        _dashboard_model_governance_check(
+            "clv_tracking",
+            "CLV 追踪",
+            clv_status,
+            "已追踪收盘价" if clv_available_count > 0 else "等待收盘价对齐",
+            (
+                f"{clv_available_count}/{clv_tracked_count} 条可计算收盘价价值；"
+                f"平均 CLV {_percent_text(avg_clv_return) or '暂无'}，正 CLV {_percent_text(positive_clv_rate) or '暂无'}。"
+            ),
+            current=clv_available_count,
+            target=max(1, clv_tracked_count),
+        ),
+    ]
+    blocked_or_missing = sum(1 for item in checks if item["status"] in {"blocked", "missing"})
+    warning_count = sum(1 for item in checks if item["status"] == "warning")
+    if model_engine_count <= 0:
+        status = "model_evidence_missing"
+        severity = "warning"
+        title = "模型证据待入库"
+        detail = "当前台账没有可解析的模型引擎输出，无法审计 rho、盘口锚定和模型降级情况。"
+    elif blocked_or_missing:
+        status = "professional_audit_collecting"
+        severity = "warning"
+        title = "专业模型审计采集中"
+        detail = "Dixon-Coles、校准和 CLV 审计已经接入，但部分样本还缺少历史 rho 或收盘价证据。"
+    elif warning_count:
+        status = "professional_audit_watch"
+        severity = "warning"
+        title = "专业模型审计观察中"
+        detail = "模型引擎证据已入库，仍需更多历史样本、校准样本或 CLV 样本通过发布评估。"
+    else:
+        status = "professional_audit_ready"
+        severity = "ok"
+        title = "专业模型审计已接入"
+        detail = "历史 rho、校准评估、市场基准和 CLV 追踪均有可审计样本。"
+
+    return {
+        "status": status,
+        "severity": severity,
+        "title": title,
+        "detail": detail,
+        "summary": {
+            "record_count": record_count,
+            "model_engine_count": model_engine_count,
+            "model_available_count": available_count,
+            "historical_rho_count": historical_rho_count,
+            "market_anchor_count": market_anchor_count,
+            "fallback_count": fallback_count,
+            "calibration_sample_count": calibration_sample_count,
+            "clv_tracked_count": clv_tracked_count,
+            "clv_available_count": clv_available_count,
+            "avg_clv_return": round_metric(avg_clv_return, 6),
+            "positive_clv_rate": round_metric(positive_clv_rate, 6),
+        },
+        "rho": {
+            "source_counts": dict(rho_source_counts),
+            "avg_rho": round_metric(_dashboard_average(rho_values), 6),
+            "historical_avg_rho": round_metric(_dashboard_average(historical_rho_values), 6),
+            "historical_avg_sample_count": round_metric(_dashboard_average(historical_sample_counts), 2),
+        },
+        "calibration": {
+            "status": learning_effectiveness.get("status") or "",
+            "title": learning_effectiveness.get("title") or "",
+            "detail": learning_effectiveness.get("detail") or "",
+            "sample_count": calibration_sample_count,
+            "learning_improved": learning_improved,
+            "beats_market": beats_market,
+            "active_probability_source": probability_governance.get("active_source_label") or "",
+            "shadow_method": shadow_recalibration.get("method") or "",
+            "shadow_status": shadow_recalibration.get("status") or "",
+            "walk_forward_sample_count": int(shadow_quality.get("walk_forward_sample_count") or 0),
+            "walk_forward_brier_delta": shadow_quality.get("walk_forward_brier_delta"),
+        },
+        "clv": {
+            "status": clv_tracking.get("status") or "",
+            "available_count": clv_available_count,
+            "positive_clv_rate": round_metric(positive_clv_rate, 6),
+            "avg_clv_return": round_metric(avg_clv_return, 6),
+        },
+        "method_counts": dict(method_counts),
+        "version_counts": dict(version_counts),
+        "checks": checks,
+        "rule": "模型审计只读取已入库的 model_engine、结算校准指标和赔率快照，不会创建新的推荐信号。",
+    }
+
+
 def _dashboard_production_readiness(
     *,
     prediction_kpis: dict[str, Any],
@@ -12274,7 +12515,7 @@ def _dashboard_production_readiness(
     shadow_walk_blocked = bool(shadow_walk_gate and str(shadow_walk_gate.get("status") or "") == "blocked")
     contract_status = str(dashboard_contract.get("status") or "")
     contract_ok = contract_status not in {"error", "missing"}
-    is_toy = total_predictions <= 0
+    is_empty_loop = total_predictions <= 0
     production_ready = bool(
         total_predictions > 0
         and settled_count >= 20
@@ -12399,11 +12640,11 @@ def _dashboard_production_readiness(
     )
     blocked_count = sum(1 for item in gates if item["status"] == "blocked")
     warning_count = sum(1 for item in gates if item["status"] == "warning")
-    if is_toy:
-        status = "toy_empty"
+    if is_empty_loop:
+        status = "prediction_loop_empty"
         severity = "error"
-        title = "仍是空壳玩具"
-        detail = "当前没有预测样本，既不能推荐，也无法回测验证。"
+        title = "预测闭环未启动"
+        detail = "当前没有预测样本，既不能发布推荐信号，也无法进行回测验证。"
     elif production_ready:
         status = "production_candidate"
         severity = "ok"
@@ -12412,9 +12653,9 @@ def _dashboard_production_readiness(
     else:
         status = "paper_validation"
         severity = "warning" if blocked_count else "info"
-        title = "不是空壳玩具，但未达生产推荐"
+        title = "预测闭环运行中，未达推荐发布标准"
         detail = (
-            f"不是空壳玩具：已有 {total_predictions} 条预测和 {settled_count} 条回测；"
+            f"已有 {total_predictions} 条预测和 {settled_count} 条回测；"
             f"但仍有 {blocked_count} 个阻断项、{warning_count} 个观察项，正式推荐应保持关闭。"
         )
     return {
@@ -12422,11 +12663,12 @@ def _dashboard_production_readiness(
         "severity": severity,
         "title": title,
         "detail": detail,
-        "is_toy": is_toy,
+        "is_toy": is_empty_loop,
+        "is_empty_loop": is_empty_loop,
         "production_ready": production_ready,
         "recommended_action": (
             "start_prediction_loop"
-            if is_toy
+            if is_empty_loop
             else "allow_formal_recommendations"
             if production_ready
             else "continue_paper_validation_or_retrain"
@@ -12543,10 +12785,10 @@ def _dashboard_prediction_accountability(
     ]
     blocked_count = sum(1 for item in checks if item["status"] == "blocked")
     if total_predictions <= 0:
-        status = "toy_empty"
+        status = "prediction_loop_empty"
         severity = "error"
         title = "没有预测闭环"
-        conclusion = "仍是玩具：没有预测样本，无法回测。"
+        conclusion = "没有预测样本，无法回测。"
     elif formal_count <= 0:
         status = "active_paper_validation"
         severity = "warning" if blocked_count else "info"
@@ -14149,6 +14391,11 @@ def dashboard_match_detail(
         strategy_state=strategy_state,
     )
     odds_snapshot = _dashboard_match_odds_snapshot(record, market_db_path=market_db_path)
+    clv_tracking = snapshot_store.closing_line_value_for_records(
+        [record],
+        db_path=market_db_path,
+        limit=1,
+    )
     match_context = _dashboard_context_with_leisu_snapshot_enrichment(record, odds_snapshot=odds_snapshot)
     detail_odds_coverage = {
         "snapshot_count": odds_snapshot.get("snapshot_count") or 0,
@@ -14169,6 +14416,19 @@ def dashboard_match_detail(
                 "at_utc": odds_snapshot.get("latest_fetched_at_utc") or "",
             }
         )
+    clv_record = (clv_tracking.get("records") or [{}])[0] if isinstance(clv_tracking, dict) else {}
+    clv = clv_record.get("clv") if isinstance(clv_record, dict) and isinstance(clv_record.get("clv"), dict) else {}
+    if clv.get("status") == "available":
+        timeline.append(
+            {
+                "title": "CLV 收盘价",
+                "detail": (
+                    f"推荐价 {clv.get('prediction_decimal_odds')} · 收盘价 {clv.get('closing_decimal_odds')} · "
+                    f"CLV {_percent_text(clv.get('clv_return')) or '暂无'}"
+                ),
+                "at_utc": clv.get("latest_closing_snapshot_utc") or "",
+            }
+        )
 
     snapshot_coverage = snapshot_store.market_snapshot_coverage_by_match(db_path=market_db_path)
     record_row = _dashboard_prediction_row(
@@ -14186,6 +14446,7 @@ def dashboard_match_detail(
         "record": record_row,
         "match_context": match_context,
         "odds_snapshot": odds_snapshot,
+        "clv_tracking": clv_tracking,
         "evidence": _dashboard_record_evidence(
             record,
             strategy_state,
@@ -14398,6 +14659,17 @@ def dashboard_snapshot(
         snapshot_coverage=context_snapshot_coverage,
         market_db_path=market_db_path,
     )
+    clv_tracking = snapshot_store.closing_line_value_for_records(
+        full_prediction_records,
+        db_path=market_db_path,
+        limit=min(bounded_limit, 30),
+        allow_fuzzy_match=False,
+    )
+    model_governance = _dashboard_model_governance(
+        full_prediction_records,
+        learning_effectiveness=learning_effectiveness,
+        clv_tracking=clv_tracking,
+    )
     dashboard_contract = _dashboard_contract_health(
         prediction_kpis=prediction_kpis,
         learning_effectiveness=learning_effectiveness,
@@ -14443,6 +14715,8 @@ def dashboard_snapshot(
         "decision_audit": decision_audit,
         "learning_diagnostics": learning_diagnostics,
         "learning_effectiveness": learning_effectiveness,
+        "model_governance": model_governance,
+        "clv_tracking": clv_tracking,
         "backtest_curve": backtest_curve,
         "prediction_quality": prediction_quality,
         "adaptive_learning_plan": adaptive_learning_plan,

@@ -40,6 +40,10 @@ const REASON_LABELS: Record<string, string> = {
   large_handicap_requires_backtest: "大盘口需回测",
   multi_bookmaker_snapshot_missing: "缺少多公司赔率",
   awaiting_reanalysis_after_snapshot: "赔率已补齐待复算",
+  prediction_decimal_odds_required: "缺少记录赔率",
+  matching_market_snapshots_missing: "缺少匹配收盘价",
+  snapshot_times_missing: "快照时间缺失",
+  pre_kickoff_closing_snapshots_missing: "缺少开赛前快照",
   shadow_prediction_reference_only: "影子预测仅用于对照回测",
   lineup_context_missing: "阵容信息不足",
   no_value: "无正价值",
@@ -1133,6 +1137,160 @@ function learningEffectivenessView(snapshot: DashboardSnapshot): DashboardView["
     ],
     deploymentVerdict: deploymentVerdictView(effectiveness),
     bandRows
+  };
+}
+
+function modelGovernanceView(snapshot: DashboardSnapshot): DashboardView["modelGovernance"] {
+  const governance = snapshot.model_governance;
+  if (!governance) {
+    return {
+      severity: "warning",
+      tone: "caution",
+      title: "等待专业模型审计",
+      detail: "后端尚未返回模型治理摘要，暂时只能查看基础模型质量和回测走势。",
+      methodText: "方法待确认",
+      ruleText: "模型审计只读取已入库样本、结算指标和赔率快照。",
+      metrics: [
+        { label: "模型证据", value: "0", caption: "等待 model_engine 入库", tone: "caution" },
+        { label: "历史 rho", value: "0/0", caption: "等待历史联赛样本", tone: "neutral" },
+        { label: "校准样本", value: "0", caption: "等待结算样本", tone: "neutral" },
+        { label: "平均 CLV", value: "—", caption: "等待收盘价", tone: "neutral" }
+      ],
+      checkRows: []
+    };
+  }
+  const summary = governance.summary;
+  const methodText = Object.entries(governance.method_counts || {})
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 2)
+    .map(([method, count]) => `${method}:${count}`)
+    .join(" · ") || "方法待确认";
+  return {
+    severity: governance.severity,
+    tone: toneFromSeverity(governance.severity),
+    title: governance.title,
+    detail: governance.detail,
+    methodText,
+    ruleText: governance.rule || "模型审计只读取已入库样本、结算指标和赔率快照。",
+    metrics: [
+      {
+        label: "模型证据",
+        value: `${summary.model_engine_count}/${summary.record_count}`,
+        caption: `${summary.model_available_count} 条可审计`,
+        tone: summary.model_engine_count > 0 ? "good" : "caution"
+      },
+      {
+        label: "历史 rho",
+        value: `${summary.historical_rho_count}/${summary.model_engine_count}`,
+        caption: `平均 ${formatSignedDecimal(governance.rho?.historical_avg_rho)}`,
+        tone: summary.historical_rho_count > 0 ? "good" : "caution"
+      },
+      {
+        label: "校准样本",
+        value: String(summary.calibration_sample_count ?? 0),
+        caption: `${governance.calibration?.learning_improved ? "优于原模型" : "待证明"} · ${governance.calibration?.beats_market ? "跑赢市场" : "未跑赢市场"}`,
+        tone: governance.calibration?.learning_improved && governance.calibration?.beats_market ? "good" : summary.calibration_sample_count > 0 ? "caution" : "neutral"
+      },
+      {
+        label: "平均 CLV",
+        value: formatSignedPercent(summary.avg_clv_return),
+        caption: `正 CLV ${formatPercent(summary.positive_clv_rate)}`,
+        tone: summary.avg_clv_return !== null && summary.avg_clv_return > 0 ? "good" : summary.avg_clv_return !== null && summary.avg_clv_return < 0 ? "bad" : "neutral"
+      }
+    ],
+    checkRows: (governance.checks || []).map((check) => {
+      const ratio = clampedRatio(check.ratio);
+      return {
+        key: check.key,
+        label: check.label,
+        title: check.title,
+        detail: check.detail,
+        statusText: statusText(check.status),
+        progressText: check.key === "clv_tracking" ? `${check.current ?? 0}/${check.target ?? 0}` : metricProgressText(check.current, check.target),
+        width: `${Math.max(4, Math.min(100, (ratio ?? 0) * 100))}%`,
+        tone: toneFromSeverity(check.status)
+      };
+    })
+  };
+}
+
+function clvTrackingView(snapshot: DashboardSnapshot): DashboardView["clvTracking"] {
+  const tracking = snapshot.clv_tracking;
+  if (!tracking) {
+    return {
+      severity: "warning",
+      tone: "caution",
+      title: "等待 CLV 追踪",
+      detail: "后端尚未返回收盘价价值追踪，暂时无法比较推荐价和收盘价。",
+      ruleText: "CLV 只读取持久化赔率快照。",
+      metrics: [
+        { label: "可计算", value: "0/0", caption: "等待收盘价", tone: "neutral" },
+        { label: "正 CLV", value: "—", caption: "暂无样本", tone: "neutral" },
+        { label: "平均 CLV", value: "—", caption: "暂无样本", tone: "neutral" },
+        { label: "跳过", value: "0", caption: "缺少赔率或队名", tone: "neutral" }
+      ],
+      recordRows: []
+    };
+  }
+  const severity: DashboardView["clvTracking"]["severity"] =
+    tracking.available_count > 0 ? "ok" : tracking.tracked_count > 0 ? "warning" : "missing";
+  const positiveRate = tracking.positive_clv_rate;
+  const avgClv = tracking.avg_clv_return;
+  return {
+    severity,
+    tone: toneFromSeverity(severity),
+    title: tracking.available_count > 0 ? "CLV 收盘价追踪" : "等待收盘价对齐",
+    detail: `${tracking.available_count}/${tracking.tracked_count} 条样本可计算收盘价价值；正 CLV ${formatPercent(positiveRate)}，平均 CLV ${formatSignedPercent(avgClv)}。`,
+    ruleText: tracking.rule || "CLV 只读取持久化赔率快照。",
+    metrics: [
+      {
+        label: "可计算",
+        value: `${tracking.available_count}/${tracking.tracked_count}`,
+        caption: `${tracking.record_count} 条进入检查`,
+        tone: tracking.available_count > 0 ? "good" : "caution"
+      },
+      {
+        label: "正 CLV",
+        value: formatPercent(positiveRate),
+        caption: `${tracking.positive_clv_count} 条优于收盘价`,
+        tone: positiveRate !== null && positiveRate >= 0.5 ? "good" : positiveRate !== null ? "caution" : "neutral"
+      },
+      {
+        label: "平均 CLV",
+        value: formatSignedPercent(avgClv),
+        caption: "推荐价相对收盘价",
+        tone: avgClv !== null && avgClv > 0 ? "good" : avgClv !== null && avgClv < 0 ? "bad" : "neutral"
+      },
+      {
+        label: "跳过",
+        value: String(tracking.skipped_count ?? 0),
+        caption: "缺少队名或记录赔率",
+        tone: tracking.skipped_count > 0 ? "caution" : "good"
+      }
+    ],
+    recordRows: (tracking.records || []).slice(0, 8).map((record) => {
+      const clv = record.clv || { status: "unavailable" };
+      const clvReturn = clv.clv_return ?? null;
+      const tone: KpiCard["tone"] = clv.status !== "available"
+        ? "neutral"
+        : clvReturn !== null && clvReturn > 0
+          ? "good"
+          : clvReturn !== null && clvReturn < 0
+            ? "bad"
+            : "neutral";
+      return {
+        id: String(record.record_id ?? record.record_key ?? `${record.home_team}-${record.away_team}-${record.selection}`),
+        matchup: `${record.home_team || "主队"} 对 ${record.away_team || "客队"}`,
+        marketText: marketLabel(record.market),
+        selectionText: record.selection || record.selection_key || "—",
+        priceText: clv.status === "available"
+          ? `${formatOdds(clv.prediction_decimal_odds)} → ${formatOdds(clv.closing_decimal_odds)}`
+          : reasonLabel(clv.reason || clv.status || "unavailable"),
+        clvText: clv.status === "available" ? formatSignedPercent(clvReturn) : "—",
+        timeText: clv.latest_closing_snapshot_utc || "等待快照",
+        tone
+      };
+    })
   };
 }
 
@@ -2469,6 +2627,33 @@ function oddsBookmakerGroups(rows: OddsSnapshotRowView[]): OddsSnapshotBookmaker
   });
 }
 
+function matchClvView(detail: DashboardMatchDetail): MatchDetailView["clvTracking"] {
+  const tracking = detail.clv_tracking;
+  const record = (tracking?.records || [])[0];
+  const clv = record?.clv;
+  if (!clv || clv.status !== "available") {
+    return {
+      title: "等待收盘价",
+      detail: clv?.reason ? reasonLabel(clv.reason) : "本场暂未匹配到可用于 CLV 的收盘价快照。",
+      priceText: "—",
+      clvText: "—",
+      timeText: "等待快照",
+      tone: "neutral"
+    };
+  }
+  const clvReturn = clv.clv_return ?? null;
+  const tone: KpiCard["tone"] =
+    clvReturn !== null && clvReturn > 0 ? "good" : clvReturn !== null && clvReturn < 0 ? "bad" : "neutral";
+  return {
+    title: clvReturn !== null && clvReturn > 0 ? "推荐价优于收盘价" : clvReturn !== null && clvReturn < 0 ? "推荐价弱于收盘价" : "推荐价接近收盘价",
+    detail: `${clv.closing_bookmaker_count ?? 0} 家公司收盘共识，窗口 ${clv.closing_window_minutes ?? 30} 分钟。`,
+    priceText: `推荐 ${formatOdds(clv.prediction_decimal_odds)} / 收盘 ${formatOdds(clv.closing_decimal_odds)}`,
+    clvText: formatSignedPercent(clvReturn),
+    timeText: clv.latest_closing_snapshot_utc || "—",
+    tone
+  };
+}
+
 export function buildMatchDetailView(detail: DashboardMatchDetail): MatchDetailView {
   const record = detail.record;
   const metrics = detail.evidence.core_metrics;
@@ -2510,6 +2695,7 @@ export function buildMatchDetailView(detail: DashboardMatchDetail): MatchDetailV
       warnings: flagLabels(detail.match_context.lineup.warnings || [])
     },
     oddsSummary: oddsSummary(detail),
+    clvTracking: matchClvView(detail),
     oddsRows,
     oddsGroups: oddsBookmakerGroups(oddsRows),
     hasQueryControls: false
@@ -2598,6 +2784,8 @@ export function buildDashboardView(snapshot: DashboardSnapshot): DashboardView {
     ),
     oddsAudit: auditBlock(audit.odds, audit.odds.covered_count, audit.odds.ledger_count),
     learningDiagnostics: learningDiagnosticsView(snapshot),
+    modelGovernance: modelGovernanceView(snapshot),
+    clvTracking: clvTrackingView(snapshot),
     learningEffectiveness: learningEffectivenessView(snapshot),
     backtestCurve: backtestCurveView(snapshot),
     predictionQuality: predictionQualityView(snapshot),

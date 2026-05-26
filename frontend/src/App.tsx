@@ -705,6 +705,58 @@ function LearningEffectivenessPanel({ view }: { view: ReturnType<typeof buildDas
   );
 }
 
+function ModelGovernancePanel({ view }: { view: ReturnType<typeof buildDashboardView> }) {
+  const governance = view.modelGovernance;
+  const iconMap = [BrainCircuit, Gauge, ListChecks, TrendingUp];
+  return (
+    <section className={`panel model-governance tone-${governance.tone}`} aria-label="专业模型审计">
+      <div className="learning-diagnostics-head">
+        <div className="panel-title">
+          <BrainCircuit size={18} />
+          <h2>专业模型审计</h2>
+          <span className={`status-pill ${governance.tone === "good" ? "good" : governance.tone === "caution" ? "caution" : governance.tone === "bad" ? "bad" : "neutral"}`}>
+            {governance.title}
+          </span>
+        </div>
+        <p>{governance.detail}</p>
+      </div>
+      <div className="model-method-line">
+        <span>{governance.methodText}</span>
+        <em>{governance.ruleText}</em>
+      </div>
+      <div className="diagnostic-metrics model-governance-metrics">
+        {governance.metrics.map((metric, index) => {
+          const Icon = iconMap[index] ?? ListChecks;
+          return (
+            <div className={`diagnostic-metric tone-${metric.tone}`} key={metric.label}>
+              <Icon size={16} />
+              <span>{metric.label}</span>
+              <strong>{metric.value}</strong>
+              <em>{metric.caption}</em>
+            </div>
+          );
+        })}
+      </div>
+      <div className="readiness-gate-list model-governance-list">
+        {governance.checkRows.map((check) => (
+          <div className={`readiness-gate-row tone-${check.tone}`} key={check.key}>
+            <div>
+              <span>{check.label}</span>
+              <strong>{check.title}</strong>
+              <em>{check.detail}</em>
+            </div>
+            <b>{check.statusText}</b>
+            <i>
+              <span style={{ width: check.width }} />
+            </i>
+            <small>{check.progressText}</small>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function AdaptiveLearningPlanPanel({ view }: { view: ReturnType<typeof buildDashboardView> }) {
   const plan = view.adaptiveLearningPlan;
   const metricIcons = [ListChecks, AlertTriangle, Database, BrainCircuit];
@@ -751,6 +803,53 @@ function AdaptiveLearningPlanPanel({ view }: { view: ReturnType<typeof buildDash
           </div>
         )) : (
           <div className="empty-state compact">暂无自动修正动作，继续收集预测和结算样本。</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ClvTrackingPanel({ view }: { view: ReturnType<typeof buildDashboardView> }) {
+  const clv = view.clvTracking;
+  const iconMap = [Target, CheckCircle2, TrendingUp, AlertTriangle];
+  return (
+    <section className={`panel clv-tracking tone-${clv.tone}`} aria-label="CLV 收盘价追踪">
+      <div className="learning-diagnostics-head">
+        <div className="panel-title">
+          <TrendingUp size={18} />
+          <h2>CLV 追踪</h2>
+          <span className={`status-pill ${clv.tone === "good" ? "good" : clv.tone === "caution" ? "caution" : clv.tone === "bad" ? "bad" : "neutral"}`}>
+            {clv.title}
+          </span>
+        </div>
+        <p>{clv.detail}</p>
+      </div>
+      <div className="diagnostic-metrics clv-metrics">
+        {clv.metrics.map((metric, index) => {
+          const Icon = iconMap[index] ?? ListChecks;
+          return (
+            <div className={`diagnostic-metric tone-${metric.tone}`} key={metric.label}>
+              <Icon size={16} />
+              <span>{metric.label}</span>
+              <strong>{metric.value}</strong>
+              <em>{metric.caption}</em>
+            </div>
+          );
+        })}
+      </div>
+      <div className="clv-record-list">
+        {clv.recordRows.length ? clv.recordRows.map((row) => (
+          <div className={`clv-record-row tone-${row.tone}`} key={row.id}>
+            <div>
+              <strong>{row.matchup}</strong>
+              <span>{row.marketText} · {row.selectionText}</span>
+            </div>
+            <b>{row.priceText}</b>
+            <em>{row.clvText}</em>
+            <time>{row.timeText.includes("T") ? localTime(row.timeText) : row.timeText}</time>
+          </div>
+        )) : (
+          <div className="empty-state compact">{clv.ruleText}</div>
         )}
       </div>
     </section>
@@ -1241,6 +1340,19 @@ function MatchDetailPanel({
         <Metric label="开赛时间" value={localTime(detail.record.kickoff_utc_plus_8)} />
         <Metric label="比分状态" value={view.scoreStatusText} />
         <Metric label="期望倍数" value={formatOdds(detail.evidence.core_metrics.expected_multiplier)} />
+      </div>
+      <div className={`clv-detail-card ${toneClass(view.clvTracking.tone)}`}>
+        <div>
+          <TrendingUp size={16} />
+          <span>CLV 收盘价</span>
+          <strong>{view.clvTracking.title}</strong>
+        </div>
+        <p>{view.clvTracking.detail}</p>
+        <div className="clv-detail-metrics">
+          <b>{view.clvTracking.priceText}</b>
+          <strong>{view.clvTracking.clvText}</strong>
+          <time>{view.clvTracking.timeText.includes("T") ? localTime(view.clvTracking.timeText) : view.clvTracking.timeText}</time>
+        </div>
       </div>
       <div className="probability-stack">
         {view.probabilityRows.map((row) => (
@@ -1923,6 +2035,7 @@ function OverviewSection({
 function ModelSection({ view }: { view: DashboardViewModel }) {
   return (
     <div className="dashboard-section">
+      <ModelGovernancePanel view={view} />
       <LearningEffectivenessPanel view={view} />
       <BacktestCurvePanel view={view} />
       <PredictionQualityPanel view={view} />
@@ -1996,6 +2109,7 @@ function DataSection({
     <div className="dashboard-section">
       <section className="data-grid">
         <SnapshotCoveragePanel view={view} />
+        <ClvTrackingPanel view={view} />
         <ContextCoveragePanel view={view} />
         <StrategyPanel snapshot={snapshot} />
       </section>

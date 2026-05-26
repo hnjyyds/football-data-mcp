@@ -4806,7 +4806,7 @@ def test_dashboard_snapshot_exposes_production_readiness_verdict(tmp_path):
     assert readiness["summary"]["settled_count"] == 24
     assert readiness["summary"]["roi"] < 0
     assert {gate["key"]: gate["status"] for gate in readiness["gates"]}["learning_effectiveness"] == "blocked"
-    assert "不是空壳玩具" in readiness["detail"]
+    assert "已有 24 条预测和 24 条回测" in readiness["detail"]
 
 
 def test_dashboard_snapshot_does_not_fuzzy_scan_snapshots_for_each_ledger_row(monkeypatch, tmp_path):
@@ -4879,6 +4879,25 @@ def test_dashboard_match_detail_exposes_context_and_odds_snapshots(tmp_path):
                 "recommendation": "immediate_bet",
                 "stake_level": "small",
                 "raw": {
+                    "model_engine": {
+                        "available": True,
+                        "version": "scoreline-model-v1",
+                        "method": "dixon_coles_market_anchored_grid",
+                        "dixon_coles": {
+                            "rho": -0.08,
+                            "rho_source": "historical_league_mle",
+                            "historical_rho": {
+                                "rho": -0.08,
+                                "sample_count": 120,
+                            },
+                        },
+                        "fitted_market_targets": {
+                            "moneyline_1x2": True,
+                            "asian_handicap": True,
+                            "over_under": False,
+                        },
+                        "model_quality": {"fallback_used": False},
+                    },
                     "match_context": {
                         "venue": {"name": "资料体育场", "city": "上海"},
                         "lineup": {
@@ -5000,10 +5019,16 @@ def test_dashboard_match_detail_exposes_context_and_odds_snapshots(tmp_path):
     assert detail["odds_snapshot"]["snapshot_count"] == 2
     assert detail["odds_snapshot"]["bookmaker_count"] == 2
     assert detail["odds_snapshot"]["latest_rows"][0]["bookmaker"] == "公司B"
+    assert detail["clv_tracking"]["available_count"] == 1
+    assert detail["clv_tracking"]["records"][0]["clv"]["closing_decimal_odds"] == 1.88
     assert detail["evidence"]["market_candidates"][0]["selection"] == "资料主队 -0.5"
     assert ledger_row["odds_snapshot_count"] == 2
     assert ledger_row["odds_bookmaker_count"] == 2
     assert ledger_row["has_odds_snapshot"] is True
+    assert snapshot["clv_tracking"]["available_count"] == 1
+    assert snapshot["model_governance"]["summary"]["model_engine_count"] == 1
+    assert snapshot["model_governance"]["summary"]["historical_rho_count"] == 1
+    assert snapshot["model_governance"]["rho"]["source_counts"]["historical_league_mle"] == 1
 
 
 def test_dashboard_match_detail_matches_leisu_alias_snapshot_names(tmp_path):

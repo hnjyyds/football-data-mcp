@@ -385,6 +385,12 @@ def market_snapshot_coverage_for_records(
     return coverage
 
 
+def _snapshot_row_dict(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    item["raw"] = json.loads(item.pop("raw_json") or "{}")
+    return item
+
+
 def find_market_snapshots(
     home_team: str,
     away_team: str,
@@ -392,9 +398,23 @@ def find_market_snapshots(
     league: str | None = None,
     db_path: str | None = None,
     limit: int = 500,
+    allow_fuzzy: bool = True,
 ) -> list[dict[str, Any]]:
     with _connect(db_path) as conn:
         ensure_schema(conn)
+        exact_rows = conn.execute(
+            """
+            SELECT * FROM market_snapshots
+            WHERE home_team = ? AND away_team = ?
+            ORDER BY fetched_at_utc DESC, id DESC
+            LIMIT ?
+            """,
+            (str(home_team or ""), str(away_team or ""), limit),
+        ).fetchall()
+        if exact_rows:
+            return [_snapshot_row_dict(row) for row in exact_rows]
+        if not allow_fuzzy:
+            return []
         rows = conn.execute(
             """
             SELECT * FROM market_snapshots
@@ -406,8 +426,7 @@ def find_market_snapshots(
     matches = []
     fuzzy_matches: list[tuple[float, tuple[str, str, str, str, str, str], dict[str, Any]]] = []
     for row in rows:
-        item = dict(row)
-        item["raw"] = json.loads(item.pop("raw_json") or "{}")
+        item = _snapshot_row_dict(row)
         if _team_matches(home_team, item["home_team"]) and _team_matches(away_team, item["away_team"]):
             matches.append(item)
             continue
@@ -536,6 +555,23 @@ def _line_matches(expected: float | None, candidate: Any, *, tolerance: float = 
     return abs(expected_value - candidate_value) <= tolerance
 
 
+def _market_type_aliases(market_type: str) -> set[str]:
+    normalized = str(market_type or "").strip().lower()
+    if normalized in {"1x2", "h2h", "moneyline"}:
+        return {"1x2", "h2h", "moneyline"}
+    if normalized in {"asian_handicap", "spreads", "spread"}:
+        return {"asian_handicap", "spreads", "spread"}
+    if normalized in {"over_under", "totals", "total"}:
+        return {"over_under", "totals", "total"}
+    return {normalized} if normalized else set()
+
+
+def _market_type_matches(expected: str, candidate: Any) -> bool:
+    expected_aliases = _market_type_aliases(expected)
+    candidate_aliases = _market_type_aliases(str(candidate or ""))
+    return bool(expected_aliases and candidate_aliases and expected_aliases.intersection(candidate_aliases))
+
+
 def closing_line_value_for_pick(
     *,
     home_team: str,
@@ -549,6 +585,7 @@ def closing_line_value_for_pick(
     prediction_time_utc: str | None = None,
     closing_window_minutes: int = 30,
     db_path: str | None = None,
+    allow_fuzzy_match: bool = True,
 ) -> dict[str, Any]:
     prediction_price = float(prediction_decimal_odds or 0.0)
     if prediction_price <= 1.0:
@@ -559,11 +596,18 @@ def closing_line_value_for_pick(
         }
 
     resolved_selection = _resolve_market_selection(selection, home_team, away_team)
-    rows = find_market_snapshots(home_team, away_team, league=league, db_path=db_path, limit=20000)
+    rows = find_market_snapshots(
+        home_team,
+        away_team,
+        league=league,
+        db_path=db_path,
+        limit=20000,
+        allow_fuzzy=allow_fuzzy_match,
+    )
     market_rows = [
         row
         for row in rows
-        if str(row.get("market_type") or "") == str(market_type or "")
+        if _market_type_matches(str(market_type or ""), row.get("market_type"))
         and _selection_matches(resolved_selection, str(row.get("selection") or ""))
         and _line_matches(line, row.get("line"))
         and float(row.get("decimal_odds") or 0.0) > 1.0
@@ -654,7 +698,7 @@ def closing_line_value_for_pick(
             default="",
         ),
         "prediction_snapshot_count": len(prediction_snapshot_rows),
-        "rule": "Positive clv_return means the recorded recommendation price was better than the closing consensus for the same market and selection.",
+        "rule": "CLV 为正表示记录推荐价优于同一盘口方向的收盘共识价。",
     }
 
 
@@ -698,6 +742,7 @@ def closing_line_value_for_records(
     db_path: str | None = None,
     closing_window_minutes: int = 30,
     limit: int = 100,
+    allow_fuzzy_match: bool = True,
 ) -> dict[str, Any]:
     bounded_records = records[: max(1, min(int(limit or 100), 1000))]
     tracked = []
@@ -721,6 +766,7 @@ def closing_line_value_for_records(
             prediction_time_utc=str(record.get("created_at_utc") or "") or None,
             closing_window_minutes=closing_window_minutes,
             db_path=db_path,
+            allow_fuzzy_match=allow_fuzzy_match,
         )
         tracked.append(
             {
@@ -750,7 +796,7 @@ def closing_line_value_for_records(
         "positive_clv_rate": round(positive_count / len(returns), 6) if returns else None,
         "avg_clv_return": round(sum(returns) / len(returns), 6) if returns else None,
         "records": tracked,
-        "rule": "CLV is computed from persisted market snapshots only; missing or post-kickoff-only prices remain unavailable.",
+        "rule": "CLV 只读取已持久化的赔率快照；缺少匹配盘口或只有开赛后价格时保持不可用。",
     }
 
 

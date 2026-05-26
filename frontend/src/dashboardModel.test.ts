@@ -1061,14 +1061,14 @@ describe("dashboard model", () => {
     expect(view.hasQueryControls).toBe(false);
   });
 
-  it("surfaces production readiness so users can distinguish paper validation from a toy", () => {
+  it("surfaces production readiness without raw internal labels", () => {
     const view = buildDashboardView({
       ...snapshot,
       production_readiness: {
         status: "paper_validation",
         severity: "warning",
-        title: "不是空壳玩具，但未达推荐发布",
-        detail: "不是空壳玩具：已有 24 条预测和 24 条回测；但仍有 3 个阻断项，推荐发布应保持关闭。",
+        title: "预测闭环运行中，未达推荐发布标准",
+        detail: "已有 24 条预测和 24 条回测；但仍有 3 个阻断项，推荐发布应保持关闭。",
         is_toy: false,
         production_ready: false,
         recommended_action: "continue_paper_validation_or_retrain",
@@ -1121,6 +1121,138 @@ describe("dashboard model", () => {
       "学习效果:阻断"
     ]);
     expect(JSON.stringify(view.productionReadiness)).not.toMatch(/paper_validation|continue_paper_validation_or_retrain|blocked|玩具|空壳|重训|生产推荐/);
+  });
+
+  it("surfaces professional model governance and CLV tracking", () => {
+    const view = buildDashboardView({
+      ...snapshot,
+      model_governance: {
+        status: "professional_audit_watch",
+        severity: "warning",
+        title: "专业模型审计观察中",
+        detail: "模型引擎证据已入库，仍需更多历史样本和 CLV 样本。",
+        summary: {
+          record_count: 3,
+          model_engine_count: 2,
+          model_available_count: 2,
+          historical_rho_count: 1,
+          market_anchor_count: 2,
+          fallback_count: 0,
+          calibration_sample_count: 24,
+          clv_tracked_count: 2,
+          clv_available_count: 1,
+          avg_clv_return: 0.04,
+          positive_clv_rate: 1
+        },
+        rho: {
+          source_counts: { historical_league_mle: 1, market_snapshot_grid_fit: 1 },
+          avg_rho: -0.03,
+          historical_avg_rho: -0.08,
+          historical_avg_sample_count: 120
+        },
+        calibration: {
+          status: "learning_improving",
+          title: "学习校准有效",
+          detail: "学习后概率优于原始模型和市场隐含概率。",
+          sample_count: 24,
+          learning_improved: true,
+          beats_market: true,
+          active_probability_source: "学习校准",
+          shadow_method: "beta_binomial_probability_band_recalibrator_v1",
+          shadow_status: "shadow_model_watch_only",
+          walk_forward_sample_count: 18,
+          walk_forward_brier_delta: 0.004
+        },
+        clv: {
+          status: "ok",
+          available_count: 1,
+          positive_clv_rate: 1,
+          avg_clv_return: 0.04
+        },
+        method_counts: { dixon_coles_market_anchored_grid: 2 },
+        version_counts: { "scoreline-model-v1": 2 },
+        checks: [
+          {
+            key: "dixon_coles_rho",
+            label: "Dixon-Coles rho",
+            status: "warning",
+            title: "等待历史 rho 样本",
+            detail: "1/2 条模型记录使用历史联赛 MLE rho；其余记录继续使用盘口网格拟合。",
+            current: 1,
+            target: 2,
+            ratio: 0.5
+          },
+          {
+            key: "clv_tracking",
+            label: "CLV 追踪",
+            status: "ok",
+            title: "已追踪收盘价",
+            detail: "1/2 条可计算收盘价价值；平均 CLV +4.0%，正 CLV 100.0%。",
+            current: 1,
+            target: 2,
+            ratio: 0.5
+          }
+        ],
+        rule: "模型审计只读取已入库的 model_engine、结算校准指标和赔率快照，不会创建新的推荐信号。"
+      },
+      clv_tracking: {
+        status: "ok",
+        method: "closing_line_value_batch_tracking_v1",
+        record_count: 2,
+        tracked_count: 2,
+        skipped_count: 0,
+        available_count: 1,
+        positive_clv_count: 1,
+        positive_clv_rate: 1,
+        avg_clv_return: 0.04,
+        records: [
+          {
+            record_id: 7,
+            record_key: "rec-7",
+            home_team: "主队A",
+            away_team: "客队A",
+            market: "asian_handicap",
+            selection: "主队A -0.5",
+            selection_key: "home_cover",
+            status: "available",
+            clv: {
+              status: "available",
+              method: "closing_line_value_from_market_snapshots_v1",
+              prediction_decimal_odds: 2.0,
+              closing_decimal_odds: 1.92,
+              clv_return: 0.041667,
+              closing_bookmaker_count: 2,
+              closing_window_minutes: 30,
+              latest_closing_snapshot_utc: "2026-05-25T11:55:00+00:00"
+            }
+          }
+        ],
+        rule: "CLV 只读取已持久化的赔率快照；缺少匹配盘口或只有开赛后价格时保持不可用。"
+      }
+    } as DashboardSnapshot);
+
+    expect(view.modelGovernance.metrics.map((item) => `${item.label}:${item.value}:${item.caption}`)).toEqual([
+      "模型证据:2/3:2 条可审计",
+      "历史 rho:1/2:平均 -0.0800",
+      "校准样本:24:优于原模型 · 跑赢市场",
+      "平均 CLV:+4.0%:正 CLV 100.0%"
+    ]);
+    expect(view.modelGovernance.checkRows.map((row) => `${row.label}:${row.statusText}:${row.progressText}`)).toEqual([
+      "Dixon-Coles rho:注意:1/2",
+      "CLV 追踪:通过:1/2"
+    ]);
+    expect(view.clvTracking.metrics.map((item) => `${item.label}:${item.value}`)).toEqual([
+      "可计算:1/2",
+      "正 CLV:100.0%",
+      "平均 CLV:+4.0%",
+      "跳过:0"
+    ]);
+    expect(view.clvTracking.recordRows[0]).toEqual(expect.objectContaining({
+      matchup: "主队A 对 客队A",
+      marketText: "亚盘",
+      priceText: "2.00 → 1.92",
+      clvText: "+4.2%"
+    }));
   });
 
   it("surfaces probability governance when market guardrail is active", () => {
@@ -1246,7 +1378,7 @@ describe("dashboard model", () => {
       production_readiness: {
         status: "paper_validation",
         severity: "warning",
-        title: "不是空壳玩具，但未达推荐发布",
+        title: "预测闭环运行中，未达推荐发布标准",
         detail: "走步验证仍有阻断项。",
         is_toy: false,
         production_ready: false,
