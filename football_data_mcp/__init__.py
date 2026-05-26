@@ -1,0 +1,1 @@
+"""Football Data MCP package."""
