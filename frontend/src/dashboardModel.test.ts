@@ -962,9 +962,10 @@ describe("dashboard model", () => {
       "已回测",
       "学习状态"
     ]);
-    expect(view.dashboardSections.map((section) => section.key)).toEqual(["overview", "model", "signals", "data"]);
+    expect(view.dashboardSections.map((section) => section.key)).toEqual(["overview", "production", "model", "signals", "data"]);
     expect(view.dashboardSections.map((section) => `${section.label}:${section.badge}`)).toEqual([
       "概览:3 预测",
+      "生产:未发布",
       "模型:24 样本",
       "信号:1 发布",
       "数据:139 快照"
@@ -1121,6 +1122,192 @@ describe("dashboard model", () => {
       "学习效果:阻断"
     ]);
     expect(JSON.stringify(view.productionReadiness)).not.toMatch(/paper_validation|continue_paper_validation_or_retrain|blocked|玩具|空壳|重训|生产推荐/);
+  });
+
+  it("builds a production command center from release gates and auto learning state", () => {
+    const view = buildDashboardView({
+      ...snapshot,
+      generated_at_utc: "2026-05-26T11:30:00+00:00",
+      kpis: {
+        ...snapshot.kpis,
+        strategy_sample_count: 99,
+        live_calibration_active: true
+      },
+      prediction_kpis: {
+        ...snapshot.prediction_kpis,
+        total_count: 185,
+        recommended_count: 0,
+        observation_count: 185,
+        settled_count: 101,
+        open_count: 84,
+        hit_rate: 0.346535,
+        roi: -0.225
+      },
+      strategy_state: {
+        ...snapshot.strategy_state,
+        status: "live_calibration_active",
+        active: true,
+        sample_count: 99,
+        min_live_sample_count: 20
+      },
+      clv_tracking: {
+        status: "ok",
+        method: "closing_line_value_batch_tracking_v1",
+        record_count: 30,
+        tracked_count: 30,
+        skipped_count: 0,
+        available_count: 8,
+        positive_clv_count: 3,
+        positive_clv_rate: 0.375,
+        avg_clv_return: -0.002771,
+        records: [],
+        rule: "CLV 只读取持久化赔率快照。"
+      },
+      auto_learning_state: {
+        enabled: true,
+        run_count: 9,
+        interval_seconds: 120,
+        timezone_name: "Asia/Shanghai",
+        limit: 80,
+        asian_window_minutes: 10,
+        last_started_at_utc: "2026-05-26T11:19:21+00:00",
+        last_finished_at_utc: "2026-05-26T11:21:20+00:00",
+        last_error: null,
+        last_result_summary: {
+          saved_record_count: 0,
+          asian_record_count: 0,
+          asian_learning_observation_record_count: 0,
+          asian_shadow_prediction_record_count: 0,
+          settled_count: 1,
+          shadow_settled_count: 2,
+          market_snapshot_sync: {
+            enabled: true,
+            provider: "leisu",
+            status: "error",
+            saved_snapshot_count: 0,
+            generated_snapshot_count: 0,
+            candidate_match_count: 0,
+            probed_match_count: 0,
+            accessible_match_count: 0,
+            promotable_match_count: 0,
+            db_path: "/data/football_data_mcp_snapshots.sqlite3"
+          },
+          snapshot_reanalysis: {
+            enabled: true,
+            status: "ok",
+            candidate_count: 2,
+            reanalyzed_count: 0,
+            formal_promoted_count: 0,
+            still_observation_count: 0,
+            failed_count: 0,
+            skipped_count: 2,
+            results: [
+              {
+                record_id: 170,
+                ledger_id: "recommendation:170",
+                status: "skipped",
+                reason: "outside_near_kickoff_window",
+                minutes_to_kickoff: 163.9
+              }
+            ]
+          }
+        },
+        last_market_snapshot_sync: {
+          enabled: true,
+          provider: "leisu",
+          status: "error",
+          saved_snapshot_count: 0,
+          generated_snapshot_count: 0,
+          candidate_match_count: 0,
+          probed_match_count: 0,
+          accessible_match_count: 0,
+          promotable_match_count: 0,
+          db_path: "/data/football_data_mcp_snapshots.sqlite3"
+        }
+      },
+      production_readiness: {
+        status: "paper_validation",
+        severity: "warning",
+        title: "预测闭环运行中，未达推荐发布标准",
+        detail: "已有 185 条预测和 101 条回测；但仍有 4 个阻断项，正式推荐应保持关闭。",
+        is_toy: false,
+        production_ready: false,
+        recommended_action: "continue_paper_validation_or_retrain",
+        summary: {
+          prediction_total: 185,
+          settled_count: 101,
+          open_count: 84,
+          hit_rate: 0.346535,
+          roi: -0.225,
+          learning_improved: true,
+          beats_market: true,
+          clv_available_count: 8,
+          clv_tracked_count: 30,
+          avg_clv_return: -0.002771,
+          positive_clv_rate: 0.375,
+          clv_ready: false,
+          formal_recommendation_enabled: false,
+          blocked_count: 4,
+          warning_count: 0
+        },
+        gates: [
+          {
+            key: "paper_roi",
+            label: "纸面收益",
+            status: "blocked",
+            title: "纸面收益为负",
+            detail: "当前纸面收益率 -22.5%；负收益时只能继续采样或优化。",
+            current: -0.225,
+            target: 0,
+            ratio: 0
+          },
+          {
+            key: "closing_line_value",
+            label: "CLV 收盘价",
+            status: "blocked",
+            title: "收盘价样本不足",
+            detail: "已对齐 8/30 条收盘价；平均 CLV -0.3%。",
+            current: 8,
+            target: 20,
+            ratio: 0.4
+          },
+          {
+            key: "recommendation_gate",
+            label: "推荐闸门",
+            status: "blocked",
+            title: "推荐发布关闭",
+            detail: "正式推荐闸门尚未开放。",
+            current: 0,
+            target: 1,
+            ratio: 0
+          }
+        ]
+      }
+    } as unknown as DashboardSnapshot);
+
+    expect(view.productionOps.headline).toBe("推荐发布关闭");
+    expect(view.productionOps.statusCards.map((item) => `${item.label}:${item.value}:${item.caption}`)).toEqual([
+      "自动学习:运行中:2 分钟轮询 · 10 分钟窗口",
+      "最近运行:已完成:新增 0 条样本",
+      "下一轮:约 2 分钟内:Asia/Shanghai",
+      "发布门禁:关闭:4 个阻断项"
+    ]);
+    expect(view.productionOps.blockerRows.map((item) => `${item.label}:${item.title}:${item.statusText}`)).toEqual([
+      "验证收益:验证收益为负:阻断",
+      "CLV 收盘价:收盘价样本不足:阻断",
+      "发布评估:推荐发布关闭:阻断"
+    ]);
+    expect(view.productionOps.workflowRows.map((item) => `${item.label}:${item.statusText}:${item.detail}`)).toEqual([
+      "抓赛程:通过:自动学习已开启，候选上限 80 场。",
+      "抓赔率:异常:赔率快照抓取失败，已保存 0 条。",
+      "赛前窗口:注意:2 个候选不在开赛前 10 分钟窗口。",
+      "观察样本:观察:上一轮新增 0 条观察样本。",
+      "赛果结算:通过:上一轮结算 1 条推荐和 2 条影子样本。",
+      "实时校准:通过:实时校准中 99。",
+      "CLV 追踪:阻断:8/30 条可计算收盘价价值。",
+      "发布门禁:阻断:推荐发布保持关闭。"
+    ]);
+    expect(JSON.stringify(view.productionOps)).not.toMatch(/paper_validation|outside_near_kickoff_window|formal|blocked|重训|toy/);
   });
 
   it("surfaces professional model governance and CLV tracking", () => {

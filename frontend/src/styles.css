@@ -101,7 +101,7 @@ h2 {
   top: 0;
   z-index: 5;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 10px;
   margin: 6px 0 14px;
   padding: 8px;
@@ -746,6 +746,145 @@ h2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.production-command,
+.auto-workflow-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.production-command-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+}
+
+.production-command-head h2 {
+  margin-top: 4px;
+  color: #14201c;
+  font-size: clamp(24px, 3vw, 42px);
+  line-height: 1.08;
+}
+
+.production-command-head p {
+  max-width: 980px;
+  margin-top: 10px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.55;
+}
+
+.production-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.production-blocker-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workflow-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workflow-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 7px 9px;
+  align-items: start;
+  min-height: 120px;
+  border: 1px solid #e1e7ef;
+  border-radius: 8px;
+  background: #fbfdff;
+  padding: 11px;
+}
+
+.workflow-dot {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #64748b;
+}
+
+.workflow-row.tone-good .workflow-dot {
+  background: #087f5b;
+}
+
+.workflow-row.tone-caution .workflow-dot {
+  background: #d97706;
+}
+
+.workflow-row.tone-bad .workflow-dot {
+  background: #dc2626;
+}
+
+.workflow-row strong,
+.workflow-row p,
+.workflow-row em {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.workflow-row strong {
+  display: block;
+  color: #17202a;
+  font-size: 14px;
+}
+
+.workflow-row p {
+  margin-top: 5px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+.workflow-row b {
+  border-radius: 999px;
+  background: #e7edf5;
+  color: #475569;
+  font-size: 12px;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.workflow-row.tone-good b {
+  background: #dff7ec;
+  color: #087f5b;
+}
+
+.workflow-row.tone-caution b {
+  background: #fff3d6;
+  color: #9a6700;
+}
+
+.workflow-row.tone-bad b {
+  background: #ffe4dc;
+  color: #b42318;
+}
+
+.workflow-row em {
+  grid-column: 2 / -1;
+  align-self: end;
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.production-lower-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
 }
 
 .contract-section-row,
@@ -3416,6 +3555,10 @@ th {
   .contract-section-list,
   .readiness-gate-list,
   .data-source-grid,
+  .production-status-grid,
+  .production-blocker-list,
+  .workflow-grid,
+  .production-lower-grid,
   .adaptive-action-list {
     grid-template-columns: 1fr;
   }
@@ -3510,6 +3653,10 @@ th {
     width: 100%;
     white-space: normal;
     overflow-wrap: anywhere;
+  }
+
+  .production-command-head {
+    grid-template-columns: 1fr;
   }
 
   .panel-title .status-pill {
