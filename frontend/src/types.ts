@@ -1488,6 +1488,38 @@ export interface ProductionReadinessView {
   }>;
 }
 
+export interface ProductionOpsView {
+  tone: KpiCard["tone"];
+  headline: string;
+  detail: string;
+  releaseText: string;
+  statusCards: Array<{
+    label: string;
+    value: string;
+    caption: string;
+    tone: KpiCard["tone"];
+  }>;
+  blockerRows: Array<{
+    key: string;
+    label: string;
+    title: string;
+    detail: string;
+    statusText: string;
+    progressText: string;
+    width: string;
+    tone: KpiCard["tone"];
+  }>;
+  workflowRows: Array<{
+    key: string;
+    label: string;
+    title: string;
+    detail: string;
+    statusText: string;
+    metaText: string;
+    tone: KpiCard["tone"];
+  }>;
+}
+
 export interface PredictionAccountabilityView {
   tone: KpiCard["tone"];
   headline: string;
@@ -1625,7 +1657,7 @@ export interface MatchDetailView extends RecordDetailView {
   oddsGroups: OddsSnapshotBookmakerGroup[];
 }
 
-export type DashboardSectionKey = "overview" | "model" | "signals" | "data";
+export type DashboardSectionKey = "overview" | "production" | "model" | "signals" | "data";
 
 export interface DashboardSection {
   key: DashboardSectionKey;
@@ -1665,6 +1697,7 @@ export interface DashboardView {
   adaptiveLearningPlan: AdaptiveLearningPlanView;
   dashboardContract: DashboardContractView;
   productionReadiness: ProductionReadinessView;
+  productionOps: ProductionOpsView;
   predictionAccountability: PredictionAccountabilityView;
   recommendationOpportunity: RecommendationOpportunityView;
   recommendationFunnel: RecommendationFunnelView[];

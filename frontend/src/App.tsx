@@ -68,6 +68,7 @@ const LEDGER_FILTERS: Array<{ key: LedgerFilter; label: string }> = [
 
 const SECTION_ICONS: Record<DashboardSectionKey, typeof Target> = {
   overview: Target,
+  production: Rocket,
   model: Gauge,
   signals: TrendingUp,
   data: Database
@@ -547,6 +548,79 @@ function ProductionReadinessPanel({ view }: { view: ReturnType<typeof buildDashb
               <span style={{ width: gate.width }} />
             </i>
             <small>{gate.progressText}</small>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ProductionCommandCenterPanel({ view }: { view: DashboardViewModel }) {
+  const ops = view.productionOps;
+  const cardIcons = [Activity, Clock, RefreshCw, ShieldCheck];
+  return (
+    <section className={`panel production-command tone-${ops.tone}`} aria-label="生产就绪中心">
+      <div className="production-command-head">
+        <div>
+          <span className="eyebrow">生产就绪中心</span>
+          <h2>{ops.headline}</h2>
+          <p>{ops.detail}</p>
+        </div>
+        <span className={`status-pill ${ops.tone === "good" ? "good" : ops.tone === "bad" ? "bad" : ops.tone === "caution" ? "caution" : "neutral"}`}>
+          {ops.releaseText}
+        </span>
+      </div>
+      <div className="production-status-grid">
+        {ops.statusCards.map((card, index) => {
+          const Icon = cardIcons[index] ?? Activity;
+          return (
+            <div className={`diagnostic-metric tone-${card.tone}`} key={card.label}>
+              <Icon size={16} />
+              <span>{card.label}</span>
+              <strong>{card.value}</strong>
+              <em>{card.caption}</em>
+            </div>
+          );
+        })}
+      </div>
+      <div className="production-blocker-list">
+        {ops.blockerRows.length ? ops.blockerRows.map((row) => (
+          <div className={`readiness-gate-row tone-${row.tone}`} key={row.key}>
+            <div>
+              <span>{row.label}</span>
+              <strong>{row.title}</strong>
+              <em>{row.detail}</em>
+            </div>
+            <b>{row.statusText}</b>
+            <i>
+              <span style={{ width: row.width }} />
+            </i>
+            <small>{row.progressText}</small>
+          </div>
+        )) : <div className="empty-state compact">暂无阻断项，推荐发布可进入候选确认。</div>}
+      </div>
+    </section>
+  );
+}
+
+function AutoLearningWorkflowPanel({ view }: { view: DashboardViewModel }) {
+  return (
+    <section className="panel auto-workflow-panel" aria-label="自动学习流水">
+      <div className="panel-title">
+        <ListChecks size={18} />
+        <h2>自动学习流水</h2>
+        <span className="status-pill neutral">赛前 10 分钟</span>
+      </div>
+      <div className="workflow-grid">
+        {view.productionOps.workflowRows.map((row) => (
+          <div className={`workflow-row tone-${row.tone}`} key={row.key}>
+            <span className="workflow-dot" />
+            <div>
+              <strong>{row.label}</strong>
+              <p>{row.detail}</p>
+            </div>
+            <b>{row.statusText}</b>
+            <em>{row.metaText}</em>
           </div>
         ))}
       </div>
@@ -2057,6 +2131,19 @@ function OverviewSection({
   );
 }
 
+function ProductionSection({ view }: { view: DashboardViewModel }) {
+  return (
+    <div className="dashboard-section">
+      <ProductionCommandCenterPanel view={view} />
+      <AutoLearningWorkflowPanel view={view} />
+      <section className="production-lower-grid">
+        <ProductionReadinessPanel view={view} />
+        <PredictionAccountabilityPanel view={view} />
+      </section>
+    </div>
+  );
+}
+
 function ModelSection({ view }: { view: DashboardViewModel }) {
   return (
     <div className="dashboard-section">
@@ -2313,6 +2400,7 @@ export function App() {
               onSelectRecommendation={(record) => navigateToMatch(`recommendation:${record.id}`)}
             />
           )}
+          {activeSection === "production" && <ProductionSection view={view} />}
           {activeSection === "model" && <ModelSection view={view} />}
           {activeSection === "signals" && (
             <SignalsSection

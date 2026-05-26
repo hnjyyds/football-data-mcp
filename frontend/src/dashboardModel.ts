@@ -432,6 +432,20 @@ function stringValue(value: unknown, fallback = "—"): string {
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function boolValue(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "off"].includes(normalized)) return false;
+  }
+  return null;
+}
+
 function matchupLabel(value: unknown): string {
   return stringValue(value).replace(/\s+vs\s+/gi, " 对 ");
 }
@@ -2000,6 +2014,197 @@ function productionReadinessView(snapshot: DashboardSnapshot): DashboardView["pr
   };
 }
 
+function intervalText(seconds: number | null): string {
+  if (seconds === null || seconds <= 0) return "未配置";
+  if (seconds < 60) return `${Math.round(seconds)} 秒`;
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return `${minutes} 分钟`;
+}
+
+function isoAfter(left: unknown, right: unknown): boolean {
+  const leftText = typeof left === "string" ? left : "";
+  const rightText = typeof right === "string" ? right : "";
+  const leftDate = new Date(leftText);
+  const rightDate = new Date(rightText);
+  if (Number.isNaN(leftDate.getTime())) return false;
+  if (Number.isNaN(rightDate.getTime())) return true;
+  return leftDate.getTime() > rightDate.getTime();
+}
+
+function workflowStatusText(status: "ok" | "info" | "warning" | "blocked" | "error" | "missing"): string {
+  return statusText(status);
+}
+
+function productionWorkflowRow(
+  key: string,
+  label: string,
+  status: "ok" | "info" | "warning" | "blocked" | "error" | "missing",
+  detail: string,
+  metaText = ""
+): DashboardView["productionOps"]["workflowRows"][number] {
+  return {
+    key,
+    label,
+    title: label,
+    detail: customerCopy(detail),
+    statusText: workflowStatusText(status),
+    metaText,
+    tone: toneFromSeverity(status)
+  };
+}
+
+function productionOpsView(snapshot: DashboardSnapshot): DashboardView["productionOps"] {
+  const readiness = snapshot.production_readiness || fallbackProductionReadiness(snapshot);
+  const summary = readiness.summary || fallbackProductionReadiness(snapshot).summary;
+  const auto = objectValue(snapshot.auto_learning_state);
+  const resultSummary = objectValue(auto.last_result_summary);
+  const marketSync = Object.keys(objectValue(resultSummary.market_snapshot_sync)).length
+    ? objectValue(resultSummary.market_snapshot_sync)
+    : objectValue(auto.last_market_snapshot_sync);
+  const reanalysis = Object.keys(objectValue(resultSummary.snapshot_reanalysis)).length
+    ? objectValue(resultSummary.snapshot_reanalysis)
+    : objectValue(auto.last_snapshot_reanalysis);
+  const enabled = boolValue(auto.enabled) ?? false;
+  const intervalSeconds = numeric(auto.interval_seconds) ?? 120;
+  const asianWindow = numeric(auto.asian_window_minutes) ?? 10;
+  const limit = numeric(auto.limit) ?? 0;
+  const runCount = numeric(auto.run_count) ?? 0;
+  const timezone = stringValue(auto.timezone_name, "本地时区");
+  const lastRunning = isoAfter(auto.last_started_at_utc, auto.last_finished_at_utc);
+  const savedRecords = numeric(resultSummary.saved_record_count) ?? numeric(resultSummary.asian_record_count) ?? 0;
+  const settledCount = numeric(resultSummary.settled_count) ?? 0;
+  const shadowSettledCount = numeric(resultSummary.shadow_settled_count) ?? 0;
+  const marketStatus = stringValue(marketSync.status, "");
+  const marketSaved = numeric(marketSync.saved_snapshot_count) ?? 0;
+  const skippedCount = numeric(reanalysis.skipped_count) ?? 0;
+  const clvAvailable = summary.clv_available_count ?? snapshot.clv_tracking?.available_count ?? 0;
+  const clvTracked = summary.clv_tracked_count ?? snapshot.clv_tracking?.tracked_count ?? 0;
+  const clvReady = summary.clv_ready ?? false;
+  const blockedCount = summary.blocked_count ?? 0;
+  const releaseOpen = Boolean(readiness.production_ready);
+  const autoStatus = enabled ? (auto.last_error ? "异常" : "运行中") : "已关闭";
+  const lastRunValue = lastRunning ? "进行中" : runCount > 0 ? "已完成" : "等待首轮";
+  const nextRunValue = !enabled ? "已暂停" : lastRunning ? "等待本轮结束" : `约 ${intervalText(intervalSeconds)}内`;
+  const releaseText = releaseOpen ? "开放" : "关闭";
+  const blockerRows = (readiness.gates || [])
+    .filter((gate) => gate.status !== "ok")
+    .map((gate, index) => {
+      const ratio = clampedRatio(gate.ratio);
+      return {
+        key: `${index}-${gate.key || gate.label || "gate"}`,
+        label: customerCopy(gate.label || "闸门"),
+        title: customerCopy(gate.title || "待确认"),
+        detail: customerCopy(gate.detail || ""),
+        statusText: statusText(gate.status),
+        progressText: readinessProgressText(gate.current, gate.target, gate.label || "", gate.key),
+        width: `${Math.max(4, Math.min(100, (ratio ?? 0) * 100))}%`,
+        tone: toneFromSeverity(gate.status)
+      };
+    });
+
+  const workflowRows = [
+    productionWorkflowRow(
+      "schedule",
+      "抓赛程",
+      enabled ? "ok" : "error",
+      enabled ? `自动学习已开启，候选上限 ${limit || "—"} 场。` : "自动学习已关闭，系统不会扫描新比赛。",
+      `${runCount} 轮`
+    ),
+    productionWorkflowRow(
+      "odds",
+      "抓赔率",
+      marketStatus === "error" ? "error" : marketSaved > 0 ? "ok" : "warning",
+      marketStatus === "error"
+        ? `赔率快照抓取失败，已保存 ${marketSaved} 条。`
+        : marketSaved > 0
+          ? `上一轮保存 ${marketSaved} 条赔率快照。`
+          : "上一轮没有生成可入库赔率快照。",
+      stringValue(marketSync.provider, "赔率源")
+    ),
+    productionWorkflowRow(
+      "near_kickoff",
+      "赛前窗口",
+      skippedCount > 0 ? "warning" : "ok",
+      skippedCount > 0
+        ? `${skippedCount} 个候选不在开赛前 ${asianWindow} 分钟窗口。`
+        : `仅分析未来 ${asianWindow} 分钟内的比赛。`,
+      `${asianWindow} 分钟`
+    ),
+    productionWorkflowRow(
+      "paper_records",
+      "观察样本",
+      savedRecords > 0 ? "ok" : "info",
+      `上一轮新增 ${savedRecords} 条观察样本。`,
+      `${snapshot.prediction_kpis.observation_count ?? 0} 总样本`
+    ),
+    productionWorkflowRow(
+      "settlement",
+      "赛果结算",
+      settledCount + shadowSettledCount > 0 ? "ok" : "info",
+      `上一轮结算 ${settledCount} 条推荐和 ${shadowSettledCount} 条影子样本。`,
+      `${snapshot.prediction_kpis.settled_count ?? 0} 已回测`
+    ),
+    productionWorkflowRow(
+      "calibration",
+      "实时校准",
+      snapshot.strategy_state.active ? "ok" : "warning",
+      snapshot.strategy_state.active
+        ? `实时校准中 ${snapshot.strategy_state.sample_count}。`
+        : `样本收集中 ${snapshot.strategy_state.sample_count}/${snapshot.strategy_state.min_live_sample_count}。`,
+      "学习阈值"
+    ),
+    productionWorkflowRow(
+      "clv",
+      "CLV 追踪",
+      clvReady ? "ok" : "blocked",
+      `${clvAvailable}/${clvTracked} 条可计算收盘价价值。`,
+      formatSignedPercent(summary.avg_clv_return ?? snapshot.clv_tracking?.avg_clv_return ?? null)
+    ),
+    productionWorkflowRow(
+      "release",
+      "发布门禁",
+      releaseOpen ? "ok" : "blocked",
+      releaseOpen ? "推荐发布可以开放。" : "推荐发布保持关闭。",
+      `${blockedCount} 个阻断项`
+    )
+  ];
+
+  return {
+    tone: releaseOpen ? "good" : blockedCount > 0 ? "caution" : "neutral",
+    headline: releaseOpen ? "推荐发布开放" : "推荐发布关闭",
+    detail: customerCopy(readiness.detail || ""),
+    releaseText,
+    statusCards: [
+      {
+        label: "自动学习",
+        value: autoStatus,
+        caption: `${intervalText(intervalSeconds)}轮询 · ${asianWindow} 分钟窗口`,
+        tone: enabled && !auto.last_error ? "good" : "bad"
+      },
+      {
+        label: "最近运行",
+        value: lastRunValue,
+        caption: lastRunning ? "等待本轮结束" : `新增 ${savedRecords} 条样本`,
+        tone: lastRunning ? "caution" : runCount > 0 ? "good" : "neutral"
+      },
+      {
+        label: "下一轮",
+        value: nextRunValue,
+        caption: timezone,
+        tone: enabled ? "neutral" : "bad"
+      },
+      {
+        label: "发布门禁",
+        value: releaseText,
+        caption: `${blockedCount} 个阻断项`,
+        tone: releaseOpen ? "good" : "bad"
+      }
+    ],
+    blockerRows,
+    workflowRows
+  };
+}
+
 function fallbackPredictionAccountability(snapshot: DashboardSnapshot): NonNullable<DashboardSnapshot["prediction_accountability"]> {
   const kpis = snapshot.prediction_kpis;
   const total = kpis?.total_count ?? 0;
@@ -2728,6 +2933,13 @@ function dashboardSections(snapshot: DashboardSnapshot): DashboardView["dashboar
       tone: productionTone
     },
     {
+      key: "production",
+      label: "生产",
+      description: "上线门禁、自动学习和阻断项",
+      badge: snapshot.production_readiness?.production_ready ? "可发布" : "未发布",
+      tone: productionTone
+    },
+    {
       key: "model",
       label: "模型",
       description: "学习质量、回测走势和分桶校准",
@@ -2792,6 +3004,7 @@ export function buildDashboardView(snapshot: DashboardSnapshot): DashboardView {
     adaptiveLearningPlan: adaptiveLearningPlanView(snapshot),
     dashboardContract: dashboardContractView(snapshot),
     productionReadiness: productionReadinessView(snapshot),
+    productionOps: productionOpsView(snapshot),
     predictionAccountability: predictionAccountabilityView(snapshot),
     recommendationOpportunity: recommendationOpportunityView(snapshot),
     recommendationFunnel: recommendationFunnel(snapshot),
