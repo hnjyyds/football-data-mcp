@@ -895,11 +895,11 @@ function auditHealthCard(item: DashboardDecisionAudit["health_items"][number]): 
   const progressValue = clampedRatio(item.ratio);
   return {
     key: item.key,
-    label: item.label,
+    label: customerCopy(item.label),
     status: item.status,
     tone: toneFromSeverity(item.status),
-    title: item.title,
-    detail: item.detail,
+    title: customerCopy(item.title),
+    detail: customerCopy(item.detail),
     metricText: metricProgressText(item.current, item.target),
     progressText: metricProgressText(item.current, item.target),
     progressValue
@@ -920,8 +920,8 @@ function auditBlock(
   return {
     status: status.status,
     tone: toneFromSeverity(status.status),
-    title: status.title,
-    detail: status.detail,
+    title: customerCopy(status.title),
+    detail: customerCopy(status.detail),
     progressText: metricProgressText(current, target),
     progressValue: target && current !== null ? clampedRatio(current / target) : null
   };
@@ -1007,8 +1007,8 @@ function learningDiagnosticsView(snapshot: DashboardSnapshot): DashboardView["le
   return {
     severity: diagnostics.severity,
     tone: toneFromSeverity(diagnostics.severity),
-    title: diagnostics.title,
-    detail: diagnostics.detail,
+    title: customerCopy(diagnostics.title),
+    detail: customerCopy(diagnostics.detail),
     metrics: [
       {
         label: "可回测样本",
@@ -1095,7 +1095,7 @@ function learningEffectivenessView(snapshot: DashboardSnapshot): DashboardView["
             : "neutral";
     return {
       key: band.key,
-      label: band.label || "概率段",
+      label: customerCopy(band.label || "概率段"),
       sampleText: `${sampleCount} 场`,
       hitRateText: formatPercent(hitRate),
       avgProbabilityText: formatPercent(avgProbability),
@@ -1110,9 +1110,9 @@ function learningEffectivenessView(snapshot: DashboardSnapshot): DashboardView["
   return {
     severity: effectiveness.severity,
     tone: toneFromSeverity(effectiveness.severity),
-    title: effectiveness.title,
-    detail: effectiveness.detail,
-    metricRule: effectiveness.metric_rule || "Brier 分数越低越好；校准误差越低越好。",
+    title: customerCopy(effectiveness.title),
+    detail: customerCopy(effectiveness.detail),
+    metricRule: customerCopy(effectiveness.metric_rule || "Brier 分数越低越好；校准误差越低越好。"),
     calibrationHealth: calibrationHealthView(effectiveness.calibration_health),
     shadowRecalibration: shadowRecalibrationView(effectiveness.shadow_recalibration),
     probabilityGovernance: probabilityGovernanceView(effectiveness.probability_governance),
@@ -1182,10 +1182,10 @@ function modelGovernanceView(snapshot: DashboardSnapshot): DashboardView["modelG
   return {
     severity: governance.severity,
     tone: toneFromSeverity(governance.severity),
-    title: governance.title,
-    detail: governance.detail,
+    title: customerCopy(governance.title),
+    detail: customerCopy(governance.detail),
     methodText,
-    ruleText: governance.rule || "模型审计只读取已入库样本、结算指标和赔率快照。",
+    ruleText: customerCopy(governance.rule || "模型审计只读取已入库样本、结算指标和赔率快照。"),
     metrics: [
       {
         label: "模型证据",
@@ -1216,9 +1216,9 @@ function modelGovernanceView(snapshot: DashboardSnapshot): DashboardView["modelG
       const ratio = clampedRatio(check.ratio);
       return {
         key: check.key,
-        label: check.label,
-        title: check.title,
-        detail: check.detail,
+        label: customerCopy(check.label),
+        title: customerCopy(check.title),
+        detail: customerCopy(check.detail),
         statusText: statusText(check.status),
         progressText: check.key === "clv_tracking" ? `${check.current ?? 0}/${check.target ?? 0}` : metricProgressText(check.current, check.target),
         width: `${Math.max(4, Math.min(100, (ratio ?? 0) * 100))}%`,
@@ -1453,8 +1453,8 @@ function calibrationHealthView(
 ): DashboardView["learningEffectiveness"]["calibrationHealth"] {
   if (!health) return undefined;
   return {
-    title: health.title || "校准健康",
-    detail: health.detail || "等待后端返回校准健康说明。",
+    title: customerCopy(health.title || "校准健康"),
+    detail: customerCopy(health.detail || "等待后端返回校准健康说明。"),
     actionText: calibrationActionText(health.recommended_action),
     modelText: metaModelText(health.meta_model),
     candidateBandsText: candidateBandsText(health.candidate_band_keys),
@@ -1483,7 +1483,7 @@ function shadowRecalibrationView(
     roi: null
   };
   return {
-    title: shadow.title || "影子重校准模型",
+    title: customerCopy(shadow.title || "影子重校准模型"),
     detail: customerCopy(shadow.detail || "该模型只进入持续验证，不会直接开放推荐发布。"),
     methodText: recalibrationMethodText(shadow.method),
     brierText: `${formatDecimal(quality.learned_brier_score)} -> ${formatDecimal(quality.recalibrated_brier_score)}`,
@@ -1516,8 +1516,8 @@ function probabilityGovernanceView(
 ): DashboardView["learningEffectiveness"]["probabilityGovernance"] {
   if (!governance) return undefined;
   return {
-    title: governance.title || "概率治理",
-    detail: governance.detail || "后端正在比较学习概率、原始模型和市场基准。",
+    title: customerCopy(governance.title || "概率治理"),
+    detail: customerCopy(governance.detail || "后端正在比较学习概率、原始模型和市场基准。"),
     activeText: `当前使用：${governance.active_source_label || "治理后概率"}`,
     policyText: governancePolicyText(governance.policy_mode),
     thresholdText: governanceThresholdText(governance.threshold_probability_field),
@@ -1647,7 +1647,7 @@ function predictionQualityView(snapshot: DashboardSnapshot): DashboardView["pred
     const adjustment = segment.adjustment || null;
     const weight = numeric(adjustment?.weight_multiplier);
     return {
-      label: segment.label || reasonLabel(segment.reason),
+      label: customerCopy(segment.label || reasonLabel(segment.reason)),
       totalText: `${total} 场`,
       settledText: `已回测 ${segment.settled_count || 0} 场`,
       hitRateText: formatPercent(segment.hit_rate),
@@ -1656,8 +1656,8 @@ function predictionQualityView(snapshot: DashboardSnapshot): DashboardView["pred
       avgEdgeText: formatSignedPercent(segment.avg_edge),
       oddsCoverageText: coverageText,
       qualityText: sampleQualityText(segment.sample_quality),
-      adjustmentLabel: adjustment?.label || adjustmentLabel(adjustment?.action),
-      adjustmentDetail: adjustment?.detail || "保持当前采样权重。",
+      adjustmentLabel: customerCopy(adjustment?.label || adjustmentLabel(adjustment?.action)),
+      adjustmentDetail: customerCopy(adjustment?.detail || "保持当前采样权重。"),
       weightText: `权重 ${formatDecimal(weight ?? 1, 2)}`,
       width: `${Math.max(6, Math.min(100, ratio * 100))}%`,
       tone: qualitySegmentTone(segment.tone, segment.roi)
@@ -1667,8 +1667,8 @@ function predictionQualityView(snapshot: DashboardSnapshot): DashboardView["pred
   return {
     severity: quality.severity,
     tone: toneFromSeverity(quality.severity),
-    title: quality.title,
-    detail: quality.detail,
+    title: customerCopy(quality.title),
+    detail: customerCopy(quality.detail),
     metricRows: [
       {
         label: "预测样本",
@@ -1740,10 +1740,10 @@ function adaptiveLearningPlanView(snapshot: DashboardSnapshot): DashboardView["a
     const ratio = target && target > 0 && current !== null ? current / target : action.status === "ok" ? 1 : action.status === "warning" ? 0.5 : 0.12;
     return {
       key: `${index}-${action.label || "修正动作"}`,
-      label: action.label || "修正动作",
-      title: action.title || "待确认",
-      detail: action.detail || "",
-      evidence: action.evidence || "等待证据",
+      label: customerCopy(action.label || "修正动作"),
+      title: customerCopy(action.title || "待确认"),
+      detail: customerCopy(action.detail || ""),
+      evidence: customerCopy(action.evidence || "等待证据"),
       policyEffect: customerCopy(action.policy_effect || "继续验证"),
       statusText: statusText(action.status),
       progressText: adaptiveActionProgressText(action.current, action.target, action.evidence || action.label || ""),
@@ -1753,8 +1753,8 @@ function adaptiveLearningPlanView(snapshot: DashboardSnapshot): DashboardView["a
   });
   return {
     tone: toneFromSeverity(plan.severity),
-    title: plan.title || "自学习修正计划",
-    detail: plan.detail || "后端未返回修正计划说明。",
+    title: customerCopy(plan.title || "自学习修正计划"),
+    detail: customerCopy(plan.detail || "后端未返回修正计划说明。"),
     metrics: [
       {
         label: "动作总数",
@@ -1814,9 +1814,9 @@ function dashboardContractView(snapshot: DashboardSnapshot): DashboardView["dash
   const sectionRows = (contract.sections || []).map((section) => {
     const ratio = clampedRatio(section.ratio);
     return {
-      label: section.label || "契约模块",
-      title: section.title || "待确认",
-      detail: section.detail || "",
+      label: customerCopy(section.label || "契约模块"),
+      title: customerCopy(section.title || "待确认"),
+      detail: customerCopy(section.detail || ""),
       statusText: statusText(section.status),
       progressText: metricProgressText(section.current, section.target),
       width: `${Math.max(4, Math.min(100, (ratio ?? 0) * 100))}%`,
@@ -1825,8 +1825,8 @@ function dashboardContractView(snapshot: DashboardSnapshot): DashboardView["dash
   });
   return {
     tone: toneFromSeverity(contract.severity || contract.status),
-    title: contract.title || "数据契约",
-    detail: contract.detail || "后端未返回契约说明。",
+    title: customerCopy(contract.title || "数据契约"),
+    detail: customerCopy(contract.detail || "后端未返回契约说明。"),
     policyText: formalEnabled ? "推荐发布开放，观察样本继续回测" : "推荐发布暂停，观察样本继续回测",
     metricRows: [
       {
@@ -1858,7 +1858,7 @@ function dashboardContractView(snapshot: DashboardSnapshot): DashboardView["dash
   };
 }
 
-function customerCopy(value: string): string {
+export function customerCopy(value: string): string {
   return value
     .replaceAll("不推荐不等于不预测", "推荐发布受风控保护")
     .replaceAll("不是空壳玩具，但未达生产推荐", "推荐服务验证中")
@@ -2205,6 +2205,264 @@ function productionOpsView(snapshot: DashboardSnapshot): DashboardView["producti
   };
 }
 
+const DATA_SYNC_STATUS_LABELS: Record<string, string> = {
+  ok: "正常",
+  success: "正常",
+  completed: "正常",
+  complete: "正常",
+  partial: "部分受限",
+  warning: "需要关注",
+  error: "抓取失败",
+  failed: "抓取失败",
+  disabled: "已关闭"
+};
+
+const DATA_HEALTH_FLAG_LABELS: Record<string, string> = {
+  leisu_access_waf_challenge: "雷速访问受限",
+  leisu_requires_cookie_or_proxy: "需要雷速登录凭据或代理",
+  outside_near_kickoff_window: "不在赛前分析窗口",
+  multi_bookmaker_snapshot_missing: "缺少多公司赔率快照",
+  matching_market_snapshots_missing: "缺少匹配收盘价",
+  pre_kickoff_closing_snapshots_missing: "缺少开赛前收盘价快照"
+};
+
+function statusCard(
+  label: string,
+  value: string,
+  caption: string,
+  tone: KpiCard["tone"]
+): DashboardView["dataSourceHealth"]["statusCards"][number] {
+  return { label, value, caption, tone };
+}
+
+function dataHealthRow(
+  key: string,
+  label: string,
+  status: "ok" | "info" | "warning" | "blocked" | "error" | "missing",
+  title: string,
+  detail: string,
+  metaText: string,
+  ratio: number | null
+): DashboardView["dataSourceHealth"]["checkRows"][number] {
+  return {
+    key,
+    label,
+    title,
+    detail: customerCopy(detail),
+    statusText: statusText(status),
+    metaText,
+    width: `${Math.max(4, Math.min(100, (ratio ?? (status === "ok" ? 1 : 0.12)) * 100))}%`,
+    tone: toneFromSeverity(status)
+  };
+}
+
+function firstObjectValue(...values: unknown[]): Record<string, unknown> {
+  for (const value of values) {
+    const candidate = objectValue(value);
+    if (Object.keys(candidate).length > 0) return candidate;
+  }
+  return {};
+}
+
+function marketSyncState(snapshot: DashboardSnapshot): Record<string, unknown> {
+  const auto = objectValue(snapshot.auto_learning_state);
+  const resultSummary = objectValue(auto.last_result_summary);
+  return firstObjectValue(
+    objectValue(resultSummary.market_snapshot_sync),
+    auto.last_market_snapshot_sync,
+    snapshot.market_snapshot_summary?.last_sync
+  );
+}
+
+function snapshotReanalysisState(snapshot: DashboardSnapshot): Record<string, unknown> {
+  const auto = objectValue(snapshot.auto_learning_state);
+  const resultSummary = objectValue(auto.last_result_summary);
+  return firstObjectValue(objectValue(resultSummary.snapshot_reanalysis), auto.last_snapshot_reanalysis);
+}
+
+function providerDisplayName(provider: unknown): string {
+  const key = typeof provider === "string" ? provider : "";
+  return PROVIDER_LABELS[key] ?? "赔率源";
+}
+
+function syncStatusLabel(status: unknown, savedCount: number): string {
+  const key = typeof status === "string" ? status : "";
+  if (DATA_SYNC_STATUS_LABELS[key]) return DATA_SYNC_STATUS_LABELS[key];
+  if (savedCount > 0) return "正常";
+  return "等待下一轮";
+}
+
+function syncStatusSeverity(status: unknown, savedCount: number, flagCount: number): "ok" | "info" | "warning" | "error" {
+  if (status === "error" || status === "failed") return "error";
+  if (status === "partial" || status === "warning" || flagCount > 0) return "warning";
+  if (status === "ok" || status === "success" || status === "completed" || status === "complete") return savedCount > 0 ? "ok" : "warning";
+  if (savedCount > 0) return "ok";
+  return "info";
+}
+
+function numberText(value: unknown, fallback = 0): number {
+  return numeric(value) ?? fallback;
+}
+
+function syncCaption(sync: Record<string, unknown>): string {
+  const probed = numberText(sync.probed_match_count);
+  const accessible = numberText(sync.accessible_match_count);
+  const saved = numberText(sync.saved_snapshot_count);
+  if (probed || accessible || saved) {
+    return `探测 ${probed} 场 · 可访问 ${accessible} 场 · 保存 ${saved} 条`;
+  }
+  return "尚未返回最近一轮抓取结果";
+}
+
+function freshnessText(value: unknown, baseValue: unknown): string {
+  const raw = typeof value === "string" ? value : "";
+  if (!raw) return "未返回时间";
+  const date = new Date(raw);
+  const base = new Date(typeof baseValue === "string" ? baseValue : "");
+  if (Number.isNaN(date.getTime())) return "未返回时间";
+  if (Number.isNaN(base.getTime())) return raw;
+  const diffMinutes = Math.max(0, Math.round((base.getTime() - date.getTime()) / 60000));
+  if (diffMinutes < 5) return "刚刚更新";
+  if (diffMinutes < 60) return `${diffMinutes} 分钟前`;
+  const hours = Math.round(diffMinutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.round(hours / 24)} 天前`;
+}
+
+function friendlyFlags(sync: Record<string, unknown>): string[] {
+  const hard = Array.isArray(sync.hard_flags) ? sync.hard_flags : [];
+  const soft = Array.isArray(sync.soft_flags) ? sync.soft_flags : [];
+  return [...hard, ...soft]
+    .map((flag) => typeof flag === "string" ? DATA_HEALTH_FLAG_LABELS[flag] : "")
+    .filter(Boolean)
+    .filter((flag, index, list) => list.indexOf(flag) === index);
+}
+
+function dataSourceHealthView(snapshot: DashboardSnapshot): DashboardView["dataSourceHealth"] {
+  const auto = objectValue(snapshot.auto_learning_state);
+  const marketSummary = snapshot.market_snapshot_summary;
+  const marketSync = marketSyncState(snapshot);
+  const reanalysis = snapshotReanalysisState(snapshot);
+  const intervalSeconds = numeric(auto.interval_seconds) ?? 120;
+  const asianWindow = numeric(auto.asian_window_minutes) ?? 10;
+  const runCount = numeric(auto.run_count) ?? 0;
+  const syncSaved = numberText(marketSync.saved_snapshot_count);
+  const flags = friendlyFlags(marketSync);
+  const syncSeverity = syncStatusSeverity(marketSync.status, syncSaved, flags.length);
+  const ledgerCount = snapshot.prediction_ledger?.length || 0;
+  const coveredCount = (snapshot.prediction_ledger || []).filter((row) => row.has_odds_snapshot || (row.odds_snapshot_count ?? 0) > 0).length;
+  const multiBookmakerCount = (snapshot.prediction_ledger || []).filter((row) => (row.odds_bookmaker_count ?? 0) >= 2).length;
+  const ledgerRatio = ledgerCount ? coveredCount / ledgerCount : null;
+  const ledgerStatus = ledgerCount === 0 ? "info" : coveredCount === ledgerCount ? "ok" : coveredCount > 0 ? "warning" : "blocked";
+  const skippedCount = numberText(reanalysis.skipped_count);
+  const windowStatus = skippedCount > 0 ? "warning" : "ok";
+  const contextCoverage = snapshot.context_coverage;
+  const contextRatios = (contextCoverage?.fields || []).map((field) => field.coverage_ratio ?? 0);
+  const contextRatio = contextRatios.length
+    ? contextRatios.reduce((total, value) => total + value, 0) / contextRatios.length
+    : 0;
+  const contextStatus = contextRatio >= 0.7 ? "ok" : contextRatio > 0 ? "warning" : "missing";
+  const clv = snapshot.clv_tracking;
+  const clvReadiness = objectValue(objectValue(clv).readiness);
+  const clvAvailable = numeric(clvReadiness.current) ?? clv?.available_count ?? 0;
+  const clvTarget = numeric(clvReadiness.target) ?? 30;
+  const clvStatus = clvAvailable >= clvTarget ? "ok" : clvAvailable > 0 ? "blocked" : "blocked";
+  const latestSnapshotText = freshnessText(marketSummary?.latest_fetched_at_utc, snapshot.generated_at_utc);
+  const syncAttemptText = freshnessText(marketSync.at_utc, snapshot.generated_at_utc);
+  const syncCaptionText = syncCaption(marketSync);
+  const syncDetailText = syncCaptionText.startsWith("尚未")
+    ? `${providerDisplayName(marketSync.provider)}${syncCaptionText}。`
+    : `${providerDisplayName(marketSync.provider)}最近一轮${syncCaptionText}。`;
+
+  const checkRows = [
+    dataHealthRow(
+      "odds_sync",
+      "赔率抓取",
+      syncSeverity === "error" ? "error" : syncSeverity === "warning" ? "warning" : syncSeverity === "ok" ? "ok" : "info",
+      syncSeverity === "ok" ? "上一轮已保存赔率快照" : syncSeverity === "error" ? "赔率抓取失败" : syncSeverity === "warning" ? "赔率抓取受限" : "等待下一轮抓取",
+      syncSeverity === "ok"
+        ? `上一轮保存 ${syncSaved} 条赔率快照，来源 ${providerDisplayName(marketSync.provider)}。`
+        : syncDetailText,
+      syncAttemptText,
+      syncSeverity === "ok" ? 1 : syncSeverity === "warning" ? 0.45 : 0.12
+    ),
+    dataHealthRow(
+      "near_kickoff",
+      "赛前窗口",
+      windowStatus,
+      skippedCount > 0 ? "候选不在分析窗口" : "仅分析赛前窗口内比赛",
+      skippedCount > 0
+        ? `${skippedCount} 个候选没有进入开赛前 ${asianWindow} 分钟分析窗口。`
+        : `当前配置只分析未来 ${asianWindow} 分钟内的比赛。`,
+      `${asianWindow} 分钟`,
+      skippedCount > 0 ? 0.45 : 1
+    ),
+    dataHealthRow(
+      "ledger_coverage",
+      "台账覆盖",
+      ledgerStatus,
+      ledgerStatus === "ok" || (syncSeverity === "ok" && coveredCount > 0) ? "赔率覆盖可追溯" : ledgerCount === 0 ? "等待预测台账" : "部分预测缺少赔率快照",
+      ledgerCount === 0
+        ? "当前暂无预测台账，无法判断赔率覆盖。"
+        : `台账 ${coveredCount}/${ledgerCount} 场有赔率快照，其中 ${multiBookmakerCount} 场达到多公司覆盖。`,
+      `${coveredCount}/${ledgerCount}`,
+      ledgerRatio
+    ),
+    dataHealthRow(
+      "match_context",
+      "赛事情报",
+      contextStatus,
+      contextStatus === "ok" ? "赛事情报覆盖稳定" : "赛事情报待补齐",
+      contextCoverage?.summary || "暂无赛事情报覆盖统计。",
+      `${Math.round(contextRatio * 100)}%`,
+      contextRatio
+    ),
+    dataHealthRow(
+      "clv_tracking",
+      "收盘价追踪",
+      clvStatus,
+      clvStatus === "ok" ? "收盘价样本可用" : "收盘价样本不足",
+      `当前 ${clvAvailable}/${clvTarget} 条可计算收盘价价值，用于判断是否跑赢收盘线。`,
+      `${clvAvailable}/${clvTarget}`,
+      clvTarget ? clvAvailable / clvTarget : null
+    )
+  ];
+
+  const nonHealthyCount = checkRows.filter((row) => row.tone !== "good").length;
+  const hasCriticalIssue =
+    syncSeverity === "error" ||
+    syncSeverity === "warning" ||
+    windowStatus !== "ok" ||
+    ledgerStatus === "blocked" ||
+    clvStatus !== "ok";
+  const title = hasCriticalIssue ? "数据采集需要关注" : "数据采集正常";
+  const issueText = flags.length ? flags.join("；") : nonHealthyCount > 0 ? `${nonHealthyCount} 项需要关注` : "暂无数据采集阻断";
+
+  return {
+    tone: !hasCriticalIssue && nonHealthyCount === 0 ? "good" : syncSeverity === "error" || ledgerStatus === "blocked" ? "bad" : "caution",
+    title,
+    detail: `赔率、赛事情报、赛前 ${asianWindow} 分钟窗口和收盘价追踪集中体检；预测前应优先确认这里没有阻断项。`,
+    issueText,
+    statusCards: [
+      statusCard("赔率源", syncStatusLabel(marketSync.status, syncSaved), syncCaptionText, toneFromSeverity(syncSeverity)),
+      statusCard(
+        "赔率快照",
+        `${marketSummary?.total_snapshot_count ?? 0} 条`,
+        `${marketSummary?.event_count ?? 0} 场 · ${marketSummary?.bookmaker_count ?? 0} 家公司 · ${latestSnapshotText}`,
+        (marketSummary?.total_snapshot_count ?? 0) > 0 ? "good" : "caution"
+      ),
+      statusCard(
+        "台账覆盖",
+        `${coveredCount}/${ledgerCount}`,
+        `${multiBookmakerCount} 场多公司 · ${ledgerStatus === "ok" ? "覆盖完整" : "待补齐"}`,
+        toneFromSeverity(ledgerStatus)
+      ),
+      statusCard("采集窗口", `${asianWindow} 分钟`, `${intervalText(intervalSeconds)}轮询 · ${runCount} 轮`, windowStatus === "ok" ? "good" : "caution")
+    ],
+    checkRows
+  };
+}
+
 function fallbackPredictionAccountability(snapshot: DashboardSnapshot): NonNullable<DashboardSnapshot["prediction_accountability"]> {
   const kpis = snapshot.prediction_kpis;
   const total = kpis?.total_count ?? 0;
@@ -2408,9 +2666,9 @@ function recommendationReleaseGateView(opportunity: DashboardSnapshot["recommend
             : `${formatDecimal(current, 0)}/${formatDecimal(target, 0)}`;
     return {
       key: `${index}-${item.label || "闸门"}`,
-      label: item.label || "闸门",
-      title: item.title || "待确认",
-      detail: item.detail || "",
+      label: customerCopy(item.label || "闸门"),
+      title: customerCopy(item.title || "待确认"),
+      detail: customerCopy(item.detail || ""),
       tone: toneFromSeverity(item.status),
       progressText,
       width: `${Math.max(4, Math.min(100, (ratio ?? 0) * 100))}%`
@@ -2468,7 +2726,7 @@ function counterSignalView(
   if (count <= 0 && !candidates.length) return undefined;
   const rule = opportunity.counter_signal_rule;
   return {
-    title: rule?.title || "反向校准观察",
+    title: customerCopy(rule?.title || "反向校准观察"),
     detail: customerCopy(rule?.detail || "当前候选只进入观察验证，用来验证概率分桶是否需要优化。"),
     modelText: metaModelText(rule?.meta_model),
     candidateBandsText: candidateBandsText(rule?.candidate_band_keys),
@@ -3005,6 +3263,7 @@ export function buildDashboardView(snapshot: DashboardSnapshot): DashboardView {
     dashboardContract: dashboardContractView(snapshot),
     productionReadiness: productionReadinessView(snapshot),
     productionOps: productionOpsView(snapshot),
+    dataSourceHealth: dataSourceHealthView(snapshot),
     predictionAccountability: predictionAccountabilityView(snapshot),
     recommendationOpportunity: recommendationOpportunityView(snapshot),
     recommendationFunnel: recommendationFunnel(snapshot),

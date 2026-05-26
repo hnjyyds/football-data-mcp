@@ -36,6 +36,7 @@ import {
 import {
   buildDashboardView,
   buildMatchDetailView,
+  customerCopy,
   formatOdds,
   formatPercent,
   formatSignedPercent,
@@ -164,7 +165,7 @@ function readableEventDetail(detail: string): string {
     .replaceAll("large_handicap_requires_backtest", "大盘口需回测")
     .replaceAll("edge_below_threshold", "边际不足")
     .replaceAll("value_edge_below_threshold", "价值边际不足");
-  return text
+  return customerCopy(text)
     .replace(/\s+vs\s+/gi, " 对 ")
     .replace(/样本=(\d+)/g, "样本数 $1")
     .replace(/最低概率=([0-9.]+)/g, "最低概率 $1")
@@ -1664,7 +1665,7 @@ function MatchDetailPanel({
         <div className="detail-timeline">
           {view.timeline.map((item, index) => (
             <div className="timeline-row" key={`${item.title}-${index}`}>
-              <strong>{item.title}</strong>
+              <strong>{customerCopy(item.title)}</strong>
               <span>{readableEventDetail(item.detail)}</span>
               <time>{localTime(item.at_utc)}</time>
             </div>
@@ -1815,6 +1816,53 @@ function DataSourcePanel({ snapshot }: { snapshot: DashboardSnapshot }) {
   );
 }
 
+function DataSourceHealthPanel({ view }: { view: DashboardViewModel }) {
+  const health = view.dataSourceHealth;
+  const cardIcons = [RefreshCw, Database, ListChecks, Clock];
+  const pillTone = health.tone === "good" ? "good" : health.tone === "bad" ? "bad" : health.tone === "caution" ? "caution" : "neutral";
+  return (
+    <section className={`panel data-health-panel tone-${health.tone}`} aria-label="数据采集健康中心">
+      <div className="data-health-head">
+        <div>
+          <span className="eyebrow">数据采集健康中心</span>
+          <h2>{health.title}</h2>
+          <p>{health.detail}</p>
+        </div>
+        <span className={`status-pill ${pillTone}`}>{health.issueText}</span>
+      </div>
+      <div className="data-health-status-grid">
+        {health.statusCards.map((card, index) => {
+          const Icon = cardIcons[index] ?? Database;
+          return (
+            <div className={`diagnostic-metric tone-${card.tone}`} key={card.label}>
+              <Icon size={16} />
+              <span>{card.label}</span>
+              <strong>{card.value}</strong>
+              <em>{card.caption}</em>
+            </div>
+          );
+        })}
+      </div>
+      <div className="data-health-check-grid">
+        {health.checkRows.map((row) => (
+          <div className={`data-health-check tone-${row.tone}`} key={row.key}>
+            <div>
+              <span>{row.label}</span>
+              <strong>{row.title}</strong>
+              <em>{row.detail}</em>
+            </div>
+            <b>{row.statusText}</b>
+            <i>
+              <span style={{ width: row.width }} />
+            </i>
+            <small>{row.metaText}</small>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function FilterPanel({ snapshot }: { snapshot: DashboardSnapshot }) {
   const view = buildDashboardView(snapshot);
   return (
@@ -1851,7 +1899,7 @@ function EventPanel({ events }: { events: LearningEvent[] }) {
           <div className="event-row" key={`${event.kind}-${event.at_utc}-${index}`}>
             <span className={`event-dot ${event.severity}`} />
             <div>
-              <strong>{event.title}</strong>
+              <strong>{customerCopy(event.title)}</strong>
               <p>{readableEventDetail(event.detail)}</p>
             </div>
             <time>{localTime(event.at_utc)}</time>
@@ -2219,6 +2267,7 @@ function DataSection({
 }) {
   return (
     <div className="dashboard-section">
+      <DataSourceHealthPanel view={view} />
       <DataSourcePanel snapshot={snapshot} />
       <section className="data-grid">
         <SnapshotCoveragePanel view={view} />
