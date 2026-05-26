@@ -110,6 +110,7 @@ def test_walk_forward_backtest_uses_only_prior_matches_and_reports_metrics():
         min_training_samples=2,
         edge_threshold=0.0,
         stake=1.0,
+        historical_rho_min_samples=2,
     )
 
     assert result["status"] == "ok"
@@ -124,6 +125,10 @@ def test_walk_forward_backtest_uses_only_prior_matches_and_reports_metrics():
     assert rolling_elo["home"]["team"] == "Arsenal"
     assert rolling_elo["away"]["team"] == "Spurs"
     assert rolling_elo["leakage_policy"] == "ratings are built only from prior completed samples"
+    dixon_coles = result["records"][0]["model_engine"]["dixon_coles"]
+    assert dixon_coles["rho_source"] == "historical_league_mle"
+    assert dixon_coles["historical_rho"]["sample_count"] == 2
+    assert result["summary"]["historical_rho_available_record_count"] == 2
     assert result["metrics"]["model"]["log_loss_1x2"] > 0
     assert result["metrics"]["market"]["brier_score_1x2"] > 0
     assert result["betting"]["bet_count"] >= 1
@@ -339,6 +344,11 @@ def test_holdout_validation_selects_on_training_and_scores_validation(monkeypatc
     assert division_result["selected_config"]["seasons"] == ["2122"]
     assert division_result["validation_result"]["seasons"] == ["2223"]
     assert division_result["validation_result"]["evaluated_count"] > 0
+    assert division_result["probability_calibration"]["method"] == "holdout_probability_bins_v1"
+    assert division_result["probability_calibration"]["training_record_count"] > 0
+    assert division_result["calibrated_validation_result"]["selection_source"] == "holdout_probability_calibrated_validation"
+    assert division_result["calibrated_validation_result"]["evaluated_count"] > 0
+    assert result["summary"]["historical_rho_min_samples"] == 20
     assert result["holdout_readiness"]["real_money_allowed"] is False
     assert result["agent_contract"]["holdout_rule"].startswith("Training seasons select")
 

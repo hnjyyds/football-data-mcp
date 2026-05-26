@@ -299,11 +299,57 @@ def _calibration(records: list[dict[str, Any]], probability_key: str) -> list[di
     ]
 
 
+def estimate_dixon_coles_rho_from_samples(
+    samples: list[dict[str, Any]],
+    *,
+    min_sample_count: int = 20,
+) -> dict[str, Any]:
+    scorelines = []
+    divisions = set()
+    seasons = set()
+    latest_kickoff = None
+    for sample in samples:
+        actual = sample.get("actual") or {}
+        if actual.get("home_goals") is None or actual.get("away_goals") is None:
+            continue
+        scorelines.append(
+            {
+                "home_goals": actual.get("home_goals"),
+                "away_goals": actual.get("away_goals"),
+            }
+        )
+        if sample.get("division"):
+            divisions.add(str(sample.get("division")))
+        if sample.get("season"):
+            seasons.add(str(sample.get("season")))
+        kickoff = sample.get("kickoff")
+        if kickoff is not None and (latest_kickoff is None or kickoff > latest_kickoff):
+            latest_kickoff = kickoff
+
+    estimate = model_engine.estimate_dixon_coles_rho_from_scorelines(
+        scorelines,
+        min_sample_count=min_sample_count,
+    )
+    estimate.update(
+        {
+            "source": "walk_forward_prior_completed_samples",
+            "division_scope": sorted(divisions),
+            "season_scope": sorted(seasons),
+            "latest_sample_kickoff_utc": latest_kickoff.astimezone(sources.timezone.utc).isoformat()
+            if latest_kickoff is not None
+            else None,
+            "leakage_policy": "rho is estimated only from matches with kickoff earlier than the evaluated sample",
+        }
+    )
+    return estimate
+
+
 def _build_walk_forward_base(
     samples: list[dict[str, Any]],
     *,
     min_training_samples: int = 20,
     max_samples: int | None = None,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     ordered = sorted(samples, key=lambda item: item["kickoff"])
     if max_samples:
@@ -312,6 +358,7 @@ def _build_walk_forward_base(
     records = []
     skipped_for_training = 0
     skipped_unavailable = 0
+    historical_rho_available_count = 0
 
     for index, sample in enumerate(ordered):
         prior_samples = ordered[:index]
@@ -320,10 +367,17 @@ def _build_walk_forward_base(
             continue
 
         form = _walk_forward_form(prior_samples, sample)
+        historical_rho = estimate_dixon_coles_rho_from_samples(
+            prior_samples,
+            min_sample_count=historical_rho_min_samples,
+        )
+        if historical_rho.get("available"):
+            historical_rho_available_count += 1
         projection = model_engine.build_model_projection(
             match=sample["match"],
             odds=sample["odds"],
             form=form,
+            historical_dixon_coles_rho=historical_rho,
         )
         model_probs = ((projection.get("derived_probabilities") or {}).get("1x2") or {})
         market_probs = _market_probabilities(sample)
@@ -353,6 +407,7 @@ def _build_walk_forward_base(
                     "version": projection.get("version"),
                     "method": projection.get("method"),
                     "expected_goals": projection.get("expected_goals"),
+                    "dixon_coles": projection.get("dixon_coles"),
                     "model_quality": projection.get("model_quality"),
                 },
                 "model_probabilities_1x2": {key: _round(_parse_float(value)) for key, value in model_probs.items()},
@@ -377,6 +432,8 @@ def _build_walk_forward_base(
             "skipped_for_training_count": skipped_for_training,
             "skipped_unavailable_count": skipped_unavailable,
             "min_training_samples": min_training_samples,
+            "historical_rho_min_samples": historical_rho_min_samples,
+            "historical_rho_available_record_count": historical_rho_available_count,
         },
     }
 
@@ -478,11 +535,13 @@ def run_walk_forward_backtest(
     edge_threshold: float = 0.02,
     stake: float = 1.0,
     max_samples: int | None = None,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     base = _build_walk_forward_base(
         samples,
         min_training_samples=min_training_samples,
         max_samples=max_samples,
+        historical_rho_min_samples=historical_rho_min_samples,
     )
     return _walk_forward_result_from_base(
         base,
@@ -505,6 +564,7 @@ async def run_football_data_backtest(
     edge_threshold: float = 0.02,
     stake: float = 1.0,
     max_samples: int | None = None,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     season = season or sources.season_code_for(sources.now_utc())
     rows, source = await fetch_football_data_season_rows(division, season)
@@ -515,6 +575,7 @@ async def run_football_data_backtest(
         edge_threshold=edge_threshold,
         stake=stake,
         max_samples=max_samples,
+        historical_rho_min_samples=historical_rho_min_samples,
     )
     return {
         **result,
@@ -641,6 +702,173 @@ def _apply_top_selection_calibrator(
     }
 
 
+def _build_holdout_probability_calibrator(
+    training_records: list[dict[str, Any]],
+    *,
+    bucket_size: float = 0.05,
+    prior_strength: int = 20,
+) -> dict[str, Any]:
+    usable_records = [
+        record
+        for record in training_records
+        if (record.get("model_probabilities_1x2") or {})
+        and (record.get("actual") or {}).get("result_1x2") in {"home", "draw", "away"}
+    ]
+    actual_counts = {side: 0 for side in ("home", "draw", "away")}
+    for record in usable_records:
+        actual_counts[str((record.get("actual") or {}).get("result_1x2"))] += 1
+    record_count = len(usable_records)
+    side_priors = {
+        side: (actual_counts[side] / record_count if record_count else 1.0 / 3.0)
+        for side in ("home", "draw", "away")
+    }
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for record in usable_records:
+        actual = str((record.get("actual") or {}).get("result_1x2"))
+        for side, raw_probability in (record.get("model_probabilities_1x2") or {}).items():
+            probability = _parse_float(raw_probability)
+            if probability is None:
+                continue
+            label = _probability_bucket(probability, bucket_size=bucket_size)
+            key = f"{side}:{label}"
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "side": side,
+                    "bucket": label,
+                    "count": 0,
+                    "hit_count": 0,
+                    "predicted_probability_sum": 0.0,
+                },
+            )
+            bucket["count"] += 1
+            bucket["hit_count"] += 1 if side == actual else 0
+            bucket["predicted_probability_sum"] += probability
+
+    public_buckets = []
+    for key, bucket in sorted(buckets.items()):
+        side = str(bucket["side"])
+        count = int(bucket["count"])
+        hit_count = int(bucket["hit_count"])
+        observed = hit_count / count if count else side_priors.get(side, 1.0 / 3.0)
+        calibrated = (
+            (hit_count + (side_priors.get(side, 1.0 / 3.0) * prior_strength)) / (count + prior_strength)
+            if count
+            else side_priors.get(side, 1.0 / 3.0)
+        )
+        bucket.update(
+            {
+                "observed_frequency": _round(observed),
+                "avg_predicted_probability": _round(bucket["predicted_probability_sum"] / count if count else None),
+                "calibrated_probability": _round(calibrated),
+            }
+        )
+        public_buckets.append(bucket)
+
+    return {
+        "available": bool(public_buckets),
+        "method": "holdout_probability_bins_v1",
+        "bucket_size": bucket_size,
+        "prior_strength": prior_strength,
+        "training_record_count": record_count,
+        "side_priors": {side: _round(value) for side, value in side_priors.items()},
+        "buckets": public_buckets,
+        "bucket_map": {f"{bucket['side']}:{bucket['bucket']}": bucket for bucket in public_buckets},
+        "calibration_rule": "Training-season 1X2 model probabilities are bucketed by side and probability, smoothed by side base rates, then applied to holdout seasons only.",
+    }
+
+
+def _public_holdout_probability_calibrator(calibrator: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in calibrator.items() if key != "bucket_map"}
+
+
+def _apply_holdout_probability_calibrator_to_record(
+    record: dict[str, Any],
+    calibrator: dict[str, Any],
+) -> dict[str, Any]:
+    probabilities = record.get("model_probabilities_1x2") or {}
+    bucket_size = float(calibrator.get("bucket_size") or 0.05)
+    bucket_map = calibrator.get("bucket_map") or {}
+    side_priors = calibrator.get("side_priors") or {}
+    raw_calibrated: dict[str, float] = {}
+    calibration_buckets: dict[str, dict[str, Any]] = {}
+    for side in ("home", "draw", "away"):
+        raw_probability = _parse_float(probabilities.get(side))
+        if raw_probability is None:
+            continue
+        label = _probability_bucket(raw_probability, bucket_size=bucket_size)
+        bucket = bucket_map.get(f"{side}:{label}") or {}
+        calibrated = _parse_float(bucket.get("calibrated_probability"))
+        if calibrated is None:
+            calibrated = _parse_float(side_priors.get(side))
+        if calibrated is None:
+            calibrated = raw_probability
+        raw_calibrated[side] = max(calibrated, 0.000001)
+        calibration_buckets[side] = {
+            "bucket": label,
+            "count": int(bucket.get("count") or 0),
+            "observed_frequency": bucket.get("observed_frequency"),
+            "avg_predicted_probability": bucket.get("avg_predicted_probability"),
+        }
+
+    total = sum(raw_calibrated.values())
+    calibrated_probabilities = (
+        {side: _round(value / total) for side, value in raw_calibrated.items()}
+        if total > 0
+        else {side: _round(_parse_float(probabilities.get(side))) for side in probabilities}
+    )
+    market_probabilities = record.get("market_probabilities_1x2") or {}
+    edges = {
+        side: _round((calibrated_probabilities.get(side) or 0.0) - (_parse_float(market_probabilities.get(side)) or 0.0))
+        for side in ("home", "draw", "away")
+        if side in calibrated_probabilities
+    }
+    actual = str((record.get("actual") or {}).get("result_1x2") or "")
+    scores = {
+        **(record.get("scores") or {}),
+        "raw_model_log_loss_1x2": (record.get("scores") or {}).get("model_log_loss_1x2"),
+        "raw_model_brier_score_1x2": (record.get("scores") or {}).get("model_brier_score_1x2"),
+    }
+    if actual in {"home", "draw", "away"} and calibrated_probabilities:
+        scores["model_log_loss_1x2"] = _round(_log_loss(calibrated_probabilities, actual))
+        scores["model_brier_score_1x2"] = _round(_brier_score(calibrated_probabilities, actual))
+        scores["calibrated_model_log_loss_1x2"] = scores["model_log_loss_1x2"]
+        scores["calibrated_model_brier_score_1x2"] = scores["model_brier_score_1x2"]
+
+    return {
+        **record,
+        "raw_model_probabilities_1x2": probabilities,
+        "model_probabilities_1x2": calibrated_probabilities,
+        "calibrated_model_probabilities_1x2": calibrated_probabilities,
+        "edges_1x2": edges,
+        "scores": scores,
+        "probability_calibration": {
+            "method": calibrator.get("method"),
+            "applied": bool(calibrator.get("available")),
+            "buckets": calibration_buckets,
+        },
+    }
+
+
+def _apply_holdout_probability_calibrator_to_base(
+    base: dict[str, Any],
+    calibrator: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        **base,
+        "records": [
+            _apply_holdout_probability_calibrator_to_record(record, calibrator)
+            for record in (base.get("records") or [])
+        ],
+        "summary": {
+            **(base.get("summary") or {}),
+            "probability_calibration_method": calibrator.get("method"),
+            "probability_calibration_available": bool(calibrator.get("available")),
+        },
+    }
+
+
 def _top_k_confidence_metrics(
     selections: list[dict[str, Any]],
     *,
@@ -717,6 +945,7 @@ async def run_top_k_confidence_backtest(
     bucket_size: float = 0.05,
     prior_strength: int = 20,
     include_records: bool = False,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     divisions = [str(item).strip() for item in (divisions or DEFAULT_SWEEP_DIVISIONS) if str(item).strip()]
     if training_seasons is None or validation_seasons is None:
@@ -745,6 +974,7 @@ async def run_top_k_confidence_backtest(
                     samples,
                     min_training_samples=min_training_samples,
                     max_samples=max_samples,
+                    historical_rho_min_samples=historical_rho_min_samples,
                 )
                 for record in base.get("records") or []:
                     record = {
@@ -819,6 +1049,7 @@ async def run_top_k_confidence_backtest(
             "training_record_count": len(training_records),
             "validation_record_count": len(validation_selections),
             "min_training_samples": min_training_samples,
+            "historical_rho_min_samples": historical_rho_min_samples,
             "stake": stake,
             "max_samples": max_samples,
         },
@@ -1121,9 +1352,9 @@ def _holdout_readiness(
     min_validation_evaluated: int,
 ) -> dict[str, Any]:
     validation_results = [
-        result.get("validation_result") or {}
+        result.get("calibrated_validation_result") or result.get("validation_result") or {}
         for result in division_results
-        if result.get("validation_result")
+        if result.get("calibrated_validation_result") or result.get("validation_result")
     ]
     if not validation_results:
         return {
@@ -1179,6 +1410,7 @@ async def run_backtest_sweep(
     stake: float = 1.0,
     max_samples: int | None = None,
     include_records: bool = False,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     divisions = [str(item).strip() for item in (divisions or DEFAULT_SWEEP_DIVISIONS) if str(item).strip()]
     seasons = [str(item).strip() for item in (seasons or _default_recent_seasons()) if str(item).strip()]
@@ -1224,6 +1456,7 @@ async def run_backtest_sweep(
                     samples,
                     min_training_samples=min_training_samples,
                     max_samples=max_samples,
+                    historical_rho_min_samples=historical_rho_min_samples,
                 )
                 for edge_threshold in edge_thresholds:
                     result = _walk_forward_result_from_base(
@@ -1256,6 +1489,7 @@ async def run_backtest_sweep(
             "error_count": len(errors),
             "max_samples": max_samples,
             "stake": stake,
+            "historical_rho_min_samples": historical_rho_min_samples,
         },
         "best_configs": ranked[:10],
         "worst_configs": list(reversed(ranked[-10:])),
@@ -1290,6 +1524,7 @@ async def run_holdout_validation(
     min_selection_evaluated: int = 100,
     min_validation_bets: int = 50,
     min_validation_evaluated: int = 100,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     divisions = [str(item).strip() for item in (divisions or DEFAULT_SWEEP_DIVISIONS) if str(item).strip()]
     if training_seasons is None or validation_seasons is None:
@@ -1337,15 +1572,18 @@ async def run_holdout_validation(
                 )
 
         training_configs = []
+        training_bases_by_min_samples: dict[int, dict[str, dict[str, Any]]] = {}
         for min_training_samples in min_training_samples_options:
             training_bases = {
                 season: _build_walk_forward_base(
                     fetched_samples.get((division, season), []),
                     min_training_samples=min_training_samples,
                     max_samples=max_samples,
+                    historical_rho_min_samples=historical_rho_min_samples,
                 )
                 for season in training_seasons
             }
+            training_bases_by_min_samples[min_training_samples] = training_bases
             for edge_threshold in edge_thresholds:
                 season_results = [
                     _walk_forward_result_from_base(
@@ -1384,23 +1622,55 @@ async def run_holdout_validation(
             )
             continue
 
-        validation_results = [
-            run_walk_forward_backtest(
+        selected_min_training_samples = int(selected_config["min_training_samples"])
+        selected_edge_threshold = float(selected_config["edge_threshold"])
+        selected_training_records = [
+            record
+            for base in training_bases_by_min_samples.get(selected_min_training_samples, {}).values()
+            for record in (base.get("records") or [])
+        ]
+        probability_calibrator = _build_holdout_probability_calibrator(selected_training_records)
+        public_probability_calibrator = _public_holdout_probability_calibrator(probability_calibrator)
+        validation_bases = [
+            _build_walk_forward_base(
                 fetched_samples.get((division, season), []),
                 min_training_samples=int(selected_config["min_training_samples"]),
-                edge_threshold=float(selected_config["edge_threshold"]),
-                stake=stake,
                 max_samples=max_samples,
+                historical_rho_min_samples=historical_rho_min_samples,
             )
             for season in validation_seasons
+        ]
+        validation_results = [
+            _walk_forward_result_from_base(
+                base,
+                edge_threshold=selected_edge_threshold,
+                stake=stake,
+            )
+            for base in validation_bases
         ]
         validation_result = _aggregate_config_results(
             division=division,
             seasons=validation_seasons,
-            edge_threshold=float(selected_config["edge_threshold"]),
-            min_training_samples=int(selected_config["min_training_samples"]),
+            edge_threshold=selected_edge_threshold,
+            min_training_samples=selected_min_training_samples,
             results=validation_results,
             selection_source="holdout_validation",
+        )
+        calibrated_validation_results = [
+            _walk_forward_result_from_base(
+                _apply_holdout_probability_calibrator_to_base(base, probability_calibrator),
+                edge_threshold=selected_edge_threshold,
+                stake=stake,
+            )
+            for base in validation_bases
+        ]
+        calibrated_validation_result = _aggregate_config_results(
+            division=division,
+            seasons=validation_seasons,
+            edge_threshold=selected_edge_threshold,
+            min_training_samples=selected_min_training_samples,
+            results=calibrated_validation_results,
+            selection_source="holdout_probability_calibrated_validation",
         )
         division_results.append(
             {
@@ -1409,7 +1679,9 @@ async def run_holdout_validation(
                 "status": "ok",
                 "training_configs": sorted(training_configs, key=lambda item: item.get("rank_score") or -999, reverse=True)[:10],
                 "selected_config": selected_config,
+                "probability_calibration": public_probability_calibrator,
                 "validation_result": validation_result,
+                "calibrated_validation_result": calibrated_validation_result,
             }
         )
 
@@ -1429,6 +1701,7 @@ async def run_holdout_validation(
             "stake": stake,
             "min_selection_bets": min_selection_bets,
             "min_validation_bets": min_validation_bets,
+            "historical_rho_min_samples": historical_rho_min_samples,
         },
         "division_results": division_results,
         "holdout_readiness": _holdout_readiness(

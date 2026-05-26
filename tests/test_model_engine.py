@@ -108,6 +108,50 @@ def test_dixon_coles_adjustment_changes_low_score_distribution_without_losing_pr
     assert adjusted[(0, 1)] < independent[(0, 1)]
 
 
+def test_dixon_coles_rho_mle_estimates_from_historical_scorelines():
+    scorelines = [
+        {"home_goals": 0, "away_goals": 0},
+        {"home_goals": 1, "away_goals": 1},
+        {"home_goals": 1, "away_goals": 0},
+        {"home_goals": 0, "away_goals": 1},
+        {"home_goals": 2, "away_goals": 1},
+        {"home_goals": 1, "away_goals": 2},
+    ] * 4
+
+    estimate = model_engine.estimate_dixon_coles_rho_from_scorelines(
+        scorelines,
+        min_sample_count=10,
+    )
+
+    assert estimate["available"] is True
+    assert estimate["method"] == "league_scoreline_dixon_coles_rho_mle_v1"
+    assert estimate["sample_count"] == 24
+    assert estimate["rho"] in estimate["rho_grid"]
+    assert estimate["low_score_count"] > 0
+    assert estimate["baseline_log_likelihood_at_zero"] is not None
+
+
+def test_projection_can_use_historical_dixon_coles_rho_instead_of_snapshot_grid():
+    projection = model_engine.build_model_projection(
+        match={"home_team": "Home", "away_team": "Away"},
+        odds={"quality_contract": _quality_contract()},
+        form={"available": False},
+        historical_dixon_coles_rho={
+            "available": True,
+            "method": "league_scoreline_dixon_coles_rho_mle_v1",
+            "rho": -0.08,
+            "sample_count": 120,
+        },
+    )
+
+    assert projection["available"] is True
+    assert projection["dixon_coles"]["rho"] == -0.08
+    assert projection["dixon_coles"]["rho_source"] == "historical_league_mle"
+    assert projection["dixon_coles"]["rho_grid"] == [-0.08]
+    assert projection["dixon_coles"]["historical_rho"]["sample_count"] == 120
+    assert "prior completed league scorelines" in projection["model_quality"]["limits"][0]
+
+
 def test_model_engine_exposes_rolling_elo_strength_without_unvalidated_probability_push():
     odds = {"quality_contract": _quality_contract()}
     neutral_form = {

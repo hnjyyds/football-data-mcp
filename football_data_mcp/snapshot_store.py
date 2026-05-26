@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from hashlib import sha256
 from statistics import median
@@ -480,6 +481,277 @@ def build_market_consensus(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "latest_fetched_at_utc": latest_fetch_time,
             }
     return consensus
+
+
+def _parse_snapshot_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _snapshot_row_time(row: dict[str, Any]) -> datetime | None:
+    return _parse_snapshot_time(row.get("source_time_utc")) or _parse_snapshot_time(row.get("fetched_at_utc"))
+
+
+def _resolve_market_selection(selection: str, home_team: str, away_team: str) -> str:
+    value = str(selection or "").strip()
+    lowered = value.lower()
+    if lowered in {"home", "h", "主", "主队"}:
+        return home_team
+    if lowered in {"away", "a", "客", "客队"}:
+        return away_team
+    if lowered in {"draw", "d", "平", "平局"}:
+        return "Draw"
+    return value
+
+
+def _selection_matches(selection: str, candidate: str) -> bool:
+    selection_norm = _normalize_team(selection)
+    candidate_norm = _normalize_team(candidate)
+    if not selection_norm or not candidate_norm:
+        return str(selection or "").strip().lower() == str(candidate or "").strip().lower()
+    return selection_norm == candidate_norm or selection_norm in candidate_norm or candidate_norm in selection_norm
+
+
+def _line_matches(expected: float | None, candidate: Any, *, tolerance: float = 1e-6) -> bool:
+    if expected is None:
+        return True
+    try:
+        expected_value = float(expected)
+    except (TypeError, ValueError):
+        return True
+    try:
+        candidate_value = float(candidate)
+    except (TypeError, ValueError):
+        return False
+    return abs(expected_value - candidate_value) <= tolerance
+
+
+def closing_line_value_for_pick(
+    *,
+    home_team: str,
+    away_team: str,
+    selection: str,
+    prediction_decimal_odds: float,
+    market_type: str = "h2h",
+    line: float | None = None,
+    league: str | None = None,
+    kickoff_utc: str | None = None,
+    prediction_time_utc: str | None = None,
+    closing_window_minutes: int = 30,
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    prediction_price = float(prediction_decimal_odds or 0.0)
+    if prediction_price <= 1.0:
+        return {
+            "status": "unavailable",
+            "method": "closing_line_value_from_market_snapshots_v1",
+            "reason": "prediction_decimal_odds_required",
+        }
+
+    resolved_selection = _resolve_market_selection(selection, home_team, away_team)
+    rows = find_market_snapshots(home_team, away_team, league=league, db_path=db_path, limit=20000)
+    market_rows = [
+        row
+        for row in rows
+        if str(row.get("market_type") or "") == str(market_type or "")
+        and _selection_matches(resolved_selection, str(row.get("selection") or ""))
+        and _line_matches(line, row.get("line"))
+        and float(row.get("decimal_odds") or 0.0) > 1.0
+    ]
+    if not market_rows:
+        return {
+            "status": "unavailable",
+            "method": "closing_line_value_from_market_snapshots_v1",
+            "reason": "matching_market_snapshots_missing",
+            "home_team": home_team,
+            "away_team": away_team,
+            "selection": resolved_selection,
+            "market_type": market_type,
+            "line": line,
+        }
+
+    kickoff_time = _parse_snapshot_time(kickoff_utc) or _parse_snapshot_time(market_rows[0].get("kickoff_utc"))
+    prediction_time = _parse_snapshot_time(prediction_time_utc)
+    timed_rows = [(row, row_time) for row in market_rows if (row_time := _snapshot_row_time(row)) is not None]
+    if not timed_rows:
+        return {
+            "status": "unavailable",
+            "method": "closing_line_value_from_market_snapshots_v1",
+            "reason": "snapshot_times_missing",
+            "home_team": home_team,
+            "away_team": away_team,
+            "selection": resolved_selection,
+            "market_type": market_type,
+            "line": line,
+        }
+
+    closing_candidates = timed_rows
+    if kickoff_time is not None:
+        before_kickoff = [(row, row_time) for row, row_time in timed_rows if row_time <= kickoff_time]
+        if not before_kickoff:
+            return {
+                "status": "unavailable",
+                "method": "closing_line_value_from_market_snapshots_v1",
+                "reason": "pre_kickoff_closing_snapshots_missing",
+                "home_team": home_team,
+                "away_team": away_team,
+                "selection": resolved_selection,
+                "market_type": market_type,
+                "line": line,
+            }
+        window_start = kickoff_time - timedelta(minutes=max(1, int(closing_window_minutes or 30)))
+        window_rows = [(row, row_time) for row, row_time in before_kickoff if row_time >= window_start]
+        closing_candidates = window_rows or before_kickoff
+
+    latest_by_bookmaker: dict[str, tuple[dict[str, Any], datetime]] = {}
+    for row, row_time in closing_candidates:
+        bookmaker = str(row.get("bookmaker") or "")
+        existing = latest_by_bookmaker.get(bookmaker)
+        if existing is None or row_time > existing[1]:
+            latest_by_bookmaker[bookmaker] = (row, row_time)
+    closing_rows = [row for row, _row_time in latest_by_bookmaker.values()]
+    closing_prices = [float(row["decimal_odds"]) for row in closing_rows]
+    closing_price = float(median(closing_prices))
+
+    prediction_snapshot_rows = []
+    if prediction_time is not None:
+        prediction_snapshot_rows = [
+            row
+            for row, row_time in timed_rows
+            if row_time <= prediction_time
+        ]
+
+    clv_decimal_delta = prediction_price - closing_price
+    clv_return = prediction_price / closing_price - 1.0
+    return {
+        "status": "available",
+        "method": "closing_line_value_from_market_snapshots_v1",
+        "home_team": home_team,
+        "away_team": away_team,
+        "selection": resolved_selection,
+        "market_type": market_type,
+        "line": line,
+        "prediction_decimal_odds": round(float(prediction_price), 6),
+        "closing_decimal_odds": round(float(closing_price), 6),
+        "clv_decimal_delta": round(float(clv_decimal_delta), 6),
+        "clv_return": round(float(clv_return), 6),
+        "clv_implied_probability_delta": round((1.0 / closing_price) - (1.0 / prediction_price), 6),
+        "closing_bookmaker_count": len(closing_rows),
+        "closing_snapshot_count": len(closing_rows),
+        "closing_window_minutes": max(1, int(closing_window_minutes or 30)),
+        "latest_closing_snapshot_utc": max(
+            (str(row.get("source_time_utc") or row.get("fetched_at_utc") or "") for row in closing_rows),
+            default="",
+        ),
+        "prediction_snapshot_count": len(prediction_snapshot_rows),
+        "rule": "Positive clv_return means the recorded recommendation price was better than the closing consensus for the same market and selection.",
+    }
+
+
+def _record_market_type(market: str) -> str:
+    normalized = str(market or "").strip().lower()
+    if normalized in {"1x2", "h2h", "moneyline"}:
+        return "h2h"
+    if normalized in {"asian_handicap", "spreads", "spread"}:
+        return "spreads"
+    if normalized in {"over_under", "totals", "total"}:
+        return "totals"
+    return normalized
+
+
+def _record_selection(record: dict[str, Any]) -> str:
+    selection_key = str(record.get("selection_key") or "").strip().lower()
+    market_type = _record_market_type(str(record.get("market") or ""))
+    if market_type == "h2h":
+        if selection_key in {"home", "h"}:
+            return "home"
+        if selection_key in {"away", "a"}:
+            return "away"
+        if selection_key in {"draw", "d"}:
+            return "draw"
+    if market_type == "spreads":
+        if selection_key in {"home", "home_cover", "h"}:
+            return "home"
+        if selection_key in {"away", "away_cover", "a"}:
+            return "away"
+    if market_type == "totals":
+        if selection_key in {"over", "o"}:
+            return "Over"
+        if selection_key in {"under", "u"}:
+            return "Under"
+    return str(record.get("selection") or selection_key or "")
+
+
+def closing_line_value_for_records(
+    records: list[dict[str, Any]],
+    *,
+    db_path: str | None = None,
+    closing_window_minutes: int = 30,
+    limit: int = 100,
+) -> dict[str, Any]:
+    bounded_records = records[: max(1, min(int(limit or 100), 1000))]
+    tracked = []
+    skipped_count = 0
+    for record in bounded_records:
+        home_team = str(record.get("home_team") or "")
+        away_team = str(record.get("away_team") or "")
+        prediction_decimal_odds = record.get("decimal_odds")
+        if not home_team or not away_team or prediction_decimal_odds is None:
+            skipped_count += 1
+            continue
+        clv = closing_line_value_for_pick(
+            home_team=home_team,
+            away_team=away_team,
+            selection=_record_selection(record),
+            prediction_decimal_odds=float(prediction_decimal_odds),
+            market_type=_record_market_type(str(record.get("market") or "")),
+            line=record.get("line"),
+            league=str(record.get("league") or "") or None,
+            kickoff_utc=str(record.get("kickoff_utc") or record.get("kickoff_utc_plus_8") or "") or None,
+            prediction_time_utc=str(record.get("created_at_utc") or "") or None,
+            closing_window_minutes=closing_window_minutes,
+            db_path=db_path,
+        )
+        tracked.append(
+            {
+                "record_id": record.get("id"),
+                "record_key": record.get("record_key"),
+                "home_team": home_team,
+                "away_team": away_team,
+                "market": record.get("market"),
+                "selection": record.get("selection"),
+                "selection_key": record.get("selection_key"),
+                "status": clv.get("status"),
+                "clv": clv,
+            }
+        )
+
+    available = [item["clv"] for item in tracked if (item.get("clv") or {}).get("status") == "available"]
+    returns = [float(item["clv_return"]) for item in available if item.get("clv_return") is not None]
+    positive_count = sum(1 for value in returns if value > 0)
+    return {
+        "status": "ok" if tracked else "empty",
+        "method": "closing_line_value_batch_tracking_v1",
+        "record_count": len(bounded_records),
+        "tracked_count": len(tracked),
+        "skipped_count": skipped_count,
+        "available_count": len(available),
+        "positive_clv_count": positive_count,
+        "positive_clv_rate": round(positive_count / len(returns), 6) if returns else None,
+        "avg_clv_return": round(sum(returns) / len(returns), 6) if returns else None,
+        "records": tracked,
+        "rule": "CLV is computed from persisted market snapshots only; missing or post-kickoff-only prices remain unavailable.",
+    }
 
 
 def provider_snapshot_counts(*, db_path: str | None = None) -> dict[str, Any]:

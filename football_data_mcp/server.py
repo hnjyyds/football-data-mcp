@@ -495,6 +495,7 @@ async def run_historical_backtest(
     edge_threshold: float = 0.02,
     stake: float = 1.0,
     max_samples: int | None = None,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     """
     Run a Football-Data walk-forward paper backtest for one league season.
@@ -511,6 +512,7 @@ async def run_historical_backtest(
         edge_threshold=edge_threshold,
         stake=stake or 1.0,
         max_samples=max_samples,
+        historical_rho_min_samples=historical_rho_min_samples or 20,
     )
 
 
@@ -523,6 +525,7 @@ async def run_backtest_sweep(
     stake: float = 1.0,
     max_samples: int | None = None,
     include_records: bool = False,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     """
     Sweep Football-Data walk-forward backtests across leagues, seasons, and recommendation thresholds.
@@ -539,6 +542,7 @@ async def run_backtest_sweep(
         stake=stake or 1.0,
         max_samples=max_samples,
         include_records=include_records,
+        historical_rho_min_samples=historical_rho_min_samples or 20,
     )
 
 
@@ -553,6 +557,7 @@ async def run_holdout_validation(
     max_samples: int | None = None,
     min_selection_bets: int = 30,
     min_validation_bets: int = 50,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     """
     Select parameters on training seasons, then score the selected config on holdout seasons.
@@ -571,6 +576,7 @@ async def run_holdout_validation(
         max_samples=max_samples,
         min_selection_bets=min_selection_bets,
         min_validation_bets=min_validation_bets,
+        historical_rho_min_samples=historical_rho_min_samples or 20,
     )
 
 
@@ -587,6 +593,7 @@ async def run_top_k_confidence_backtest(
     bucket_size: float = 0.05,
     prior_strength: int = 20,
     include_records: bool = False,
+    historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     """
     Backtest selecting only the highest calibrated-confidence 1X2 picks.
@@ -607,6 +614,7 @@ async def run_top_k_confidence_backtest(
         bucket_size=bucket_size or 0.05,
         prior_strength=prior_strength or 20,
         include_records=include_records,
+        historical_rho_min_samples=historical_rho_min_samples or 20,
     )
 
 

@@ -10,6 +10,7 @@ MODEL_ENGINE_METHOD = "dixon_coles_adjusted_market_anchored_poisson_v1"
 INDEPENDENT_BASELINE_METHOD = "market_anchored_independent_poisson_baseline_v1"
 ROLLING_ELO_GOAL_DIFF_LOSS_WEIGHT = 0.0
 DIXON_COLES_RHO_GRID = (-0.12, -0.08, -0.04, 0.0, 0.04)
+HISTORICAL_DIXON_COLES_RHO_GRID = tuple(round(-0.20 + index * 0.02, 4) for index in range(21))
 MONEYLINE_LOSS_WEIGHT = 2.0
 TOTALS_LOSS_WEIGHT = 1.5
 ASIAN_HANDICAP_LOSS_WEIGHT = 1.2
@@ -33,6 +34,10 @@ def _poisson_pmf(mean: float, goals: int) -> float:
     return math.exp(-mean) * (mean**goals) / math.factorial(goals)
 
 
+def _poisson_log_pmf(mean: float, goals: int) -> float:
+    return -mean + goals * math.log(mean) - math.lgamma(goals + 1)
+
+
 def _dixon_coles_tau(home_goals: int, away_goals: int, home_xg: float, away_xg: float, rho: float) -> float:
     if abs(rho) < 1e-12:
         return 1.0
@@ -45,6 +50,93 @@ def _dixon_coles_tau(home_goals: int, away_goals: int, home_xg: float, away_xg: 
     if home_goals == 1 and away_goals == 1:
         return 1.0 - rho
     return 1.0
+
+
+def estimate_dixon_coles_rho_from_scorelines(
+    scorelines: list[dict[str, Any]],
+    *,
+    min_sample_count: int = 20,
+    rho_grid: tuple[float, ...] = HISTORICAL_DIXON_COLES_RHO_GRID,
+) -> dict[str, Any]:
+    usable = []
+    for row in scorelines:
+        home_goals = parse_float(row.get("home_goals"))
+        away_goals = parse_float(row.get("away_goals"))
+        if home_goals is None or away_goals is None:
+            continue
+        if home_goals < 0 or away_goals < 0:
+            continue
+        usable.append((int(home_goals), int(away_goals)))
+
+    if len(usable) < max(1, int(min_sample_count or 0)):
+        return {
+            "available": False,
+            "method": "league_scoreline_dixon_coles_rho_mle_v1",
+            "reason": "insufficient_completed_scorelines",
+            "sample_count": len(usable),
+            "min_sample_count": max(1, int(min_sample_count or 0)),
+        }
+
+    home_goal_mean = max(sum(home for home, _away in usable) / len(usable), 0.05)
+    away_goal_mean = max(sum(away for _home, away in usable) / len(usable), 0.05)
+
+    best_rho = 0.0
+    best_log_likelihood = float("-inf")
+    zero_log_likelihood: float | None = None
+    grid_results = []
+    for rho in rho_grid:
+        log_likelihood = 0.0
+        valid = True
+        for home_goals, away_goals in usable:
+            tau = _dixon_coles_tau(home_goals, away_goals, home_goal_mean, away_goal_mean, rho)
+            if tau <= 0:
+                valid = False
+                break
+            log_likelihood += (
+                _poisson_log_pmf(home_goal_mean, home_goals)
+                + _poisson_log_pmf(away_goal_mean, away_goals)
+                + math.log(tau)
+            )
+        if not valid:
+            continue
+        grid_results.append({"rho": round_metric(rho, 4), "log_likelihood": round_metric(log_likelihood, 6)})
+        if abs(rho) < 1e-12:
+            zero_log_likelihood = log_likelihood
+        if log_likelihood > best_log_likelihood:
+            best_rho = float(rho)
+            best_log_likelihood = log_likelihood
+
+    if not grid_results:
+        return {
+            "available": False,
+            "method": "league_scoreline_dixon_coles_rho_mle_v1",
+            "reason": "no_valid_rho_candidate",
+            "sample_count": len(usable),
+            "min_sample_count": max(1, int(min_sample_count or 0)),
+        }
+
+    low_score_count = sum(1 for home_goals, away_goals in usable if home_goals <= 1 and away_goals <= 1)
+    return {
+        "available": True,
+        "method": "league_scoreline_dixon_coles_rho_mle_v1",
+        "rho": round_metric(best_rho, 4),
+        "sample_count": len(usable),
+        "min_sample_count": max(1, int(min_sample_count or 0)),
+        "home_goal_mean": round_metric(home_goal_mean, 4),
+        "away_goal_mean": round_metric(away_goal_mean, 4),
+        "low_score_count": low_score_count,
+        "low_score_share": round_metric(low_score_count / len(usable)),
+        "log_likelihood": round_metric(best_log_likelihood, 6),
+        "baseline_log_likelihood_at_zero": round_metric(zero_log_likelihood, 6),
+        "log_likelihood_gain_vs_zero": (
+            round_metric(best_log_likelihood - zero_log_likelihood, 6)
+            if zero_log_likelihood is not None
+            else None
+        ),
+        "rho_grid": [round_metric(value, 4) for value in rho_grid],
+        "grid_results": grid_results,
+        "estimation_rule": "Conditional maximum likelihood over rho using completed prior league scorelines and empirical home/away goal means.",
+    }
 
 
 @lru_cache(maxsize=32768)
@@ -439,6 +531,7 @@ def build_model_projection(
     odds: dict[str, Any],
     form: dict[str, Any],
     max_goals: int = 10,
+    historical_dixon_coles_rho: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a market-anchored Dixon-Coles scoreline projection for one match."""
 
@@ -503,6 +596,13 @@ def build_model_projection(
         max_goals=max_goals,
         rho_values=(0.0,),
     )
+    historical_rho_value = (
+        parse_float((historical_dixon_coles_rho or {}).get("rho"))
+        if (historical_dixon_coles_rho or {}).get("available")
+        else None
+    )
+    dixon_coles_rho_values = (historical_rho_value,) if historical_rho_value is not None else DIXON_COLES_RHO_GRID
+    rho_source = "historical_league_mle" if historical_rho_value is not None else "market_snapshot_grid_fit"
     home_xg, away_xg, dixon_coles_rho, loss, distribution = _fit_expected_goals(
         moneyline_target=moneyline_target,
         total_line=total_line,
@@ -512,7 +612,7 @@ def build_model_projection(
         form_total=form_total,
         strength_goal_diff=strength_goal_diff,
         max_goals=max_goals,
-        rho_values=DIXON_COLES_RHO_GRID,
+        rho_values=dixon_coles_rho_values,
     )
     baseline = _baseline_projection_summary(
         home_xg=baseline_home_xg,
@@ -534,6 +634,23 @@ def build_model_projection(
         asian_target=asian_target,
     )
 
+    historical_rho_public = None
+    if historical_dixon_coles_rho:
+        historical_rho_public = {
+            key: value
+            for key, value in historical_dixon_coles_rho.items()
+            if key not in {"grid_results"}
+        }
+    limits = [
+        (
+            "Dixon-Coles rho is estimated from prior completed league scorelines by conditional maximum likelihood; per-match xG remains market anchored."
+            if historical_rho_value is not None
+            else "Dixon-Coles rho is fitted on the current market snapshot grid when no prior league MLE is available."
+        ),
+        "Quarter-line Asian handicap and totals are represented as split-line settlement probabilities.",
+        "Rolling Elo is exposed as context; its probability weight remains zero until holdout validation supports it.",
+    ]
+
     return {
         "available": True,
         "version": MODEL_ENGINE_VERSION,
@@ -553,7 +670,9 @@ def build_model_projection(
         },
         "dixon_coles": {
             "rho": round_metric(dixon_coles_rho, 4),
-            "rho_grid": [round_metric(value, 4) for value in DIXON_COLES_RHO_GRID],
+            "rho_source": rho_source,
+            "rho_grid": [round_metric(value, 4) for value in dixon_coles_rho_values],
+            "historical_rho": historical_rho_public,
             "low_score_adjustment": True,
             "rule": "Dixon-Coles tau adjustment is applied to 0-0, 0-1, 1-0, and 1-1 scorelines, then the score matrix is renormalized.",
         },
@@ -586,11 +705,7 @@ def build_model_projection(
                 "recent_form": bool((form or {}).get("recent_record_summary")),
                 "rolling_elo": bool((((form or {}).get("team_strength") or {}).get("rolling_elo") or {}).get("available")),
             },
-            "limits": [
-                "Dixon-Coles rho is fitted on the current market snapshot grid, not yet on league-level historical maximum likelihood.",
-                "Quarter-line Asian handicap and totals are represented as split-line settlement probabilities.",
-                "Rolling Elo is exposed as context; its probability weight remains zero until holdout validation supports it.",
-            ],
+            "limits": limits,
         },
         "probability_source": "MCP Dixon-Coles adjusted scoreline distribution",
         "penaltyblog_adapter": {
