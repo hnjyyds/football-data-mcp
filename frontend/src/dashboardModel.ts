@@ -625,6 +625,7 @@ export function predictionStatusLabel(row: PredictionLedgerRow): string {
   if (row.status_label) return row.status_label;
   if (row.settlement_status === "settled") return row.hit ? "命中" : "未命中";
   if (row.settlement_status === "open") return "赛果待确认";
+  if (row.settlement_status === "unsettleable") return "无可用赛果源";
   if (row.settlement_status === "tracked_only") return "仅跟踪";
   if (row.settlement_status === "unsupported_market") return "不支持结算";
   return row.settlement_status || "未知";
