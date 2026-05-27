@@ -31,3 +31,7 @@ yarn-error.log*
 .idea/
 .vscode/
 .DS_Store
+
+# Claude cron state (per-instance, not for source control)
+.claude/scheduled_tasks.json
+.claude/scheduled_tasks.lock
