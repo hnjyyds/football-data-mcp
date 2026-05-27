@@ -430,12 +430,47 @@ def _fit_expected_goals(
     return best_home, best_away, best_rho, best_loss, best_distribution
 
 
-KELLY_FRACTION = 0.25
-KELLY_MAX_STAKE = 0.05
+KELLY_FRACTION_BASE = 0.25     # conservative starting Kelly fraction
+KELLY_FRACTION_AGGRESSIVE = 0.50  # used when CLV is sustained positive
+KELLY_MAX_STAKE = 0.05         # absolute cap as % of bankroll
+KELLY_CLV_THRESHOLD_GOOD = 0.015     # >= 1.5% sustained CLV → ramp toward aggressive
+KELLY_CLV_THRESHOLD_GREAT = 0.030    # >= 3% sustained CLV → fully aggressive
+CLV_MIN_SAMPLES_FOR_RAMP = 40        # need at least N CLV observations before ramping
 
 
-def _kelly_fraction(model_probability: float, decimal_odds: float, fraction: float = KELLY_FRACTION) -> dict[str, Any] | None:
-    """Compute fractional Kelly criterion stake recommendation (paper_only signal)."""
+def _resolve_kelly_fraction(avg_clv: float | None, clv_sample_count: int = 0) -> tuple[float, str]:
+    """
+    Adaptive Kelly fraction based on sustained CLV signal.
+
+    Returns (fraction, reason). Defaults to 0.25 (conservative). Ramps to 0.50
+    when CLV is solidly positive over enough samples.
+    """
+    if avg_clv is None or clv_sample_count < CLV_MIN_SAMPLES_FOR_RAMP:
+        return (KELLY_FRACTION_BASE, "default_no_clv_data")
+    if avg_clv >= KELLY_CLV_THRESHOLD_GREAT:
+        return (KELLY_FRACTION_AGGRESSIVE, "sustained_great_clv")
+    if avg_clv >= KELLY_CLV_THRESHOLD_GOOD:
+        ramp = KELLY_FRACTION_BASE + (KELLY_FRACTION_AGGRESSIVE - KELLY_FRACTION_BASE) * (
+            (avg_clv - KELLY_CLV_THRESHOLD_GOOD) / (KELLY_CLV_THRESHOLD_GREAT - KELLY_CLV_THRESHOLD_GOOD)
+        )
+        return (round(ramp, 3), "ramping_positive_clv")
+    if avg_clv < -0.005:
+        return (max(0.10, KELLY_FRACTION_BASE - 0.10), "clv_negative_caution")
+    return (KELLY_FRACTION_BASE, "neutral_clv")
+
+
+def _kelly_fraction(
+    model_probability: float,
+    decimal_odds: float,
+    fraction: float | None = None,
+    *,
+    avg_clv: float | None = None,
+    clv_sample_count: int = 0,
+) -> dict[str, Any] | None:
+    """Compute fractional Kelly criterion stake recommendation (paper_only signal).
+
+    If `fraction` is None, the fraction is resolved adaptively from CLV.
+    """
     if decimal_odds <= 1.0 or model_probability <= 0.0 or model_probability >= 1.0:
         return None
     b = decimal_odds - 1.0
@@ -443,12 +478,21 @@ def _kelly_fraction(model_probability: float, decimal_odds: float, fraction: flo
     full_kelly = (model_probability * b - q) / b
     if full_kelly <= 0:
         return None
-    frac_kelly = min(full_kelly * fraction, KELLY_MAX_STAKE)
+
+    if fraction is None:
+        resolved_fraction, fraction_reason = _resolve_kelly_fraction(avg_clv, clv_sample_count)
+    else:
+        resolved_fraction, fraction_reason = fraction, "explicit"
+
+    frac_kelly = min(full_kelly * resolved_fraction, KELLY_MAX_STAKE)
     return {
         "full_kelly": round_metric(full_kelly, 4),
         "fractional_kelly": round_metric(frac_kelly, 4),
-        "fraction_used": fraction,
+        "fraction_used": resolved_fraction,
+        "fraction_reason": fraction_reason,
         "max_stake_cap": KELLY_MAX_STAKE,
+        "avg_clv_observed": round_metric(avg_clv, 4) if avg_clv is not None else None,
+        "clv_sample_count": clv_sample_count,
         "paper_only": True,
     }
 
