@@ -737,18 +737,22 @@ def mark_unsettleable_stale_records(
     *,
     hours_after_kickoff: int = 48,
     db_path: str | None = None,
+    delete_immediately: bool = True,
 ) -> dict[str, Any]:
     """
-    Mark open records whose kickoff was >= N hours ago as 'unsettleable'.
+    Handle open records whose kickoff was >= N hours ago.
 
-    This prevents low-coverage leagues (Australian women's, Kazakh, Chinese
-    2nd tier, etc.) from accumulating forever in the open queue when no
-    public source has their scores. These records are excluded from KPIs
-    but kept for diagnostic visibility.
+    Default behavior (delete_immediately=True): hard-delete these records
+    plus matching stale shadow predictions. Unsettleable rows have no
+    analytical value — public score sources will never provide them, so
+    keeping them just pollutes KPIs, the UI ledger, and calibration recompute.
+
+    Set delete_immediately=False to keep the legacy behavior (mark only).
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_after_kickoff)
     cutoff_iso = cutoff.isoformat()
     affected = 0
+    shadow_affected = 0
     leagues_affected: dict[str, int] = {}
     with _connect(db_path) as conn:
         ensure_schema(conn)
@@ -765,26 +769,47 @@ def mark_unsettleable_stale_records(
         for row in rows:
             league = str(row["league"] or "unknown")
             leagues_affected[league] = leagues_affected.get(league, 0) + 1
-            conn.execute(
-                """
-                UPDATE recommendation_records
-                SET settlement_status = 'unsettleable',
-                    settled_at_utc = ?
-                WHERE id = ?
-                """,
-                (now_utc_iso(), row["id"]),
-            )
+            if delete_immediately:
+                conn.execute("DELETE FROM recommendation_records WHERE id = ?", (row["id"],))
+            else:
+                conn.execute(
+                    """
+                    UPDATE recommendation_records
+                    SET settlement_status = 'unsettleable',
+                        settled_at_utc = ?
+                    WHERE id = ?
+                    """,
+                    (now_utc_iso(), row["id"]),
+                )
             affected += 1
+
+        # Mirror on shadow_prediction_records
+        if delete_immediately:
+            cursor = conn.execute(
+                """
+                DELETE FROM shadow_prediction_records
+                WHERE settlement_status = 'open'
+                  AND kickoff_utc IS NOT NULL
+                  AND kickoff_utc != ''
+                  AND kickoff_utc < ?
+                """,
+                (cutoff_iso,),
+            )
+            shadow_affected = cursor.rowcount or 0
+
         conn.commit()
     return {
         "status": "ok",
+        "action": "deleted" if delete_immediately else "marked_unsettleable",
         "affected_count": affected,
+        "shadow_affected_count": shadow_affected,
         "leagues_affected": dict(sorted(leagues_affected.items(), key=lambda kv: -kv[1])),
         "cutoff_hours": hours_after_kickoff,
         "cutoff_iso": cutoff_iso,
         "rule": (
-            f"Records open beyond {hours_after_kickoff}h after kickoff are marked "
-            "'unsettleable' (no public source provides scores)."
+            f"Records open beyond {hours_after_kickoff}h after kickoff are "
+            f"{'hard-deleted' if delete_immediately else 'marked unsettleable'} "
+            "(no public source provides scores; no analytical value)."
         ),
     }
 

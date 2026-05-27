@@ -159,16 +159,14 @@ def test_executes_cleanup_with_correct_actions(tmp_path):
     report = db_janitor.run_janitor(db_path=db_path, dry_run=False)
 
     assert report["dry_run"] is False
-    # Orphan + archived_unsettleable deleted
-    # stale_open marked
-    # empty bucket deleted
-    # old shadow deleted
-    assert report["totals"]["deleted"] == 4  # 1 orphan + 1 archived unsettleable + 1 empty bucket + 1 old shadow
-    assert report["totals"]["marked"] == 1   # 1 stale open
+    # All categories are now hard-delete (unsettleable rows have no value):
+    # 1 orphan + 1 stale_open + 1 archived_unsettleable + 1 empty bucket + 1 old shadow
+    assert report["totals"]["deleted"] == 5
+    assert report["totals"]["marked"] == 0  # nothing is just "marked" anymore
 
     conn = sqlite3.connect(db_path)
-    # Total should be 5 - 2 deletions in recommendation_records = 3
-    assert conn.execute("SELECT COUNT(*) FROM recommendation_records").fetchone()[0] == 3
+    # Total should be 5 - 3 deletions in recommendation_records = 2
+    assert conn.execute("SELECT COUNT(*) FROM recommendation_records").fetchone()[0] == 2
 
     # Settled record must still exist
     row = conn.execute("SELECT settlement_status FROM recommendation_records WHERE record_key = 'rec:settled1'").fetchone()
@@ -178,9 +176,9 @@ def test_executes_cleanup_with_correct_actions(tmp_path):
     row = conn.execute("SELECT settlement_status FROM recommendation_records WHERE record_key = 'rec:recent1'").fetchone()
     assert row is not None and row[0] == "open"
 
-    # Stale open is now unsettleable
+    # Stale open is now deleted (not marked)
     row = conn.execute("SELECT settlement_status FROM recommendation_records WHERE record_key = 'rec:stale1'").fetchone()
-    assert row is not None and row[0] == "unsettleable"
+    assert row is None
 
     # Orphan and archived_unsettleable gone
     assert conn.execute("SELECT COUNT(*) FROM recommendation_records WHERE record_key IN ('rec:orphan1', 'rec:archived1')").fetchone()[0] == 0
