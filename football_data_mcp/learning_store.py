@@ -18,7 +18,7 @@ except ImportError:
     _SKLEARN_AVAILABLE = False
 
 DEFAULT_LEARNING_DB = "/tmp/football_data_mcp_learning.sqlite3"
-MAX_LEARNING_SAMPLE_MINUTES_TO_KICKOFF = 60  # extended from 10 to 60 for faster sample accumulation
+MAX_LEARNING_SAMPLE_MINUTES_TO_KICKOFF = 240  # 4h window matches daemon's 180min scan, with 1h buffer
 ISOTONIC_CALIBRATION_MIN_SAMPLES = 50  # threshold to switch from Bayesian shrinkage to isotonic regression
 MIN_MODEL_CERTAINTY = 0.5  # below this, the xG confidence band is too wide → skip the bet
 DEFAULT_BALANCED_STRATEGY = {

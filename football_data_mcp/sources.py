@@ -15620,8 +15620,15 @@ async def auto_learning_daemon(
     )
     janitor_interval_seconds = int(os.getenv("FOOTBALL_DATA_JANITOR_INTERVAL_SECONDS", "21600"))  # 6h
     last_janitor_ts = 0.0
+    consecutive_empty_cycles = 0  # for adaptive window
     while True:
         AUTO_LEARNING_STATE["last_started_at_utc"] = now_utc().isoformat()
+        # Adaptive window: if we got nothing the last 3 cycles, widen up to 6h
+        effective_window = bounded_asian_window_minutes
+        if consecutive_empty_cycles >= 3:
+            effective_window = min(bounded_asian_window_minutes * 2, 360)
+        AUTO_LEARNING_STATE["effective_window_minutes"] = effective_window
+        AUTO_LEARNING_STATE["consecutive_empty_cycles"] = consecutive_empty_cycles
         # Periodic DB janitor (every 6h by default) — runs before the learning
         # cycle so cleanup happens on a freshly settled DB
         now_ts = time.time()
@@ -15642,7 +15649,7 @@ async def auto_learning_daemon(
         try:
             result = await run_auto_learning_cycle(
                 timezone_name=timezone_name or "Asia/Shanghai",
-                asian_window_minutes=bounded_asian_window_minutes,
+                asian_window_minutes=effective_window,
                 parlay_window_minutes=bounded_parlay_window_minutes,
                 learning_observation_limit=bounded_learning_observation_limit,
                 shadow_prediction_limit=bounded_shadow_prediction_limit,
@@ -15692,6 +15699,25 @@ async def auto_learning_daemon(
                 "settled_count": ((result.get("settlement") or {}).get("settlement") or {}).get("settled_count"),
                 "shadow_settled_count": ((result.get("settlement") or {}).get("shadow_settlement") or {}).get("settled_count"),
             }
+            # Update consecutive_empty_cycles tracker
+            saved_total = (
+                int(result.get("saved_record_count") or 0)
+                + int(result.get("saved_shadow_prediction_count") or 0)
+            )
+            if saved_total > 0:
+                consecutive_empty_cycles = 0
+            else:
+                consecutive_empty_cycles += 1
+            # Log a one-line summary for nightly visibility
+            cands = (result.get("asian_shortlist") or {}).get("total_candidates") or 0
+            print(
+                f"[daemon] cycle done: window={effective_window}min "
+                f"candidates={cands} saved_rec={result.get('saved_record_count')} "
+                f"saved_shadow={result.get('saved_shadow_prediction_count')} "
+                f"settled={((result.get('settlement') or {}).get('settlement') or {}).get('settled_count')} "
+                f"empty_streak={consecutive_empty_cycles}",
+                flush=True,
+            )
         except Exception as exc:
             AUTO_LEARNING_STATE["last_error"] = f"{type(exc).__name__}: {exc}"
             print(f"football-data auto-learning error: {AUTO_LEARNING_STATE['last_error']}", flush=True)
