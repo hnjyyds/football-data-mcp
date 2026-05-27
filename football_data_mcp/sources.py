@@ -9356,6 +9356,8 @@ async def run_auto_learning_cycle(
     include_snapshot_reanalysis: bool = True,
     snapshot_reanalysis_limit: int = 20,
     snapshot_reanalysis_concurrency: int = 4,
+    enforce_settlement_coverage: bool = True,
+    league_allowlist: list[str] | frozenset[str] | None = None,
     db_path: str | None = None,
 ) -> dict[str, Any]:
     """Run one paper-learning loop: recommend, persist, optionally settle, then refresh calibration."""
@@ -9405,6 +9407,8 @@ async def run_auto_learning_cycle(
             analysis_candidate_limit=bounded_analysis_candidate_limit,
             analysis_concurrency=bounded_analysis_concurrency,
             recommendation_log_path=None,
+            enforce_settlement_coverage=enforce_settlement_coverage,
+            league_allowlist=league_allowlist,
             db_path=db_path,
         )
         asian_records = learning_store.build_records_from_shortlist(asian_result, run_id=run_id)
@@ -15498,6 +15502,8 @@ async def auto_learning_daemon(
     include_snapshot_reanalysis: bool = True,
     snapshot_reanalysis_limit: int = 20,
     snapshot_reanalysis_concurrency: int = 4,
+    enforce_settlement_coverage: bool = True,
+    league_allowlist: list[str] | frozenset[str] | None = None,
 ) -> None:
     bounded_asian_window_minutes = max(1, min(int(asian_window_minutes or 60), 48 * 60))
     bounded_parlay_window_minutes = max(1, min(int(parlay_window_minutes or JINGCAI_PARLAY_DEFAULT_WINDOW_MINUTES), 48 * 60))
@@ -15531,6 +15537,11 @@ async def auto_learning_daemon(
             "snapshot_reanalysis_enabled": bool(include_snapshot_reanalysis),
             "snapshot_reanalysis_limit": bounded_snapshot_reanalysis_limit,
             "snapshot_reanalysis_concurrency": bounded_snapshot_reanalysis_concurrency,
+            "enforce_settlement_coverage": bool(enforce_settlement_coverage),
+            "league_allowlist_size": (
+                len(league_allowlist) if league_allowlist is not None
+                else (len(SETTLEMENT_COVERED_LEAGUES_DEFAULT) if enforce_settlement_coverage else 0)
+            ),
         }
     )
     janitor_interval_seconds = int(os.getenv("FOOTBALL_DATA_JANITOR_INTERVAL_SECONDS", "21600"))  # 6h
@@ -15574,6 +15585,8 @@ async def auto_learning_daemon(
                 top_n=top_n,
                 limit=limit,
                 auto_settle=True,
+                enforce_settlement_coverage=enforce_settlement_coverage,
+                league_allowlist=league_allowlist,
             )
             AUTO_LEARNING_STATE["run_count"] = int(AUTO_LEARNING_STATE.get("run_count") or 0) + 1
             AUTO_LEARNING_STATE["last_error"] = None
@@ -15614,6 +15627,80 @@ async def auto_learning_daemon(
         await asyncio.sleep(max(60, int(interval_seconds or 600)))
 
 
+## ─── Settlement-coverage allowlist ────────────────────────────────────────────
+# Leagues where we can reliably get post-match scores from public sources
+# (football-data.co.uk CSV + dongqiudi schedule_list + football-data.org).
+# Recommendations outside this list are filtered out by default, because
+# they'd accumulate as 'unsettleable' and skew KPIs without ever closing.
+#
+# Sources of coverage:
+# - football-data.co.uk: top 18 European leagues (PL, BL1, SA, PD, FL1, etc.)
+# - football-data.org free tier: PL, BL1, SA, PD, FL1, DED, PPL, ELC, CL, BSA, EC, CLI, WC
+# - dongqiudi: mainstream men's leagues (CSL, JL, etc.) + UEFA competitions
+#
+# Use Chinese names from dongqiudi or league codes — _league_in_allowlist
+# normalizes both with fuzzy matching.
+
+SETTLEMENT_COVERED_LEAGUES_DEFAULT = frozenset({
+    # ── Top 5 European leagues ──
+    "英超", "英冠", "英甲", "英乙", "Premier League", "Championship",
+    "西甲", "西乙", "La Liga", "Segunda División", "Primera División",
+    "意甲", "意乙", "Serie A", "Serie B",
+    "德甲", "德乙", "Bundesliga", "2. Bundesliga",
+    "法甲", "法乙", "Ligue 1", "Ligue 2",
+    # ── Other major European ──
+    "荷甲", "葡超", "Eredivisie", "Primeira Liga",
+    "苏超", "比甲", "土超", "希超", "瑞超", "挪超", "丹超", "奥甲",
+    # ── European cups ──
+    "欧冠", "欧联", "欧协", "欧国联", "Champions League", "Europa League",
+    "Europa Conference League", "UEFA Champions League", "UEFA Europa League",
+    "Nations League",
+    # ── Top South American ──
+    "巴甲", "Brasileirão", "Série A", "Campeonato Brasileiro",
+    "Copa Libertadores", "解放者杯", "南美杯", "Sudamericana",
+    "阿超", "阿甲",  # Argentina top tier
+    # ── East Asian top tiers ──
+    "中超", "Chinese Super League",
+    "日职", "J联赛", "J-League", "J1",
+    "韩K联", "K-League",
+    # ── Top international ──
+    "世界杯", "World Cup", "亚洲杯", "Asian Cup", "美洲杯", "Copa America",
+    "欧洲杯", "Euro",
+})
+
+# League name normalization for fuzzy matching
+_LEAGUE_NAME_SUFFIXES_TO_STRIP = ("联赛", " ", "  ")
+
+
+def _normalize_league_for_match(name: str | None) -> str:
+    """Normalize a league name for fuzzy comparison."""
+    s = str(name or "").strip().lower()
+    for suf in _LEAGUE_NAME_SUFFIXES_TO_STRIP:
+        if suf and s.endswith(suf):
+            s = s[: -len(suf)]
+    return s.strip()
+
+
+def _league_in_allowlist(league: str | None, allowlist: frozenset[str] | set[str] | list[str]) -> bool:
+    """Check if a league is in the allowlist with bidirectional substring match."""
+    if not league:
+        return False  # No league info → conservatively reject
+    if not allowlist:
+        return True   # Empty allowlist = no filter
+    canonical = _normalize_league_for_match(league)
+    if not canonical:
+        return False
+    for allowed in allowlist:
+        allowed_norm = _normalize_league_for_match(allowed)
+        if not allowed_norm:
+            continue
+        if canonical == allowed_norm:
+            return True
+        if canonical in allowed_norm or allowed_norm in canonical:
+            return True
+    return False
+
+
 async def shortlist_value_matches(
     *,
     query: str = "",
@@ -15635,6 +15722,8 @@ async def shortlist_value_matches(
     analysis_concurrency: int = 6,
     recommendation_log_path: str | None = None,
     use_learning_policy: bool = True,
+    league_allowlist: list[str] | frozenset[str] | None = None,
+    enforce_settlement_coverage: bool = False,
     db_path: str | None = None,
 ) -> dict[str, Any]:
     """List imminent matches, analyze each with MCP calculations, and rank actionable value picks."""
@@ -15688,6 +15777,29 @@ async def shortlist_value_matches(
     matches = match_list.get("matches") or []
     picks: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+
+    # Apply settlement-coverage allowlist filter BEFORE analysis to save compute
+    # and prevent unsettleable records from entering the recommendation pool.
+    effective_allowlist: frozenset[str] | None = None
+    if league_allowlist is not None:
+        effective_allowlist = frozenset(league_allowlist)
+    elif enforce_settlement_coverage:
+        effective_allowlist = SETTLEMENT_COVERED_LEAGUES_DEFAULT
+
+    if effective_allowlist:
+        allowed_matches = []
+        for m in matches:
+            m_league = str(m.get("league") or m.get("competition_name") or "")
+            if _league_in_allowlist(m_league, effective_allowlist):
+                allowed_matches.append(m)
+            else:
+                rejected.append({
+                    "match": m,
+                    "reason": "league_not_in_settlement_allowlist",
+                    "rejected_league": m_league,
+                })
+        matches = allowed_matches
+
     bounded_limit = max(1, int(limit or 30))
     bounded_analysis_limit = max(1, min(bounded_limit, int(analysis_candidate_limit or 30), 100))
     bounded_concurrency = max(1, min(int(analysis_concurrency or 6), 16))

@@ -640,6 +640,8 @@ async def shortlist_value_matches(
     analysis_candidate_limit: int = 30,
     analysis_concurrency: int = 6,
     use_learning_policy: bool = True,
+    enforce_settlement_coverage: bool = False,
+    league_allowlist: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Pick the most valuable football matches starting in the next window, default next 60 minutes.
@@ -675,6 +677,8 @@ async def shortlist_value_matches(
         analysis_candidate_limit=analysis_candidate_limit or 30,
         analysis_concurrency=analysis_concurrency or 6,
         use_learning_policy=use_learning_policy,
+        enforce_settlement_coverage=enforce_settlement_coverage,
+        league_allowlist=league_allowlist,
     )
 
 
@@ -1021,7 +1025,19 @@ def _auto_learning_config_from_env() -> dict[str, Any]:
         "include_snapshot_reanalysis": env_bool("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REANALYSIS", True),
         "snapshot_reanalysis_limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_REANALYSIS_LIMIT", "20") or "20"),
         "snapshot_reanalysis_concurrency": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_REANALYSIS_CONCURRENCY", "4") or "4"),
+        # Settlement-coverage allowlist (default ON to prevent unsettleable accumulation)
+        "enforce_settlement_coverage": env_bool("FOOTBALL_DATA_AUTO_ENFORCE_SETTLEMENT_COVERAGE", True),
+        "league_allowlist": _parse_league_allowlist_env(),
     }
+
+
+def _parse_league_allowlist_env() -> list[str] | None:
+    """Custom allowlist via FOOTBALL_DATA_LEAGUE_ALLOWLIST env (comma-separated)."""
+    raw = os.getenv("FOOTBALL_DATA_LEAGUE_ALLOWLIST", "").strip()
+    if not raw:
+        return None
+    leagues = [item.strip() for item in raw.split(",") if item.strip()]
+    return leagues if leagues else None
 
 
 if __name__ == "__main__":
