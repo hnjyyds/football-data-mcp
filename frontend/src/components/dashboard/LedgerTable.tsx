@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ChevronUp, CheckCircle2, XCircle, Clock, Eye } from "lucide-react";
+import { Icon } from "../shared/Icon";
 import type { PredictionLedgerRow } from "../../types";
 import { TeamLogo } from "../shared/TeamLogo";
 import { Badge } from "../shared/Badge";
@@ -39,11 +39,11 @@ function applyFilter(rows: PredictionLedgerRow[], filter: Filter): PredictionLed
 function StatusIcon({ row }: { row: PredictionLedgerRow }) {
   if (row.settlement_status === "settled") {
     return row.hit === 1
-      ? <CheckCircle2 size={14} className="text-emerald-500" />
-      : <XCircle size={14} className="text-red-400" />;
+      ? <Icon name="success" size={14} className="text-success-500" />
+      : <Icon name="error" size={14} className="text-danger-500" />;
   }
-  if (row.settlement_status === "open") return <Clock size={14} className="text-amber-500" />;
-  return <Eye size={14} className="text-slate-400" />;
+  if (row.settlement_status === "open") return <Icon name="pending" size={14} className="text-warning-500" />;
+  return <Icon name="eye" size={14} className="text-ink-400" />;
 }
 
 export function LedgerTable({
@@ -77,7 +77,7 @@ export function LedgerTable({
           className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 transition-colors"
           aria-label={collapsed ? "展开台账" : "折叠台账"}
         >
-          {collapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+          <Icon name={collapsed ? "chevronDown" : "chevronUp"} size={16} />
         </button>
       </div>
 

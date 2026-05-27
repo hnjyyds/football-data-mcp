@@ -1,4 +1,4 @@
-import { CheckCircle2, XCircle, AlertTriangle, Lock, Unlock } from "lucide-react";
+import { Icon } from "../shared/Icon";
 import { Badge, toneVariant } from "../shared/Badge";
 
 type Gate = {
@@ -10,10 +10,10 @@ type Gate = {
 };
 
 function GateIcon({ tone }: { tone: string | undefined }) {
-  if (tone === "good") return <CheckCircle2 size={14} className="text-emerald-500" />;
-  if (tone === "bad") return <XCircle size={14} className="text-red-400" />;
-  if (tone === "caution") return <AlertTriangle size={14} className="text-amber-500" />;
-  return <AlertTriangle size={14} className="text-slate-400" />;
+  if (tone === "good") return <Icon name="success" size={14} className="text-success-500" />;
+  if (tone === "bad") return <Icon name="error" size={14} className="text-danger-500" />;
+  if (tone === "caution") return <Icon name="warn" size={14} className="text-warning-500" />;
+  return <Icon name="warn" size={14} className="text-ink-400" />;
 }
 
 export function ProductionGates({
@@ -29,7 +29,7 @@ export function ProductionGates({
   return (
     <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-100 dark:border-slate-700/50">
-        {isReady ? <Unlock size={16} className="text-emerald-500" /> : <Lock size={16} className="text-amber-500" />}
+        <Icon name={isReady ? "unlock" : "lock"} size={16} className={isReady ? "text-success-500" : "text-warning-500"} />
         <span className="font-semibold text-slate-900 dark:text-white text-sm flex-1">上线门控</span>
         <Badge variant={toneVariant(overallTone)}>{overallLabel}</Badge>
       </div>

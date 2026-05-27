@@ -1,14 +1,14 @@
-import { CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
+import { Icon } from "../shared/Icon";
 import type { DashboardSnapshot } from "../../types";
 
 function StatusIcon({ status }: { status: string | null | undefined }) {
   if (status === "ok" || status === "fresh" || status === "live") {
-    return <CheckCircle2 size={14} className="text-emerald-500 flex-shrink-0" />;
+    return <Icon name="success" size={14} className="text-success-500 flex-shrink-0" />;
   }
   if (status === "stale" || status === "degraded" || status === "partial") {
-    return <AlertTriangle size={14} className="text-amber-500 flex-shrink-0" />;
+    return <Icon name="warn" size={14} className="text-warning-500 flex-shrink-0" />;
   }
-  return <XCircle size={14} className="text-red-400 flex-shrink-0" />;
+  return <Icon name="error" size={14} className="text-danger-500 flex-shrink-0" />;
 }
 
 export function HealthPanel({ snapshot }: { snapshot: DashboardSnapshot }) {

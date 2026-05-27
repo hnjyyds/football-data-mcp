@@ -437,6 +437,171 @@ async def fetch_all_upcoming_matches(
             await client.aclose()
 
 
+# ─── FDO Enrichment Index ─────────────────────────────────────────────────────
+# Reverse-lookup index: (team_name_normalized, date) → fixture with logos
+# Refreshed periodically by snapshot building.
+
+_FDO_TEAM_INDEX: dict[str, dict[str, Any]] = {}
+_FDO_TEAM_INDEX_BUILT_AT: float = 0.0
+_FDO_TEAM_INDEX_TTL = 600.0  # 10 minutes
+
+
+def _normalize_team_key(name: str | None) -> str:
+    """Normalize team name for fuzzy lookup."""
+    if not name:
+        return ""
+    s = str(name).lower().strip()
+    # Strip common suffixes
+    for suffix in (" fc", " cf", " afc", " sc", " ac", " united"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    # Collapse whitespace
+    return " ".join(s.split())
+
+
+def _make_team_index_key(team: str, date_iso: str | None = None) -> str:
+    """Index lookup key: 'team_normalized' or 'team_normalized@date'."""
+    key = _normalize_team_key(team)
+    if date_iso:
+        # Use only date portion (UTC), not full timestamp
+        date_part = (date_iso or "")[:10]
+        return f"{key}@{date_part}"
+    return key
+
+
+async def build_fdo_team_index(force: bool = False) -> dict[str, Any]:
+    """
+    Build a reverse-lookup index from team-name to fdo fixture data.
+
+    Fetches the next ~14 days of fixtures from /matches (1 API call) and indexes
+    by team name (both teams) + by team@date. Used by dashboard to enrich
+    records with crest URLs and league metadata.
+
+    Returns summary metadata; the index is stored module-level.
+    """
+    global _FDO_TEAM_INDEX, _FDO_TEAM_INDEX_BUILT_AT
+
+    if not force and (time.time() - _FDO_TEAM_INDEX_BUILT_AT) < _FDO_TEAM_INDEX_TTL:
+        return {
+            "status": "ok",
+            "from_cache": True,
+            "entries": len(_FDO_TEAM_INDEX),
+            "built_at": _FDO_TEAM_INDEX_BUILT_AT,
+        }
+
+    if not _fdo_token():
+        return {"status": "not_configured", "entries": 0}
+
+    # Fetch a 9-day forward window (API limits to <=10 days span)
+    import datetime as _dt
+    today = _dt.date.today()
+    end = today + _dt.timedelta(days=8)
+    start = today - _dt.timedelta(days=1)  # include yesterday for late-settled context
+
+    result = await fetch_all_upcoming_matches(
+        date_from=start.isoformat(),
+        date_to=end.isoformat(),
+    )
+    if result.get("status") != "ok":
+        return {
+            "status": result.get("status", "error"),
+            "reason": result.get("reason"),
+            "entries": 0,
+        }
+
+    fixtures = result.get("fixtures") or []
+    new_index: dict[str, dict[str, Any]] = {}
+
+    for f in fixtures:
+        kickoff = f.get("kickoff_utc")
+        date_part = (kickoff or "")[:10]
+        # Build per-side enriched payload
+        enrichment_payload = {
+            "fdo_id": f.get("fdo_id"),
+            "kickoff_utc": kickoff,
+            "league": f.get("league"),
+            "league_code": f.get("league_code"),
+            "competition_name": f.get("competition_name"),
+            "home_team": f.get("home_team"),
+            "away_team": f.get("away_team"),
+            "home_team_logo_url": f.get("home_team_logo_url"),
+            "away_team_logo_url": f.get("away_team_logo_url"),
+            "home_team_short": f.get("home_team_short"),
+            "away_team_short": f.get("away_team_short"),
+            "home_team_tla": f.get("home_team_tla"),
+            "away_team_tla": f.get("away_team_tla"),
+            "referees": f.get("referees"),
+            "status": f.get("status"),
+        }
+        # Index by both teams, also by team@date for tighter match
+        for team_name in (f.get("home_team"), f.get("home_team_short"), f.get("home_team_tla"),
+                          f.get("away_team"), f.get("away_team_short"), f.get("away_team_tla")):
+            if not team_name:
+                continue
+            k = _make_team_index_key(team_name)
+            if k and k not in new_index:
+                new_index[k] = enrichment_payload
+            if date_part:
+                kd = _make_team_index_key(team_name, date_part)
+                if kd:
+                    new_index[kd] = enrichment_payload
+
+    _FDO_TEAM_INDEX = new_index
+    _FDO_TEAM_INDEX_BUILT_AT = time.time()
+    return {
+        "status": "ok",
+        "from_cache": False,
+        "entries": len(_FDO_TEAM_INDEX),
+        "fixtures": len(fixtures),
+        "date_range": [start.isoformat(), end.isoformat()],
+    }
+
+
+def lookup_fdo_enrichment(
+    home_team: str | None,
+    away_team: str | None,
+    kickoff_iso: str | None = None,
+) -> dict[str, Any] | None:
+    """
+    Look up FDO enrichment for a (home, away, kickoff) tuple.
+
+    Tries: team+date → team-only; both home and away as anchors.
+    Returns None if no match.
+    """
+    if not _FDO_TEAM_INDEX:
+        return None
+
+    date_part = (kickoff_iso or "")[:10] if kickoff_iso else None
+    candidates = []
+    # Build candidate keys in priority order: home@date, away@date, home, away
+    if home_team and date_part:
+        candidates.append(_make_team_index_key(home_team, date_part))
+    if away_team and date_part:
+        candidates.append(_make_team_index_key(away_team, date_part))
+    if home_team:
+        candidates.append(_make_team_index_key(home_team))
+    if away_team:
+        candidates.append(_make_team_index_key(away_team))
+
+    for key in candidates:
+        if not key:
+            continue
+        hit = _FDO_TEAM_INDEX.get(key)
+        if hit:
+            # Verify the hit's team names roughly match ours (avoid false positive
+            # when a normalized name accidentally matches a different team)
+            hit_home = _normalize_team_key(hit.get("home_team"))
+            hit_away = _normalize_team_key(hit.get("away_team"))
+            our_home = _normalize_team_key(home_team)
+            our_away = _normalize_team_key(away_team)
+            home_match = bool(our_home) and (our_home == hit_home or our_home in hit_home or hit_home in our_home)
+            away_match = bool(our_away) and (our_away == hit_away or our_away in hit_away or hit_away in our_away)
+            if home_match or away_match:
+                return hit
+    return None
+
+
 async def fetch_competitions() -> dict[str, Any]:
     """List all competitions the current API key has access to (cached 1h)."""
     token = _fdo_token()

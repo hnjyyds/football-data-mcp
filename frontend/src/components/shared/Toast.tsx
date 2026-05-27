@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, AlertTriangle, X } from "lucide-react";
+import { Icon } from "./Icon";
 
 export type ToastItem = {
   id: string;
@@ -19,13 +19,13 @@ function ToastEntry({ item, onDismiss }: { item: ToastItem; onDismiss: (id: stri
     return () => clearTimeout(t);
   }, [item.id, onDismiss]);
 
-  const Icon = item.type === "success" ? CheckCircle2 : AlertTriangle;
+  const iconName = item.type === "success" ? "success" : "warn";
   return (
     <div className={`flex items-start gap-2 px-4 py-3 rounded-xl border shadow-md text-sm max-w-sm ${TYPE_STYLES[item.type]}`}>
-      <Icon size={16} className="flex-shrink-0 mt-0.5" />
+      <Icon name={iconName} size={16} className="flex-shrink-0 mt-0.5" />
       <span className="flex-1">{item.message}</span>
       <button type="button" onClick={() => onDismiss(item.id)} className="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity" aria-label="关闭">
-        <X size={14} />
+        <Icon name="close" size={14} />
       </button>
     </div>
   );

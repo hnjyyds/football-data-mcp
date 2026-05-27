@@ -1,4 +1,4 @@
-import { Settings2 } from "lucide-react";
+import { Icon } from "../shared/Icon";
 import type { DashboardSnapshot } from "../../types";
 import { Badge, toneVariant } from "../shared/Badge";
 
@@ -36,7 +36,7 @@ export function StrategyStateCard({ snapshot }: { snapshot: DashboardSnapshot })
   return (
     <section className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-100 dark:border-slate-700/50">
-        <Settings2 size={14} className="text-slate-500 dark:text-slate-400" />
+        <Icon name="settingsAlt" size={14} className="text-ink-500 dark:text-ink-400" />
         <span className="font-semibold text-slate-900 dark:text-white text-sm flex-1">策略状态</span>
         <Badge variant={toneVariant(tone)}>{statusLabel}</Badge>
       </div>
