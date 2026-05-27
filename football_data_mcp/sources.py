@@ -5387,6 +5387,10 @@ def public_dongqiudi_fixture(match: dict[str, Any], *, score: float | None = Non
         "time": kickoff.astimezone(DEFAULT_USER_TIMEZONE).strftime("%H:%M") if kickoff else "",
         "home_team": home.get("name") or "",
         "away_team": away.get("name") or "",
+        "home_team_logo_url": home.get("logo") or "",
+        "away_team_logo_url": away.get("logo") or "",
+        "home_team_id": home.get("id") or None,
+        "away_team_id": away.get("id") or None,
         "home_rank": home.get("league_rank") or "",
         "away_rank": away.get("league_rank") or "",
         "match_id": str(match.get("match_id") or ""),
@@ -9643,6 +9647,69 @@ def _ensure_fdo_index_warm() -> None:
         pass  # silent — enrichment is best-effort
 
 
+# ─── Dongqiudi team logo index ────────────────────────────────────────────────
+# Cumulative team-name → logo URL map, persisted across daemon runs so historical
+# records can be enriched with logos that were learned from any past listing.
+_DONGQIUDI_TEAM_LOGO_CACHE: dict[str, str] = {}
+_DONGQIUDI_LOGO_CACHE_BUILT_AT: float = 0.0
+_DONGQIUDI_LOGO_CACHE_TTL = 600.0  # rebuild from listings every 10 min
+
+
+async def _refresh_dongqiudi_team_logo_cache() -> dict[str, Any]:
+    """Walk recent dongqiudi listings and accumulate (team_name → logo_url) pairs."""
+    global _DONGQIUDI_LOGO_CACHE_BUILT_AT
+    try:
+        as_of_dt = now_utc()
+        # Past 3 days + next 2 days
+        from datetime import timedelta as _td
+        learned = 0
+        for offset in range(-3, 3):
+            local_day = as_of_dt + _td(days=offset)
+            try:
+                rows, _src = await load_dongqiudi_matches_for_date(local_day, tab_type="fixture")
+            except Exception:
+                rows = []
+            try:
+                rows_r, _src = await load_dongqiudi_matches_for_date(local_day, tab_type="result")
+            except Exception:
+                rows_r = []
+            for row in rows + rows_r:
+                for side in ("team_A", "team_B"):
+                    t = row.get(side) or {}
+                    name = (t.get("name") or "").strip()
+                    logo = (t.get("logo") or "").strip()
+                    if name and logo and name not in _DONGQIUDI_TEAM_LOGO_CACHE:
+                        _DONGQIUDI_TEAM_LOGO_CACHE[name] = logo
+                        learned += 1
+        _DONGQIUDI_LOGO_CACHE_BUILT_AT = time.time()
+        return {"status": "ok", "learned": learned, "total_cached": len(_DONGQIUDI_TEAM_LOGO_CACHE)}
+    except Exception as exc:
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _ensure_dongqiudi_logo_cache_warm() -> None:
+    """Refresh dongqiudi team-logo cache when stale (best-effort, non-blocking)."""
+    if time.time() - _DONGQIUDI_LOGO_CACHE_BUILT_AT < _DONGQIUDI_LOGO_CACHE_TTL:
+        return
+    import asyncio as _aio
+    try:
+        try:
+            loop = _aio.get_running_loop()
+            loop.create_task(_refresh_dongqiudi_team_logo_cache())
+        except RuntimeError:
+            _aio.run(_refresh_dongqiudi_team_logo_cache())
+    except Exception:
+        pass
+
+
+def _dashboard_dongqiudi_logo_fallback(record: dict[str, Any], side: str) -> str:
+    """Look up a team's logo from the cumulative dongqiudi cache."""
+    team_name = (record.get(f"{side}_team") or "").strip()
+    if not team_name:
+        return ""
+    return _DONGQIUDI_TEAM_LOGO_CACHE.get(team_name, "")
+
+
 def _dashboard_fdo_logo_fallback(record: dict[str, Any], side: str) -> str:
     """If FDO index has this team, use its crest URL. Falls back to '' silently."""
     try:
@@ -9694,7 +9761,11 @@ def _dashboard_team_logo_url(record: dict[str, Any], side: str) -> str:
         logo_url = _dashboard_logo_url(_dashboard_get_path(raw, path))
         if logo_url:
             return logo_url
-    # Final fallback: football-data.org enrichment index
+    # Fallback 1: cumulative dongqiudi team-logo cache (Chinese team names)
+    dq_url = _dashboard_dongqiudi_logo_fallback(record, side)
+    if dq_url:
+        return dq_url
+    # Fallback 2: football-data.org enrichment index (English team names)
     fdo_url = _dashboard_fdo_logo_fallback(record, side)
     if fdo_url:
         return fdo_url
@@ -15262,8 +15333,9 @@ def dashboard_snapshot(
 ) -> dict[str, Any]:
     """Build a read-only dashboard snapshot from persisted paper-learning state."""
     bounded_limit = max(10, min(int(limit or 500), 500))
-    # Warm the football-data.org enrichment index in the background; safe to fail
+    # Warm enrichment indexes in the background; safe to fail
     _ensure_fdo_index_warm()
+    _ensure_dongqiudi_logo_cache_warm()
     calibration = learning_store.calibration_status(db_path=db_path, limit=20)
     strategy_states = calibration.get("strategy_states") or []
     strategy_state = next(
