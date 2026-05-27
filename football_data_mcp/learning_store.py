@@ -1285,6 +1285,9 @@ def _avg_clv_for_bucket(records: list[dict[str, Any]]) -> float | None:
     return _average(clv_values)
 
 
+CALIBRATION_BUCKET_MIN_SAMPLES = 3  # skip buckets with <3 settled samples (noise)
+
+
 def recompute_calibration(*, db_path: str | None = None) -> dict[str, Any]:
     with _connect(db_path) as conn:
         ensure_schema(conn)
@@ -1301,10 +1304,18 @@ def recompute_calibration(*, db_path: str | None = None) -> dict[str, Any]:
                 grouped.setdefault(key, []).append(record)
         conn.execute("DELETE FROM calibration_buckets")
         buckets = []
+        skipped_small = 0
         updated_at = now_utc_iso()
         for key, records in sorted(grouped.items()):
             market, league_bucket, line_bucket, odds_bucket, probability_bucket = key
             sample_count = len(records)
+            # Skip noisy small buckets unless they're the broad "ALL" market-wide bucket
+            # (we always want the market-global fallback even with few samples)
+            is_broad = (league_bucket == "ALL" and line_bucket == "line:ALL"
+                        and odds_bucket == "odds:ALL" and probability_bucket == "prob:ALL")
+            if sample_count < CALIBRATION_BUCKET_MIN_SAMPLES and not is_broad:
+                skipped_small += 1
+                continue
             hit_count = sum(int(record.get("hit") or 0) for record in records)
             hit_rate = hit_count / sample_count if sample_count else None
             probabilities = [
@@ -1393,6 +1404,8 @@ def recompute_calibration(*, db_path: str | None = None) -> dict[str, Any]:
         "db_path": db_path or learning_db_path(),
         "settled_count": len(rows),
         "calibration_bucket_count": len(buckets),
+        "skipped_small_buckets": skipped_small,
+        "min_samples_per_bucket": CALIBRATION_BUCKET_MIN_SAMPLES,
         "buckets": buckets,
     }
 
