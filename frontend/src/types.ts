@@ -1150,12 +1150,53 @@ export interface DashboardSnapshot {
   dashboard_contract?: DashboardContract;
   production_readiness?: DashboardProductionReadiness;
   prediction_accountability?: DashboardPredictionAccountability;
+  profitability_forecast?: DashboardProfitabilityForecast;
+  market_breakdown?: DashboardMarketBreakdown;
   buckets: Array<Record<string, unknown>>;
   policy: {
     read_only: boolean;
     no_search_inputs: boolean;
     data_rule: string;
   };
+}
+
+export interface DashboardProfitabilityForecast {
+  available: boolean;
+  method?: string;
+  observed_hit_rate?: number;
+  assumed_avg_odds?: number;
+  implied_roi_per_bet?: number;
+  settled_per_day_estimate?: number;
+  required_bets_total?: number;
+  settled_bets_so_far?: number;
+  remaining_bets?: number;
+  remaining_days?: number | null;
+  confidence_level?: number;
+  reason?: string;
+  min_required?: number;
+  settled_count?: number;
+  notes?: string;
+  interpretation?: string;
+}
+
+export interface DashboardMarketBreakdown {
+  by_market: Array<{
+    market: string;
+    sample_count: number;
+    hit_count: number;
+    hit_rate: number | null;
+    roi: number | null;
+  }>;
+  heatmap_cells: Array<{
+    league: string;
+    market: string;
+    sample_count: number;
+    hit_rate: number | null;
+    roi: number | null;
+  }>;
+  total_settled: number;
+  markets: string[];
+  leagues: string[];
 }
 
 export interface KpiCard {

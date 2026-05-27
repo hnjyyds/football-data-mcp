@@ -36,6 +36,9 @@ import { LoadingSpinner, SkeletonCard } from "./components/shared/LoadingSpinner
 import { ToastContainer, useToasts } from "./components/shared/Toast";
 import { OddsChart } from "./components/detail/OddsChart";
 import { TeamMatchup, TeamLogo } from "./components/shared/TeamLogo";
+import { ProfitabilityHeroBar } from "./components/dashboard/ProfitabilityHeroBar";
+import { ProfitabilityPanel } from "./components/dashboard/ProfitabilityPanel";
+import { HeatMap } from "./components/charts/HeatMap";
 
 const API_URL = "/api/dashboard";
 type DashboardViewModel = ReturnType<typeof buildDashboardView>;
@@ -179,6 +182,9 @@ function OverviewSection({ snapshot, view, onSelectRecommendation }: {
 
   return (
     <div className="flex flex-col gap-3">
+      {/* Profitability hero bar - 最显眼位置 */}
+      <ProfitabilityHeroBar forecast={snapshot.profitability_forecast} />
+
       {/* Status bar - 单行，紧凑 */}
       <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
         <div className="flex-1 min-w-0">
@@ -244,8 +250,55 @@ function SignalsSection({ snapshot, view, onSelectLedger, onSelectRecommendation
   onSelectLedger: (id: string) => void;
   onSelectRecommendation: (r: DashboardRecord) => void;
 }) {
+  const mb = snapshot.market_breakdown;
+  // Build heatmap cells from market_breakdown (league × market)
+  const heatmapCells = (mb?.heatmap_cells ?? [])
+    .filter((c) => c.hit_rate != null && c.sample_count >= 1)
+    .map((c) => ({
+      x: c.league,
+      y: c.market,
+      value: c.hit_rate ?? 0,
+      sampleSize: c.sample_count,
+      tooltip: `${c.league} × ${c.market}: 命中 ${((c.hit_rate ?? 0) * 100).toFixed(1)}% · ROI ${(((c.roi ?? 0) * 100)).toFixed(1)}% · n=${c.sample_count}`,
+    }));
+  const roiCells = (mb?.heatmap_cells ?? [])
+    .filter((c) => c.roi != null && c.sample_count >= 1)
+    .map((c) => ({
+      x: c.league,
+      y: c.market,
+      value: c.roi ?? 0,
+      sampleSize: c.sample_count,
+      tooltip: `${c.league} × ${c.market}: ROI ${((c.roi ?? 0) * 100).toFixed(1)}% (n=${c.sample_count})`,
+    }));
+
   return (
     <div className="flex flex-col gap-4">
+      {/* Heatmaps - 联赛 × 市场命中率 / ROI */}
+      {(mb?.heatmap_cells?.length ?? 0) > 0 && (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <HeatMap
+            cells={heatmapCells}
+            xLabels={mb?.leagues ?? []}
+            yLabels={mb?.markets ?? []}
+            title="命中率热力图（联赛 × 市场）"
+            subtitle={`总结算样本 ${mb?.total_settled ?? 0}，颜色越深命中率越高，透明度反映样本量`}
+            domain={[0, 1]}
+            scale="sequential"
+            formatValue={(v) => `${(v * 100).toFixed(0)}%`}
+          />
+          <HeatMap
+            cells={roiCells}
+            xLabels={mb?.leagues ?? []}
+            yLabels={mb?.markets ?? []}
+            title="ROI 热力图（联赛 × 市场）"
+            subtitle="红=亏损 / 灰=平 / 绿=盈利，可识别强势赛事"
+            domain={[-0.30, 0.30]}
+            scale="diverging"
+            formatValue={(v) => `${v > 0 ? "+" : ""}${(v * 100).toFixed(0)}%`}
+          />
+        </div>
+      )}
+
       {/* Candidate funnel */}
       <Panel title="候选分析漏斗" icon={Eye}>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
@@ -309,6 +362,43 @@ function ModelSection({ view, snapshot }: { view: DashboardViewModel; snapshot: 
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Profitability forecast - top of model section */}
+      <ProfitabilityPanel forecast={snapshot.profitability_forecast} />
+
+      {/* Per-market breakdown table */}
+      {(snapshot.market_breakdown?.by_market?.length ?? 0) > 0 && (
+        <Panel title="按市场表现分组" icon={TrendingUp}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-100 dark:border-slate-700/50 text-xs text-slate-500 dark:text-slate-400">
+                  <th className="text-left py-2 px-3 font-medium">市场</th>
+                  <th className="text-right py-2 px-3 font-medium">已结算</th>
+                  <th className="text-right py-2 px-3 font-medium">命中</th>
+                  <th className="text-right py-2 px-3 font-medium">命中率</th>
+                  <th className="text-right py-2 px-3 font-medium">ROI</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(snapshot.market_breakdown?.by_market ?? []).map((row) => (
+                  <tr key={row.market} className="border-b border-slate-50 dark:border-slate-700/30">
+                    <td className="py-2 px-3 text-xs font-medium text-slate-800 dark:text-slate-200">{row.market}</td>
+                    <td className="py-2 px-3 text-xs text-right tabular-nums text-slate-600 dark:text-slate-400">{row.sample_count}</td>
+                    <td className="py-2 px-3 text-xs text-right tabular-nums text-slate-600 dark:text-slate-400">{row.hit_count}</td>
+                    <td className="py-2 px-3 text-xs text-right tabular-nums font-medium">
+                      {row.hit_rate != null ? formatPercent(row.hit_rate) : "—"}
+                    </td>
+                    <td className={`py-2 px-3 text-xs text-right tabular-nums font-medium ${(row.roi ?? 0) > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-500 dark:text-red-400"}`}>
+                      {row.roi != null ? formatSignedPercent(row.roi) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
+
       {/* Backtest curve */}
       {backtestCurve?.points?.length > 0 && (
         <Panel title="累计 ROI 曲线" icon={BarChart3}>
