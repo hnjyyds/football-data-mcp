@@ -87,6 +87,31 @@ async def health_api(request: Request) -> Response:
     return JSONResponse(payload, headers=headers)
 
 
+@mcp.custom_route("/api/profitability/forecast", methods=["GET", "OPTIONS"], include_in_schema=False)
+async def profitability_forecast_api(request: Request) -> Response:
+    """Return sample-size / cycle / day estimates for proving model profitability."""
+    headers = _dashboard_cors_headers()
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+    from football_data_mcp import profitability_calculator
+    result = await asyncio.to_thread(profitability_calculator.full_profitability_report)
+    return JSONResponse(result, headers=headers)
+
+
+@mcp.custom_route("/api/sources/probe", methods=["GET", "OPTIONS"], include_in_schema=False)
+async def sources_probe_api(request: Request) -> Response:
+    """Probe all registered data sources concurrently and return their health."""
+    headers = _dashboard_cors_headers()
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+    from football_data_mcp import data_sources_registry
+    t0 = time.time()
+    result = await data_sources_registry.probe_all_sources()
+    logger.info("sources_probe_api completed in %.2fs (%d available)",
+                time.time() - t0, result.get("available_count", 0))
+    return JSONResponse(result, headers=headers)
+
+
 @mcp.custom_route("/api/dashboard/summary", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def dashboard_summary_api(request: Request) -> Response:
     """Lightweight KPI summary for fast initial page load (< 1KB)."""

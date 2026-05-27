@@ -1,12 +1,12 @@
 import { Target, Rocket, Gauge, TrendingUp, Database } from "lucide-react";
 import type { DashboardSectionKey } from "../../types";
 
-const SECTIONS: Array<{ key: DashboardSectionKey; label: string; icon: typeof Target; shortLabel: string }> = [
-  { key: "overview",    label: "总览",    shortLabel: "总览",    icon: Target },
-  { key: "production",  label: "上线",    shortLabel: "上线",    icon: Rocket },
-  { key: "model",       label: "模型",    shortLabel: "模型",    icon: Gauge },
-  { key: "signals",     label: "信号",    shortLabel: "信号",    icon: TrendingUp },
-  { key: "data",        label: "数据",    shortLabel: "数据",    icon: Database },
+const SECTIONS: Array<{ key: DashboardSectionKey; label: string; icon: typeof Target }> = [
+  { key: "overview",    label: "总览",    icon: Target },
+  { key: "production",  label: "上线",    icon: Rocket },
+  { key: "model",       label: "模型",    icon: Gauge },
+  { key: "signals",     label: "信号",    icon: TrendingUp },
+  { key: "data",        label: "数据",    icon: Database },
 ];
 
 export function Sidebar({
@@ -16,11 +16,11 @@ export function Sidebar({
 }: {
   active: DashboardSectionKey;
   onChange: (key: DashboardSectionKey) => void;
-  badges?: Partial<Record<DashboardSectionKey, string>>;
+  badges?: Partial<Record<DashboardSectionKey, string | number>>;
 }) {
   return (
-    <aside className="hidden lg:flex flex-col w-16 xl:w-48 flex-shrink-0 border-r border-slate-200 dark:border-slate-700/60 bg-white dark:bg-slate-900 py-4 gap-1">
-      {SECTIONS.map(({ key, label, shortLabel, icon: Icon }) => {
+    <aside className="hidden lg:flex flex-col w-14 flex-shrink-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 py-3 gap-0.5">
+      {SECTIONS.map(({ key, label, icon: Icon }) => {
         const isActive = active === key;
         const badge = badges?.[key];
         return (
@@ -29,17 +29,17 @@ export function Sidebar({
             type="button"
             onClick={() => onChange(key)}
             aria-pressed={isActive}
-            className={`flex items-center gap-3 px-3 py-2.5 mx-2 rounded-lg text-sm transition-colors text-left ${
+            title={label}
+            className={`relative flex flex-col items-center justify-center py-2.5 mx-1.5 rounded-lg text-xs transition-colors ${
               isActive
-                ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 font-medium"
-                : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
+                : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
             }`}
           >
-            <Icon size={18} className="flex-shrink-0" />
-            <span className="hidden xl:block flex-1">{label}</span>
-            <span className="hidden xl:block xl:hidden flex-1">{shortLabel}</span>
-            {badge && (
-              <span className="hidden xl:block text-xs px-1.5 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 font-medium">
+            <Icon size={18} />
+            <span className="mt-1 text-[10px] leading-none">{label}</span>
+            {badge != null && (
+              <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 flex items-center justify-center text-[9px] rounded-full bg-blue-500 text-white font-medium leading-none">
                 {badge}
               </span>
             )}
@@ -58,7 +58,7 @@ export function BottomNav({
   onChange: (key: DashboardSectionKey) => void;
 }) {
   return (
-    <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700/60 flex">
+    <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex shadow-lg">
       {SECTIONS.map(({ key, label, icon: Icon }) => {
         const isActive = active === key;
         return (
@@ -73,8 +73,8 @@ export function BottomNav({
                 : "text-slate-500 dark:text-slate-400"
             }`}
           >
-            <Icon size={20} />
-            <span>{label}</span>
+            <Icon size={18} />
+            <span className="text-[10px]">{label}</span>
           </button>
         );
       })}
