@@ -8791,6 +8791,8 @@ async def settle_learning_recommendations(
         )
         match_state_refresh = await _refresh_open_match_states_from_dongqiudi(db_path=db_path)
     all_results = supplied_results + list(fetched.get("results") or []) + list(match_state_refresh.get("results") or [])
+    # Mark stale open records as unsettleable so KPIs reflect reality
+    unsettleable = learning_store.mark_unsettleable_stale_records(db_path=db_path)
     settlement = learning_store.settle_recommendations(all_results, db_path=db_path)
     shadow_settlement = learning_store.settle_shadow_predictions(all_results, db_path=db_path)
     calibration = learning_store.recompute_calibration(db_path=db_path)
@@ -8803,6 +8805,7 @@ async def settle_learning_recommendations(
         "supplied_result_count": len(supplied_results),
         "auto_fetch": fetched,
         "match_state_refresh": match_state_refresh,
+        "unsettleable_cleanup": unsettleable,
         "settlement": settlement,
         "shadow_settlement": shadow_settlement,
         "calibration": calibration,

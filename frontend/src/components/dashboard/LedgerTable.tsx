@@ -43,6 +43,7 @@ function StatusIcon({ row }: { row: PredictionLedgerRow }) {
       : <Icon name="error" size={14} className="text-danger-500" />;
   }
   if (row.settlement_status === "open") return <Icon name="pending" size={14} className="text-warning-500" />;
+  if (row.settlement_status === "unsettleable") return <Icon name="warn" size={14} className="text-ink-400" />;
   return <Icon name="eye" size={14} className="text-ink-400" />;
 }
 
@@ -185,6 +186,8 @@ export function LedgerTable({
                             </Badge>
                           ) : row.settlement_status === "open" ? (
                             <Badge variant="warning">待结算</Badge>
+                          ) : row.settlement_status === "unsettleable" ? (
+                            <Badge variant="neutral">无源</Badge>
                           ) : (
                             <Badge variant="neutral">跟踪</Badge>
                           )}
