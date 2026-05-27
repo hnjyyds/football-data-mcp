@@ -238,20 +238,79 @@ def _group_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str, Any
 
 FOOTBALL_DATA_ORG_BASE = "https://api.football-data.org/v4"
 
+# Free-tier competitions (verified 2026-05-27 with token: 13 competitions across
+# Brazil, England, Spain, France, Germany, Italy, Netherlands, Portugal, etc.)
+# Codes: BSA, ELC, PL, PD, FL1, BL1, SA, DED, PPL, CL, EC, CLI, WC (subject to season)
+FOOTBALL_DATA_ORG_FREE_COMPETITIONS = ("PL", "BL1", "SA", "PD", "FL1", "DED", "PPL", "ELC", "CL", "BSA")
+
+# Cache to respect 10 req/min limit (60s TTL for matches, 5min for competitions)
+_FDO_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_FDO_MATCH_TTL = 90.0       # 90s for live match data
+_FDO_COMP_TTL = 3600.0      # 1h for competition metadata
+
+
+def _fdo_cache_get(key: str, ttl: float) -> dict[str, Any] | None:
+    entry = _FDO_CACHE.get(key)
+    if not entry:
+        return None
+    ts, payload = entry
+    if time.time() - ts > ttl:
+        return None
+    return payload
+
+
+def _fdo_cache_put(key: str, payload: dict[str, Any]) -> None:
+    _FDO_CACHE[key] = (time.time(), payload)
+
+
+def _fdo_token() -> str | None:
+    return os.getenv("FOOTBALL_DATA_ORG_TOKEN")
+
+
+def _normalize_fdo_match(raw: dict[str, Any]) -> dict[str, Any]:
+    """Transform football-data.org match payload into a standard fixture dict."""
+    home = raw.get("homeTeam") or {}
+    away = raw.get("awayTeam") or {}
+    competition = raw.get("competition") or {}
+    score = (raw.get("score") or {}).get("fullTime") or {}
+    return {
+        "source": "football-data.org",
+        "match_id": f"fdo:{raw.get('id')}",
+        "fdo_id": raw.get("id"),
+        "kickoff_utc": raw.get("utcDate"),
+        "status": raw.get("status"),
+        "matchday": raw.get("matchday"),
+        "stage": raw.get("stage"),
+        "competition_code": competition.get("code"),
+        "competition_name": competition.get("name"),
+        "league": competition.get("name"),
+        "league_code": competition.get("code"),
+        "home_team": home.get("name") or home.get("shortName"),
+        "home_team_short": home.get("shortName"),
+        "home_team_tla": home.get("tla"),
+        "home_team_logo_url": home.get("crest"),
+        "home_team_id": home.get("id"),
+        "away_team": away.get("name") or away.get("shortName"),
+        "away_team_short": away.get("shortName"),
+        "away_team_tla": away.get("tla"),
+        "away_team_logo_url": away.get("crest"),
+        "away_team_id": away.get("id"),
+        "home_score": score.get("home"),
+        "away_score": score.get("away"),
+        "referees": [r.get("name") for r in (raw.get("referees") or []) if r.get("name")],
+        "last_updated": raw.get("lastUpdated"),
+    }
+
 
 async def fetch_football_data_org_fixtures(
     competition_code: str = "PL",
     date_from: str | None = None,
     date_to: str | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
-    """
-    Fetch fixtures from football-data.org free API.
-
-    Free tier covers: PL (Premier League), BL1 (Bundesliga), SA (Serie A),
-    PD (La Liga), FL1 (Ligue 1), DED (Eredivisie), PPL (Primeira), ELC,
-    CL (Champions League), BSA (Brasileirão).
-    """
-    token = os.getenv("FOOTBALL_DATA_ORG_TOKEN")
+    """Fetch fixtures from football-data.org free API (one competition)."""
+    token = _fdo_token()
     if not token:
         return {
             "status": "not_configured",
@@ -259,45 +318,165 @@ async def fetch_football_data_org_fixtures(
             "fixtures": [],
         }
 
+    cache_key = f"fixtures:{competition_code}:{date_from or ''}:{date_to or ''}"
+    cached = _fdo_cache_get(cache_key, _FDO_MATCH_TTL)
+    if cached is not None:
+        return {**cached, "from_cache": True}
+
     params: dict[str, Any] = {}
     if date_from: params["dateFrom"] = date_from
     if date_to: params["dateTo"] = date_to
-
     url = f"{FOOTBALL_DATA_ORG_BASE}/competitions/{competition_code}/matches"
+
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(timeout=10.0)
+    try:
+        response = await client.get(url, params=params, headers={"X-Auth-Token": token})
+        if response.status_code == 429:
+            payload = {
+                "status": "rate_limited",
+                "reason": "free tier limit 10 req/min reached; back off",
+                "fixtures": [],
+                "competition": competition_code,
+            }
+            return payload
+        response.raise_for_status()
+        data = response.json()
+        raw_matches = data.get("matches") or []
+        fixtures = [_normalize_fdo_match(m) for m in raw_matches]
+        result = {
+            "status": "ok",
+            "competition": competition_code,
+            "competition_name": (data.get("competition") or {}).get("name"),
+            "result_count": len(fixtures),
+            "fixtures": fixtures,
+            "source": "football-data.org",
+            "from_cache": False,
+        }
+        _fdo_cache_put(cache_key, result)
+        return result
+    except httpx.HTTPStatusError as exc:
+        return {
+            "status": "error",
+            "reason": f"HTTP {exc.response.status_code}",
+            "fixtures": [],
+            "competition": competition_code,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "reason": str(exc),
+            "fixtures": [],
+            "competition": competition_code,
+        }
+    finally:
+        if owns_client and client:
+            await client.aclose()
+
+
+async def fetch_all_upcoming_matches(
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch upcoming matches across all available competitions in a single batched call.
+
+    This uses the /matches endpoint (rather than per-competition) which is cheaper:
+    1 request vs N requests. Free tier covers the same competitions automatically.
+    """
+    token = _fdo_token()
+    if not token:
+        return {"status": "not_configured", "fixtures": [], "competitions_covered": []}
+
+    cache_key = f"all_matches:{date_from or ''}:{date_to or ''}"
+    cached = _fdo_cache_get(cache_key, _FDO_MATCH_TTL)
+    if cached is not None:
+        return {**cached, "from_cache": True}
+
+    params: dict[str, Any] = {}
+    if date_from: params["dateFrom"] = date_from
+    if date_to: params["dateTo"] = date_to
+    url = f"{FOOTBALL_DATA_ORG_BASE}/matches"
+
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(timeout=10.0)
+    try:
+        response = await client.get(url, params=params, headers={"X-Auth-Token": token})
+        if response.status_code == 429:
+            return {"status": "rate_limited", "fixtures": [], "competitions_covered": []}
+        response.raise_for_status()
+        data = response.json()
+        raw_matches = data.get("matches") or []
+        fixtures = [_normalize_fdo_match(m) for m in raw_matches]
+        result_set = data.get("resultSet") or {}
+        result = {
+            "status": "ok",
+            "result_count": len(fixtures),
+            "fixtures": fixtures,
+            "competitions_covered": (result_set.get("competitions") or "").split(",") if result_set.get("competitions") else [],
+            "played_count": result_set.get("played"),
+            "date_range": [result_set.get("first"), result_set.get("last")],
+            "source": "football-data.org",
+            "from_cache": False,
+        }
+        _fdo_cache_put(cache_key, result)
+        return result
+    except Exception as exc:
+        return {
+            "status": "error",
+            "reason": str(exc),
+            "fixtures": [],
+            "competitions_covered": [],
+        }
+    finally:
+        if owns_client and client:
+            await client.aclose()
+
+
+async def fetch_competitions() -> dict[str, Any]:
+    """List all competitions the current API key has access to (cached 1h)."""
+    token = _fdo_token()
+    if not token:
+        return {"status": "not_configured", "competitions": []}
+
+    cached = _fdo_cache_get("competitions", _FDO_COMP_TTL)
+    if cached is not None:
+        return {**cached, "from_cache": True}
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             response = await client.get(
-                url,
-                params=params,
+                f"{FOOTBALL_DATA_ORG_BASE}/competitions",
                 headers={"X-Auth-Token": token},
             )
-            if response.status_code == 429:
-                return {
-                    "status": "rate_limited",
-                    "reason": "free tier limit 10 req/min reached; back off",
-                    "fixtures": [],
-                }
             response.raise_for_status()
             data = response.json()
-            return {
+            comps = [
+                {
+                    "code": c.get("code"),
+                    "name": c.get("name"),
+                    "area": (c.get("area") or {}).get("name"),
+                    "type": c.get("type"),
+                    "plan": c.get("plan"),
+                    "current_season": (c.get("currentSeason") or {}).get("currentMatchday"),
+                    "emblem": c.get("emblem"),
+                }
+                for c in data.get("competitions") or []
+            ]
+            result = {
                 "status": "ok",
-                "competition": competition_code,
-                "result_count": len(data.get("matches") or []),
-                "fixtures": data.get("matches") or [],
-                "source": "football-data.org",
+                "count": len(comps),
+                "competitions": comps,
+                "from_cache": False,
             }
-        except httpx.HTTPStatusError as exc:
-            return {
-                "status": "error",
-                "reason": f"HTTP {exc.response.status_code}",
-                "fixtures": [],
-            }
+            _fdo_cache_put("competitions", result)
+            return result
         except Exception as exc:
-            return {
-                "status": "error",
-                "reason": str(exc),
-                "fixtures": [],
-            }
+            return {"status": "error", "reason": str(exc), "competitions": []}
 
 
 # ─── Degradation strategy ─────────────────────────────────────────────────────

@@ -87,6 +87,19 @@ async def health_api(request: Request) -> Response:
     return JSONResponse(payload, headers=headers)
 
 
+@mcp.custom_route("/api/fdo/matches", methods=["GET", "OPTIONS"], include_in_schema=False)
+async def fdo_matches_api(request: Request) -> Response:
+    """Direct read-only endpoint for football-data.org upcoming matches."""
+    headers = _dashboard_cors_headers()
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+    from football_data_mcp.data_sources_registry import fetch_all_upcoming_matches
+    date_from = request.query_params.get("date_from") or None
+    date_to = request.query_params.get("date_to") or None
+    result = await fetch_all_upcoming_matches(date_from=date_from, date_to=date_to)
+    return JSONResponse(result, headers=headers)
+
+
 @mcp.custom_route("/api/profitability/forecast", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def profitability_forecast_api(request: Request) -> Response:
     """Return sample-size / cycle / day estimates for proving model profitability."""
@@ -191,6 +204,42 @@ async def dashboard_match_api(request: Request) -> Response:
 async def source_health() -> dict[str, Any]:
     """Check primary structured sources plus supplemental source health such as Leisu schedule parsing."""
     return await sources.source_health()
+
+
+@mcp.tool()
+async def fetch_fdo_upcoming_matches(
+    date_from: str = "",
+    date_to: str = "",
+) -> dict[str, Any]:
+    """
+    Fetch upcoming matches from football-data.org (free tier).
+
+    Returns normalized fixtures across all competitions the API key has access to.
+    Free tier covers ~13 leagues including Premier League, Bundesliga, Serie A,
+    La Liga, Ligue 1, Champions League, Brasileirão, Copa Libertadores, etc.
+
+    Each fixture includes home/away team names + crest URLs, kickoff time,
+    league name, status, scores (if played), and referee names.
+
+    Caches results for 90 seconds to respect the 10 req/min free tier limit.
+    """
+    from football_data_mcp.data_sources_registry import fetch_all_upcoming_matches
+    return await fetch_all_upcoming_matches(
+        date_from=date_from or None,
+        date_to=date_to or None,
+    )
+
+
+@mcp.tool()
+async def fetch_fdo_competitions() -> dict[str, Any]:
+    """
+    List football-data.org competitions accessible with the current API key.
+
+    Cached 1 hour. Useful for understanding which leagues the free tier covers
+    and what their codes are for fetch_fdo_upcoming_matches filtering.
+    """
+    from football_data_mcp.data_sources_registry import fetch_competitions
+    return await fetch_competitions()
 
 
 @mcp.tool()
