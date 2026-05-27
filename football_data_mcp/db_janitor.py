@@ -36,7 +36,10 @@ logger = logging.getLogger(__name__)
 # Retention / grace periods (env-overridable)
 ORPHAN_GRACE_HOURS = int(os.getenv("FOOTBALL_DATA_JANITOR_ORPHAN_GRACE_HOURS", "1"))
 UNSETTLEABLE_THRESHOLD_HOURS = int(os.getenv("FOOTBALL_DATA_JANITOR_UNSETTLEABLE_HOURS", "48"))
-UNSETTLEABLE_ARCHIVE_DAYS = int(os.getenv("FOOTBALL_DATA_JANITOR_UNSETTLEABLE_ARCHIVE_DAYS", "30"))
+# Default 0 → delete unsettleable records immediately when detected.
+# They contribute no analytical value (no scores will ever arrive) and only
+# pollute the prediction ledger / KPIs / UI. Set to >0 days for archival.
+UNSETTLEABLE_ARCHIVE_DAYS = int(os.getenv("FOOTBALL_DATA_JANITOR_UNSETTLEABLE_ARCHIVE_DAYS", "0"))
 DUPLICATE_GRACE_DAYS = int(os.getenv("FOOTBALL_DATA_JANITOR_DUPLICATE_GRACE_DAYS", "7"))
 SHADOW_RETENTION_DAYS = int(os.getenv("FOOTBALL_DATA_JANITOR_SHADOW_RETENTION_DAYS", "90"))
 
@@ -198,29 +201,24 @@ def run_janitor(
                 conn.execute(f"DELETE FROM {table} WHERE id IN ({placeholders})", ids)
                 report["totals"]["deleted"] += len(orphans)
 
-        # 2. Stale opens → mark unsettleable
+        # 2. Stale opens → hard delete (unsettleable rows have no analytical value)
         for table in ("recommendation_records", "shadow_prediction_records"):
             stale = _find_stale_opens(conn, table=table)
             report["categories"][f"{table}.stale_opens"] = {
-                "action": "mark_unsettleable",
+                "action": "hard_delete",
                 "count": len(stale),
                 "leagues": _group_count(stale, "league"),
                 "sample": stale[:3],
             }
             report["totals"]["inspected"] += len(stale)
             if not dry_run and stale:
-                now_iso = learning_store.now_utc_iso()
                 ids = [r["id"] for r in stale]
                 placeholders = ",".join("?" for _ in ids)
                 conn.execute(
-                    f"""
-                    UPDATE {table}
-                    SET settlement_status = 'unsettleable', settled_at_utc = ?
-                    WHERE id IN ({placeholders})
-                    """,
-                    (now_iso, *ids),
+                    f"DELETE FROM {table} WHERE id IN ({placeholders})",
+                    ids,
                 )
-                report["totals"]["marked"] += len(stale)
+                report["totals"]["deleted"] += len(stale)
 
         # 3. Archived unsettleable - hard delete (long-tail)
         for table in ("recommendation_records", "shadow_prediction_records"):
