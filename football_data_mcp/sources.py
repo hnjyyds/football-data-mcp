@@ -15533,8 +15533,27 @@ async def auto_learning_daemon(
             "snapshot_reanalysis_concurrency": bounded_snapshot_reanalysis_concurrency,
         }
     )
+    janitor_interval_seconds = int(os.getenv("FOOTBALL_DATA_JANITOR_INTERVAL_SECONDS", "21600"))  # 6h
+    last_janitor_ts = 0.0
     while True:
         AUTO_LEARNING_STATE["last_started_at_utc"] = now_utc().isoformat()
+        # Periodic DB janitor (every 6h by default) — runs before the learning
+        # cycle so cleanup happens on a freshly settled DB
+        now_ts = time.time()
+        if now_ts - last_janitor_ts >= janitor_interval_seconds:
+            try:
+                from football_data_mcp import db_janitor
+                janitor_report = await asyncio.to_thread(db_janitor.run_janitor, dry_run=False)
+                AUTO_LEARNING_STATE["last_janitor"] = {
+                    "at_utc": now_utc().isoformat(),
+                    "deleted": janitor_report["totals"]["deleted"],
+                    "marked": janitor_report["totals"]["marked"],
+                    "inspected": janitor_report["totals"]["inspected"],
+                }
+                last_janitor_ts = now_ts
+            except Exception as exc:
+                AUTO_LEARNING_STATE["last_janitor_error"] = f"{type(exc).__name__}: {exc}"
+
         try:
             result = await run_auto_learning_cycle(
                 timezone_name=timezone_name or "Asia/Shanghai",
