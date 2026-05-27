@@ -572,6 +572,280 @@ def _market_type_matches(expected: str, candidate: Any) -> bool:
     return bool(expected_aliases and candidate_aliases and expected_aliases.intersection(candidate_aliases))
 
 
+def _canonical_market_type(value: Any) -> str:
+    aliases = _market_type_aliases(str(value or ""))
+    if aliases.intersection({"1x2", "h2h", "moneyline"}):
+        return "h2h"
+    if aliases.intersection({"asian_handicap", "spreads", "spread"}):
+        return "asian_handicap"
+    if aliases.intersection({"over_under", "totals", "total"}):
+        return "over_under"
+    return str(value or "").strip().lower()
+
+
+def _snapshot_selection_key(row: dict[str, Any], home_team: str, away_team: str) -> str:
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    raw_side = str((raw or {}).get("side") or "").strip().lower()
+    if raw_side in {"home", "draw", "away", "home_cover", "away_cover", "over", "under"}:
+        return raw_side
+
+    market_type = _canonical_market_type(row.get("market_type"))
+    selection = _resolve_market_selection(str(row.get("selection") or ""), home_team, away_team)
+    selection_norm = selection.strip().lower()
+    if market_type == "h2h":
+        if selection_norm in {"draw", "d", "x", "平", "平局"}:
+            return "draw"
+        if _selection_matches(selection, home_team):
+            return "home"
+        if _selection_matches(selection, away_team):
+            return "away"
+    if market_type == "asian_handicap":
+        if _selection_matches(selection, home_team):
+            return "home_cover"
+        if _selection_matches(selection, away_team):
+            return "away_cover"
+    if market_type == "over_under":
+        if selection_norm in {"over", "o", "大", "大球"}:
+            return "over"
+        if selection_norm in {"under", "u", "小", "小球"}:
+            return "under"
+    return selection_norm
+
+
+def _market_movement_round(value: float | None, digits: int = 6) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), digits)
+
+
+def _market_movement_median(values: list[float]) -> float | None:
+    return float(median(values)) if values else None
+
+
+def _market_movement_direction(
+    implied_probability_delta: float | None,
+    odds_delta: float | None,
+) -> tuple[str, str]:
+    probability_delta = float(implied_probability_delta or 0.0)
+    price_delta = float(odds_delta or 0.0)
+    if abs(probability_delta) < 0.005 and abs(price_delta) < 0.02:
+        return "stable", "平稳"
+    if probability_delta > 0:
+        return "shortening", "升温"
+    return "drifting", "降温"
+
+
+def _market_movement_selection_summary(
+    rows: list[dict[str, Any]],
+    *,
+    market_type: str,
+    selection_key: str,
+) -> dict[str, Any]:
+    timed_rows = [(row, row_time) for row in rows if (row_time := _snapshot_row_time(row)) is not None]
+    latest_selection = str((rows[0] if rows else {}).get("selection") or selection_key)
+    base = {
+        "market_type": market_type,
+        "selection_key": selection_key,
+        "selection": latest_selection,
+        "snapshot_count": len(rows),
+        "bookmaker_count": len({str(row.get("bookmaker") or "") for row in rows if row.get("bookmaker")}),
+    }
+    if len(timed_rows) < 2:
+        return {
+            **base,
+            "status": "insufficient_history",
+            "reason": "need_at_least_two_time_ordered_snapshots",
+        }
+
+    first_by_bookmaker: dict[str, tuple[dict[str, Any], datetime]] = {}
+    latest_by_bookmaker: dict[str, tuple[dict[str, Any], datetime]] = {}
+    for row, row_time in sorted(timed_rows, key=lambda item: item[1]):
+        bookmaker = str(row.get("bookmaker") or "unknown")
+        if bookmaker not in first_by_bookmaker:
+            first_by_bookmaker[bookmaker] = (row, row_time)
+        latest_by_bookmaker[bookmaker] = (row, row_time)
+
+    first_rows = [row for row, _row_time in first_by_bookmaker.values()]
+    latest_rows = [row for row, _row_time in latest_by_bookmaker.values()]
+    first_prices = [float(row["decimal_odds"]) for row in first_rows if float(row.get("decimal_odds") or 0.0) > 1.0]
+    latest_prices = [float(row["decimal_odds"]) for row in latest_rows if float(row.get("decimal_odds") or 0.0) > 1.0]
+    opening_price = _market_movement_median(first_prices)
+    latest_price = _market_movement_median(latest_prices)
+    if opening_price is None or latest_price is None:
+        return {
+            **base,
+            "status": "insufficient_history",
+            "reason": "valid_decimal_odds_missing",
+        }
+
+    first_lines = [
+        float(row["line"])
+        for row in first_rows
+        if row.get("line") is not None
+    ]
+    latest_lines = [
+        float(row["line"])
+        for row in latest_rows
+        if row.get("line") is not None
+    ]
+    opening_line = _market_movement_median(first_lines)
+    latest_line = _market_movement_median(latest_lines)
+    odds_delta = latest_price - opening_price
+    implied_opening = 1.0 / opening_price
+    implied_latest = 1.0 / latest_price
+    implied_probability_delta = implied_latest - implied_opening
+    direction, direction_label = _market_movement_direction(implied_probability_delta, odds_delta)
+    first_time = min(row_time for _row, row_time in timed_rows)
+    latest_time = max(row_time for _row, row_time in timed_rows)
+    if first_time == latest_time:
+        status = "insufficient_history"
+        reason = "snapshots_share_same_observed_time"
+    else:
+        status = "available"
+        reason = ""
+
+    return {
+        **base,
+        "status": status,
+        "reason": reason,
+        "direction": direction,
+        "direction_label": direction_label,
+        "opening_decimal_odds": _market_movement_round(opening_price, 4),
+        "latest_decimal_odds": _market_movement_round(latest_price, 4),
+        "odds_delta": _market_movement_round(odds_delta, 4),
+        "opening_implied_probability": _market_movement_round(implied_opening),
+        "latest_implied_probability": _market_movement_round(implied_latest),
+        "implied_probability_delta": _market_movement_round(implied_probability_delta),
+        "opening_line": _market_movement_round(opening_line, 4),
+        "latest_line": _market_movement_round(latest_line, 4),
+        "line_delta": _market_movement_round(
+            latest_line - opening_line if latest_line is not None and opening_line is not None else None,
+            4,
+        ),
+        "latest_price_spread": _market_movement_round(max(latest_prices) - min(latest_prices), 4) if latest_prices else None,
+        "first_observed_at_utc": first_time.isoformat(),
+        "latest_observed_at_utc": latest_time.isoformat(),
+    }
+
+
+def build_market_movement_summary(
+    rows: list[dict[str, Any]],
+    *,
+    home_team: str = "",
+    away_team: str = "",
+) -> dict[str, Any]:
+    """Summarize opening-to-latest movement from persisted multi-bookmaker snapshots."""
+    if not rows:
+        return {
+            "status": "unavailable",
+            "method": "market_snapshot_movement_v1",
+            "reason": "matching_market_snapshots_missing",
+            "snapshot_count": 0,
+            "bookmaker_count": 0,
+            "market_type_count": 0,
+            "markets": {},
+            "key_movements": [],
+        }
+
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for row in rows:
+        market_type = _canonical_market_type(row.get("market_type"))
+        if not market_type:
+            continue
+        selection_key = _snapshot_selection_key(row, home_team, away_team)
+        if not selection_key:
+            continue
+        grouped.setdefault(market_type, {}).setdefault(selection_key, []).append(row)
+
+    markets: dict[str, Any] = {}
+    key_movements: list[dict[str, Any]] = []
+    for market_type, selections in grouped.items():
+        selection_summaries = {
+            selection_key: _market_movement_selection_summary(
+                selection_rows,
+                market_type=market_type,
+                selection_key=selection_key,
+            )
+            for selection_key, selection_rows in selections.items()
+        }
+        available = [
+            item
+            for item in selection_summaries.values()
+            if item.get("status") == "available" and item.get("implied_probability_delta") is not None
+        ]
+        primary = max(
+            available or list(selection_summaries.values()),
+            key=lambda item: abs(float(item.get("implied_probability_delta") or 0.0)),
+            default={},
+        )
+        markets[market_type] = {
+            "available": bool(available),
+            "selection_count": len(selection_summaries),
+            "snapshot_count": sum(int(item.get("snapshot_count") or 0) for item in selection_summaries.values()),
+            "bookmaker_count": len(
+                {
+                    str(row.get("bookmaker") or "")
+                    for selection_rows in selections.values()
+                    for row in selection_rows
+                    if row.get("bookmaker")
+                }
+            ),
+            "primary_movement": primary,
+            "selections": selection_summaries,
+        }
+        for item in available:
+            key_movements.append(
+                {
+                    "market_type": item.get("market_type"),
+                    "selection_key": item.get("selection_key"),
+                    "selection": item.get("selection"),
+                    "direction": item.get("direction"),
+                    "direction_label": item.get("direction_label"),
+                    "opening_decimal_odds": item.get("opening_decimal_odds"),
+                    "latest_decimal_odds": item.get("latest_decimal_odds"),
+                    "odds_delta": item.get("odds_delta"),
+                    "opening_line": item.get("opening_line"),
+                    "latest_line": item.get("latest_line"),
+                    "line_delta": item.get("line_delta"),
+                    "implied_probability_delta": item.get("implied_probability_delta"),
+                    "bookmaker_count": item.get("bookmaker_count"),
+                    "snapshot_count": item.get("snapshot_count"),
+                    "latest_observed_at_utc": item.get("latest_observed_at_utc"),
+                }
+            )
+
+    key_movements.sort(key=lambda item: abs(float(item.get("implied_probability_delta") or 0.0)), reverse=True)
+    primary_movement = key_movements[0] if key_movements else {}
+    return {
+        "status": "available" if key_movements else "insufficient_history",
+        "method": "market_snapshot_movement_v1",
+        "reason": "" if key_movements else "need_multiple_time_ordered_snapshots_per_selection",
+        "snapshot_count": len(rows),
+        "bookmaker_count": len({str(row.get("bookmaker") or "") for row in rows if row.get("bookmaker")}),
+        "market_type_count": len({str(row.get("market_type") or "") for row in rows if row.get("market_type")}),
+        "first_fetched_at_utc": min((str(row.get("fetched_at_utc") or "") for row in rows), default=""),
+        "latest_fetched_at_utc": max((str(row.get("fetched_at_utc") or "") for row in rows), default=""),
+        "primary_movement": primary_movement,
+        "markets": markets,
+        "key_movements": key_movements[:8],
+        "usage_policy": (
+            "Use movement as professional market evidence. It can support or warn against a pick, "
+            "but it does not replace model probability, settlement, or recommendation gates."
+        ),
+    }
+
+
+def market_movement_for_match(
+    home_team: str,
+    away_team: str,
+    *,
+    league: str | None = None,
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    rows = find_market_snapshots(home_team, away_team, league=league, db_path=db_path, limit=20000)
+    return build_market_movement_summary(rows, home_team=home_team, away_team=away_team)
+
+
 def closing_line_value_for_pick(
     *,
     home_team: str,

@@ -101,6 +101,7 @@ const DATA_BLOCK_LABELS: Record<string, string> = {
   asian_handicap: "亚盘",
   over_under: "大小球",
   multi_bookmaker_snapshot: "多公司赔率快照",
+  market_movement_history: "盘口变化",
   lineup: "阵容",
   venue: "场地",
   weather: "天气",
@@ -178,6 +179,17 @@ const MARKET_TYPE_ORDER: Record<string, number> = {
   over_under: 3,
   totals: 3
 };
+
+const ODDS_TREND_COLORS = [
+  "#0f766e",
+  "#2563eb",
+  "#b45309",
+  "#7c3aed",
+  "#be123c",
+  "#15803d",
+  "#475569",
+  "#0891b2"
+];
 
 export function formatPercent(value: number | null | undefined, digits = 1): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
@@ -518,13 +530,21 @@ function candidateRows(candidates: Array<Record<string, unknown>>): CandidateRow
   return candidates.slice(0, 5).map((candidate) => {
     const probability = numeric(candidate.calibrated_probability ?? candidate.learned_probability ?? candidate.model_probability);
     const selection = stringValue(candidate.selection);
+    const movementSignal = stringValue(candidate.market_movement_signal, "");
+    const movementText = stringValue(candidate.market_movement_note, "");
+    const movementTone: KpiCard["tone"] =
+      movementSignal === "against_selection" ? "bad" :
+        movementSignal === "supports_selection" ? "good" :
+          movementSignal === "stable" ? "neutral" : "caution";
     return {
       selection,
       selectionText: selectionLabel(selection, candidate.market),
       providerText: stringValue(candidate.provider),
       oddsText: formatOdds(numeric(candidate.decimal_odds)),
       probabilityText: formatPercent(probability),
-      edgeText: formatSignedPercent(numeric(candidate.edge))
+      edgeText: formatSignedPercent(numeric(candidate.edge)),
+      movementText,
+      movementTone
     };
   });
 }
@@ -3117,6 +3137,255 @@ function oddsBookmakerGroups(rows: OddsSnapshotRowView[]): OddsSnapshotBookmaker
   });
 }
 
+function oddsTrendMarketKey(value: unknown): string {
+  const market = stringValue(value, "").toLowerCase();
+  if (["1x2", "h2h", "moneyline", "moneyline_1x2"].includes(market)) return "h2h";
+  if (["asian_handicap", "spreads", "spread"].includes(market)) return "asian_handicap";
+  if (["over_under", "totals", "total"].includes(market)) return "over_under";
+  return market;
+}
+
+function normalizedTrendText(value: unknown): string {
+  return stringValue(value, "")
+    .toLowerCase()
+    .replace(/\b(fc|cf|afc|sc)\b/g, " ")
+    .replace(/[+\-−–—]/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function trendSelectionMatches(row: OddsSnapshotRowView, record: PredictionLedgerRow): boolean {
+  const rowSelection = normalizedTrendText(row.selection);
+  const recordSelection = normalizedTrendText(record.selection);
+  if (!rowSelection || !recordSelection) return true;
+  if (rowSelection === recordSelection) return true;
+  return rowSelection.includes(recordSelection) || recordSelection.includes(rowSelection);
+}
+
+function trendLineMatches(row: OddsSnapshotRowView, record: PredictionLedgerRow): boolean {
+  const rowLine = numeric(row.line);
+  const recordLine = numeric(record.line);
+  if (rowLine === null || recordLine === null) return true;
+  return Math.abs(rowLine - recordLine) <= 0.001;
+}
+
+function trendObservedAt(row: OddsSnapshotRowView): string {
+  return row.source_time_utc || row.fetched_at_utc || "";
+}
+
+function trendTimeLabel(value: string): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.slice(5, 16).replace("T", " ");
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+}
+
+function trendRowGroupKey(row: OddsSnapshotRowView): string {
+  return [
+    oddsTrendMarketKey(row.market_type),
+    normalizedTrendText(row.selection),
+    row.line === null || row.line === undefined ? "none" : String(row.line)
+  ].join("|");
+}
+
+function bestTrendGroup(rows: OddsSnapshotRowView[]): OddsSnapshotRowView[] {
+  const grouped = new Map<string, OddsSnapshotRowView[]>();
+  for (const row of rows) {
+    grouped.set(trendRowGroupKey(row), [...(grouped.get(trendRowGroupKey(row)) || []), row]);
+  }
+  return Array.from(grouped.values()).sort((left, right) => {
+    if (right.length !== left.length) return right.length - left.length;
+    const rightLatest = right.reduce((latest, row) => trendObservedAt(row) > latest ? trendObservedAt(row) : latest, "");
+    const leftLatest = left.reduce((latest, row) => trendObservedAt(row) > latest ? trendObservedAt(row) : latest, "");
+    return rightLatest.localeCompare(leftLatest);
+  })[0] || [];
+}
+
+function oddsTrendTargetRows(
+  detail: DashboardMatchDetail,
+  rows: OddsSnapshotRowView[]
+): { rows: OddsSnapshotRowView[]; targetText: string; basisText: string } {
+  const usableRows = rows.filter((row) => {
+    const odds = numeric(row.decimal_odds);
+    return odds !== null && odds > 1 && Boolean(trendObservedAt(row));
+  });
+  if (!usableRows.length) {
+    return { rows: [], targetText: "暂无可绘制盘口", basisText: "无赔率时间点" };
+  }
+
+  const recordMarket = oddsTrendMarketKey(detail.record.market);
+  const sameMarketRows = usableRows.filter((row) => oddsTrendMarketKey(row.market_type) === recordMarket);
+  const exactRows = sameMarketRows.filter((row) => trendSelectionMatches(row, detail.record) && trendLineMatches(row, detail.record));
+  if (exactRows.length) {
+    return {
+      rows: exactRows,
+      targetText: `${marketLabel(recordMarket)} · ${selectionLabel(detail.record.selection, recordMarket)}${detail.record.line !== null && detail.record.line !== undefined ? ` · ${lineText(detail.record.line)}` : ""}`,
+      basisText: "当前预测盘口"
+    };
+  }
+
+  const fallbackRows = sameMarketRows.length ? bestTrendGroup(sameMarketRows) : bestTrendGroup(usableRows);
+  const sample = fallbackRows[0];
+  if (!sample) {
+    return { rows: [], targetText: "暂无可绘制盘口", basisText: "无赔率时间点" };
+  }
+  const market = oddsTrendMarketKey(sample.market_type);
+  return {
+    rows: fallbackRows,
+    targetText: `${marketLabel(market)} · ${selectionLabel(sample.selection, market)}${sample.line !== null && sample.line !== undefined ? ` · ${lineText(sample.line)}` : ""}`,
+    basisText: sameMarketRows.length ? "同盘口类型最多样本" : "最多样本盘口"
+  };
+}
+
+function oddsTrendIndexText(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return value.toFixed(1);
+}
+
+function oddsDistributionSummary(values: number[]): MatchDetailView["oddsTrend"]["distributionSummary"] {
+  const sorted = [...values].filter((value) => Number.isFinite(value)).sort((left, right) => left - right);
+  if (!sorted.length) {
+    return {
+      lowOddsText: "—",
+      medianOddsText: "—",
+      highOddsText: "—",
+      spreadText: "—"
+    };
+  }
+  const middle = Math.floor(sorted.length / 2);
+  const medianValue = sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  const low = sorted[0];
+  const high = sorted[sorted.length - 1];
+  return {
+    lowOddsText: formatOdds(low),
+    medianOddsText: formatOdds(medianValue),
+    highOddsText: formatOdds(high),
+    spreadText: (high - low).toFixed(2)
+  };
+}
+
+function oddsTrendView(detail: DashboardMatchDetail, oddsRows: OddsSnapshotRowView[]): MatchDetailView["oddsTrend"] {
+  const target = oddsTrendTargetRows(detail, oddsRows);
+  if (!target.rows.length) {
+    return {
+      mode: "empty",
+      title: "暂无赔率走势指数图",
+      detail: "本场还没有可绘制的赔率快照。",
+      statusText: "等待快照",
+      tone: "neutral",
+      targetText: target.targetText,
+      points: [],
+      series: [],
+      distributionRows: [],
+      distributionSummary: oddsDistributionSummary([])
+    };
+  }
+
+  const grouped = new Map<string, OddsSnapshotRowView[]>();
+  for (const row of target.rows) {
+    const bookmaker = row.bookmaker || row.providerLabel || "未知公司";
+    grouped.set(bookmaker, [...(grouped.get(bookmaker) || []), row]);
+  }
+  const bookmakerGroups = Array.from(grouped.entries())
+    .map(([bookmaker, groupRows]) => ({
+      bookmaker,
+      rows: [...groupRows].sort((left, right) => trendObservedAt(left).localeCompare(trendObservedAt(right)))
+    }))
+    .sort((left, right) => {
+      if (right.rows.length !== left.rows.length) return right.rows.length - left.rows.length;
+      const rightLatest = trendObservedAt(right.rows[right.rows.length - 1]);
+      const leftLatest = trendObservedAt(left.rows[left.rows.length - 1]);
+      return rightLatest.localeCompare(leftLatest);
+    })
+    .slice(0, 8);
+
+  const allTimes = Array.from(new Set(bookmakerGroups.flatMap((group) => group.rows.map(trendObservedAt)))).sort();
+  const visibleTimes = allTimes.slice(-24);
+  const points = new Map<string, MatchDetailView["oddsTrend"]["points"][number]>();
+  for (const observedAt of visibleTimes) {
+    points.set(observedAt, {
+      observedAtUtc: observedAt,
+      label: trendTimeLabel(observedAt)
+    });
+  }
+
+  const series = bookmakerGroups.map((group, index) => {
+    const key = `bookmaker_${index}`;
+    const firstOdds = numeric(group.rows[0]?.decimal_odds) || 1;
+    let latestIndex: number | null = null;
+    for (const row of group.rows) {
+      const observedAt = trendObservedAt(row);
+      const point = points.get(observedAt);
+      const odds = numeric(row.decimal_odds);
+      if (!point || odds === null || odds <= 1) continue;
+      const indexValue = Number(((odds / firstOdds) * 100).toFixed(2));
+      point[key] = indexValue;
+      latestIndex = indexValue;
+    }
+    const latestOdds = numeric(group.rows[group.rows.length - 1]?.decimal_odds);
+    return {
+      key,
+      bookmaker: group.bookmaker,
+      color: ODDS_TREND_COLORS[index % ODDS_TREND_COLORS.length],
+      latestOddsText: formatOdds(latestOdds),
+      latestIndexText: oddsTrendIndexText(latestIndex),
+      pointCountText: `${group.rows.length} 点`
+    };
+  });
+
+  const latestRows = bookmakerGroups.map((group, index) => ({
+    group,
+    index,
+    row: group.rows[group.rows.length - 1],
+    odds: numeric(group.rows[group.rows.length - 1]?.decimal_odds),
+    latestIndex: numeric(series[index]?.latestIndexText)
+  })).filter((item) => item.odds !== null && item.odds > 1);
+  const oddsValues = latestRows.map((item) => item.odds as number);
+  const lowOdds = oddsValues.length ? Math.min(...oddsValues) : 0;
+  const highOdds = oddsValues.length ? Math.max(...oddsValues) : 0;
+  const oddsRange = highOdds - lowOdds;
+  const distributionRows = latestRows
+    .sort((left, right) => (left.odds as number) - (right.odds as number))
+    .map((item) => {
+      const odds = item.odds as number;
+      const position = oddsRange > 0.001 ? ((odds - lowOdds) / oddsRange) * 100 : 50;
+      return {
+        key: series[item.index]?.key || item.group.bookmaker,
+        bookmaker: item.group.bookmaker,
+        oddsText: formatOdds(odds),
+        indexText: oddsTrendIndexText(item.latestIndex),
+        pointCountText: `${item.group.rows.length} 点`,
+        positionPercent: `${Math.max(0, Math.min(100, position)).toFixed(1)}%`,
+        color: series[item.index]?.color || ODDS_TREND_COLORS[item.index % ODDS_TREND_COLORS.length]
+      };
+    });
+  const distributionSummary = oddsDistributionSummary(oddsValues);
+
+  const chartPoints = Array.from(points.values());
+  const hasTrend = visibleTimes.length >= 2 && bookmakerGroups.some((group) => group.rows.length >= 2);
+  return {
+    mode: hasTrend ? "trend" : "distribution",
+    title: hasTrend ? "赔率走势指数图" : "公司赔率横截面",
+    detail: hasTrend
+      ? `按公司分组，指数以每家公司首个赔率点为 100；当前展示 ${target.basisText}：${target.targetText}。`
+      : `当前只有单时间点，先看各公司对 ${target.targetText} 的低赔/高赔分歧；低赔通常代表该公司更压低这个方向回报。`,
+    statusText: hasTrend ? "可看走势" : "看公司分歧",
+    tone: hasTrend ? "good" : "caution",
+    targetText: target.targetText,
+    points: chartPoints,
+    series,
+    distributionRows,
+    distributionSummary
+  };
+}
+
 function matchClvView(detail: DashboardMatchDetail): MatchDetailView["clvTracking"] {
   const tracking = detail.clv_tracking;
   const record = (tracking?.records || [])[0];
@@ -3141,6 +3410,78 @@ function matchClvView(detail: DashboardMatchDetail): MatchDetailView["clvTrackin
     clvText: formatSignedPercent(clvReturn),
     timeText: clv.latest_closing_snapshot_utc || "—",
     tone
+  };
+}
+
+function movementTone(direction: unknown): KpiCard["tone"] {
+  const value = stringValue(direction, "");
+  if (value === "shortening") return "good";
+  if (value === "drifting") return "bad";
+  if (value === "stable") return "neutral";
+  return "caution";
+}
+
+function movementStatusText(status: string): string {
+  if (status === "available") return "已捕捉走势";
+  if (status === "insufficient_history") return "等待更多时间点";
+  if (status === "unavailable") return "暂无走势";
+  return status || "状态未知";
+}
+
+function marketMovementRows(movement: Record<string, unknown>): MatchDetailView["marketMovement"]["rows"] {
+  const rawRows = Array.isArray(movement.key_movements)
+    ? movement.key_movements.map(objectValue).filter((item) => Object.keys(item).length > 0)
+    : [];
+  return rawRows.slice(0, 4).map((item, index) => {
+    const marketType = stringValue(item.market_type, "");
+    const openingLine = numeric(item.opening_line);
+    const latestLine = numeric(item.latest_line);
+    const lineDelta = numeric(item.line_delta);
+    const hasLine = openingLine !== null || latestLine !== null;
+    return {
+      key: `${marketType}-${stringValue(item.selection_key, "")}-${index}`,
+      marketText: marketLabel(marketType) || "盘口",
+      selectionText: selectionLabel(item.selection || item.selection_key, marketType),
+      directionText: stringValue(item.direction_label, "走势未知"),
+      priceText: `${formatOdds(numeric(item.opening_decimal_odds))} -> ${formatOdds(numeric(item.latest_decimal_odds))}`,
+      probabilityText: formatSignedPercent(numeric(item.implied_probability_delta)),
+      lineText: hasLine
+        ? `${lineText(openingLine)} -> ${lineText(latestLine)}${lineDelta ? ` (${lineDelta > 0 ? "+" : ""}${lineDelta})` : ""}`
+        : "无盘口线",
+      metaText: `${numeric(item.bookmaker_count) ?? 0} 家 · ${numeric(item.snapshot_count) ?? 0} 条`,
+      tone: movementTone(item.direction)
+    };
+  });
+}
+
+function marketMovementView(detail: DashboardMatchDetail): MatchDetailView["marketMovement"] {
+  const movement = objectValue(detail.odds_snapshot.movement);
+  const status = stringValue(movement.status, "unavailable");
+  const rows = marketMovementRows(movement);
+  if (status === "available") {
+    return {
+      title: "盘口变化已纳入分析",
+      detail: `${numeric(movement.snapshot_count) ?? 0} 条快照，${numeric(movement.bookmaker_count) ?? 0} 家公司；展示开盘到最新的赔率和隐含概率变化。`,
+      statusText: movementStatusText(status),
+      tone: "good",
+      rows
+    };
+  }
+  if ((detail.odds_snapshot.snapshot_count ?? 0) > 0) {
+    return {
+      title: "已有赔率，但走势样本不足",
+      detail: "本场有快照记录，但同一盘口方向还不足两个时间点；当前分析仍以最新赔率和模型概率为主。",
+      statusText: movementStatusText(status),
+      tone: "caution",
+      rows
+    };
+  }
+  return {
+    title: "暂无盘口变化证据",
+    detail: "本地还没有匹配到多公司时间序列快照；当前只能展示预测使用的盘口或等待采集补齐。",
+    statusText: movementStatusText(status),
+    tone: "neutral",
+    rows: []
   };
 }
 
@@ -3186,6 +3527,8 @@ export function buildMatchDetailView(detail: DashboardMatchDetail): MatchDetailV
     },
     oddsSummary: oddsSummary(detail),
     clvTracking: matchClvView(detail),
+    oddsTrend: oddsTrendView(detail, oddsRows),
+    marketMovement: marketMovementView(detail),
     oddsRows,
     oddsGroups: oddsBookmakerGroups(oddsRows),
     hasQueryControls: false

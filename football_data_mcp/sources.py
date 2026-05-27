@@ -4178,6 +4178,129 @@ def _market_label(market: str) -> str:
     }.get(str(market or ""), str(market or ""))
 
 
+def _movement_market_key(market: Any) -> str:
+    normalized = str(market or "").strip().lower()
+    if normalized in {"1x2", "h2h", "moneyline", "moneyline_1x2"}:
+        return "h2h"
+    if normalized in {"asian_handicap", "spreads", "spread"}:
+        return "asian_handicap"
+    if normalized in {"over_under", "totals", "total"}:
+        return "over_under"
+    return normalized
+
+
+def _movement_selection_key(candidate: dict[str, Any]) -> str:
+    selection_key = str(candidate.get("selection_key") or "").strip().lower()
+    market = _movement_market_key(candidate.get("market"))
+    if market == "h2h":
+        if selection_key in {"home", "h"}:
+            return "home"
+        if selection_key in {"draw", "d", "x"}:
+            return "draw"
+        if selection_key in {"away", "a"}:
+            return "away"
+    if market == "asian_handicap":
+        if selection_key in {"home_cover", "home", "h"}:
+            return "home_cover"
+        if selection_key in {"away_cover", "away", "a"}:
+            return "away_cover"
+    if market == "over_under":
+        if selection_key in {"over", "o"}:
+            return "over"
+        if selection_key in {"under", "u"}:
+            return "under"
+    return selection_key
+
+
+def _candidate_market_movement(
+    candidate: dict[str, Any],
+    market_movement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    movement = market_movement or {}
+    markets = movement.get("markets") if isinstance(movement.get("markets"), dict) else {}
+    market = _movement_market_key(candidate.get("market"))
+    selection_key = _movement_selection_key(candidate)
+    market_summary = markets.get(market) if isinstance(markets, dict) else None
+    selections = market_summary.get("selections") if isinstance(market_summary, dict) else {}
+    selection_summary = selections.get(selection_key) if isinstance(selections, dict) else None
+    return selection_summary if isinstance(selection_summary, dict) else {}
+
+
+def _candidate_market_movement_signal(movement: dict[str, Any]) -> str:
+    status = str(movement.get("status") or "")
+    if status != "available":
+        return status or "unavailable"
+    probability_delta = parse_float(movement.get("implied_probability_delta"))
+    if probability_delta is None:
+        return "unavailable"
+    if abs(probability_delta) < 0.005:
+        return "stable"
+    if probability_delta > 0:
+        return "supports_selection"
+    return "against_selection"
+
+
+def _candidate_market_movement_note(candidate: dict[str, Any], movement: dict[str, Any]) -> str:
+    signal = _candidate_market_movement_signal(movement)
+    if signal in {"unavailable", "insufficient_history"}:
+        return ""
+    odds_text = ""
+    opening = parse_float(movement.get("opening_decimal_odds"))
+    latest = parse_float(movement.get("latest_decimal_odds"))
+    if opening is not None and latest is not None:
+        odds_text = f"赔率 {opening:g}->{latest:g}"
+    probability_delta = _edge_text(movement.get("implied_probability_delta"))
+    line_delta = parse_float(movement.get("line_delta"))
+    line_text = f"，盘口线变化 {line_delta:+g}" if line_delta is not None and abs(line_delta) > 0 else ""
+    direction = str(movement.get("direction_label") or "")
+    selection = str(candidate.get("selection") or movement.get("selection") or "").strip()
+    probability_text = f"，隐含概率 {probability_delta}" if probability_delta else ""
+    return "盘口走势：{}{}{}{}。".format(
+        f"{selection} " if selection else "",
+        direction,
+        f"，{odds_text}" if odds_text else "",
+        f"{probability_text}{line_text}",
+    )
+
+
+def _enrich_candidate_with_market_movement(
+    candidate: dict[str, Any],
+    market_movement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    movement = _candidate_market_movement(candidate, market_movement)
+    signal = _candidate_market_movement_signal(movement)
+    if not movement:
+        return {
+            **candidate,
+            "market_movement_signal": "unavailable",
+            "market_movement_note": "",
+        }
+    evidence_keys = (
+        "status",
+        "direction",
+        "direction_label",
+        "opening_decimal_odds",
+        "latest_decimal_odds",
+        "odds_delta",
+        "opening_line",
+        "latest_line",
+        "line_delta",
+        "implied_probability_delta",
+        "bookmaker_count",
+        "snapshot_count",
+        "first_observed_at_utc",
+        "latest_observed_at_utc",
+    )
+    movement_evidence = {key: movement.get(key) for key in evidence_keys if key in movement}
+    return {
+        **candidate,
+        "market_movement": movement_evidence,
+        "market_movement_signal": signal,
+        "market_movement_probability_delta": movement.get("implied_probability_delta"),
+        "market_movement_note": _candidate_market_movement_note(candidate, movement),
+    }
+
+
 def _percent_text(value: Any) -> str:
     number = parse_float(value)
     if number is None:
@@ -4251,6 +4374,9 @@ def _build_final_decision(
         rationale.append(f"MCP 预期总进球 {expected_total}")
     if line is not None:
         rationale.append(f"盘口线 {line}")
+    market_movement_note = str(best_candidate.get("market_movement_note") or "").strip()
+    if market_movement_note:
+        rationale.append(market_movement_note)
 
     return {
         "action": action,
@@ -4409,8 +4535,10 @@ def build_betting_decision_support(
     match_context: dict[str, Any] | None,
     quality_flags: list[str],
     quality_warnings: list[str],
+    market_movement: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic betting guardrails so agents do not turn every caution into no-bet."""
+    market_movement = market_movement or {}
     blocking_flags: list[str] = []
     caution_flags: list[str] = []
     for flag in quality_flags:
@@ -4761,6 +4889,12 @@ def build_betting_decision_support(
             }
         )
 
+    if candidates:
+        candidates = [
+            _enrich_candidate_with_market_movement(candidate, market_movement)
+            for candidate in candidates
+        ]
+
     if blocking_flags:
         best_candidate = {
             "market": "none",
@@ -4792,6 +4926,10 @@ def build_betting_decision_support(
                 "stake_level": "none",
                 "reason": "no_positive_edge",
             }
+        movement_delta = parse_float(best_candidate.get("market_movement_probability_delta"))
+        movement_signal = str(best_candidate.get("market_movement_signal") or "")
+        if movement_signal == "against_selection" and abs(movement_delta or 0.0) >= 0.02:
+            _append_unique(caution_flags, "market_movement_against_selection")
     final_decision = _build_final_decision(
         best_candidate,
         blocking_flags=blocking_flags,
@@ -4817,6 +4955,7 @@ def build_betting_decision_support(
         "minutes_to_kickoff": minutes,
         "form_signal": _form_signal(form),
         "model_engine": model_projection,
+        "market_movement": market_movement,
         "market_candidates": candidates,
         "best_candidate": best_candidate,
         "final_decision": final_decision,
@@ -5026,12 +5165,14 @@ def build_analysis_pack(
     lineup = (match_context or {}).get("lineup") or {}
     lineup_analysis = lineup.get("lineup_analysis") or {}
     matching_snapshot_count = ((data_bundle or {}).get("snapshot_store") or {}).get("matching_snapshot_count") or 0
+    market_movement = (data_bundle or {}).get("market_movement") or {}
     data_blocks = {
         "schedule": bool(match.get("home_team") and match.get("away_team") and match.get("kickoff_utc")),
         "moneyline_1x2": bool(supported.get("moneyline_1x2")),
         "asian_handicap": bool(supported.get("asian_handicap")),
         "over_under": bool(supported.get("over_under")),
         "multi_bookmaker_snapshot": matching_snapshot_count > 0,
+        "market_movement_history": market_movement.get("status") == "available",
         "recent_form": bool((form or {}).get("recent_record_summary")),
         "league_table": bool((form or {}).get("league_table_summary", {}).get("available")),
         "battle_history": bool((form or {}).get("battle_history", {}).get("matches")),
@@ -5072,6 +5213,7 @@ def build_analysis_pack(
             "lineup_analysis": lineup_analysis or {},
             "market_intelligence": market_intelligence,
             "market_snapshot_consensus": (data_bundle or {}).get("market_consensus") or {},
+            "market_snapshot_movement": market_movement,
             "quality": quality,
             "model_engine": model_engine_summary,
         },
@@ -5100,6 +5242,7 @@ def build_analysis_pack(
                 "source_coverage": (data_bundle or {}).get("source_coverage") or {},
                 "snapshot_store": (data_bundle or {}).get("snapshot_store") or {},
                 "market_consensus": (data_bundle or {}).get("market_consensus") or {},
+                "market_movement": market_movement,
                 "external_context": (data_bundle or {}).get("external_context") or {},
                 "agent_contract": (data_bundle or {}).get("agent_contract") or {},
             },
@@ -6710,6 +6853,7 @@ async def get_match_data_bundle(
 
     rows = snapshot_store.find_market_snapshots(parsed_home, parsed_away, league=league, limit=20000)
     consensus = snapshot_store.build_market_consensus(rows)
+    movement = snapshot_store.build_market_movement_summary(rows, home_team=parsed_home, away_team=parsed_away)
     snapshot_counts = snapshot_store.provider_snapshot_counts()
     provider_health = external_sources.external_provider_health(snapshot_counts)
     odds_status = "snapshot_available" if rows else provider_health["the_odds_api"]["status"]
@@ -6831,6 +6975,7 @@ async def get_match_data_bundle(
             },
         },
         "market_consensus": consensus,
+        "market_movement": movement,
         "external_context": {
             "sportmonks": sportmonks_context,
             "api_football": api_football_context,
@@ -6844,6 +6989,7 @@ async def get_match_data_bundle(
             "do_not_invent_missing_fields": True,
             "no_snapshot_rule": "If matching_snapshot_count is 0, say the paid-source snapshot layer has no local data yet and fall back to existing single-match MCP fields.",
             "consensus_rule": "Use market_consensus for multi-bookmaker price spread; do not calculate odds from raw rows unless a required field is absent from consensus.",
+            "movement_rule": "Use market_movement as opening-to-latest market evidence when status is available; otherwise say the analysis is current-price only.",
         },
     }
 
@@ -14594,6 +14740,11 @@ def _dashboard_match_odds_snapshot(
         "latest_rows": latest_rows,
         "resolution": resolution,
         "consensus": snapshot_store.build_market_consensus(rows) if rows else {},
+        "movement": snapshot_store.build_market_movement_summary(
+            rows,
+            home_team=str(record.get("home_team") or ""),
+            away_team=str(record.get("away_team") or ""),
+        ),
     }
 
 
@@ -15598,14 +15749,6 @@ async def analyze_single_match(
         quality_flags.append("low_match_confidence")
     if match_context and not ((match_context.get("readiness") or {}).get("pre_analysis_available")):
         quality_flags.append("deep_context_limited")
-    betting_decision_support = build_betting_decision_support(
-        match=best,
-        odds=odds,
-        form=form,
-        match_context=match_context,
-        quality_flags=quality_flags,
-        quality_warnings=quality_warnings,
-    )
     quality = {
         "is_bettable_input": not quality_flags,
         "flags": quality_flags,
@@ -15626,6 +15769,15 @@ async def analyze_single_match(
         window_hours=window_hours,
         include_match_resolution=False,
         include_context_refresh=include_source_probe,
+    )
+    betting_decision_support = build_betting_decision_support(
+        match=best,
+        odds=odds,
+        form=form,
+        match_context=match_context,
+        quality_flags=quality_flags,
+        quality_warnings=quality_warnings,
+        market_movement=data_bundle.get("market_movement") or {},
     )
     analysis_pack = build_analysis_pack(
         match=best,

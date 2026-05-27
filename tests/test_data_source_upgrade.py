@@ -127,6 +127,93 @@ def test_snapshot_store_persists_and_builds_consensus(tmp_path):
     assert consensus["h2h"]["Arsenal"]["latest_source_time_utc"] == "2026-05-23T08:02:00+00:00"
 
 
+def test_snapshot_store_builds_market_movement_from_snapshot_history(tmp_path):
+    db_path = tmp_path / "snapshots.sqlite3"
+    snapshot_store.save_market_snapshots(
+        [
+            snapshot_store.MarketSnapshot(
+                provider="leisu",
+                source_key="leisu_odds",
+                event_id="evt_1",
+                league="EPL",
+                home_team="Arsenal",
+                away_team="Chelsea",
+                kickoff_utc="2026-05-23T12:30:00+00:00",
+                bookmaker="Bet365",
+                market_type="h2h",
+                selection="Arsenal",
+                decimal_odds=2.1,
+                line=None,
+                source_time_utc="2026-05-23T08:00:00+00:00",
+                fetched_at_utc="2026-05-23T08:01:00+00:00",
+                raw={"side": "home"},
+            ),
+            snapshot_store.MarketSnapshot(
+                provider="leisu",
+                source_key="leisu_odds",
+                event_id="evt_1",
+                league="EPL",
+                home_team="Arsenal",
+                away_team="Chelsea",
+                kickoff_utc="2026-05-23T12:30:00+00:00",
+                bookmaker="Bet365",
+                market_type="h2h",
+                selection="Arsenal",
+                decimal_odds=1.9,
+                line=None,
+                source_time_utc="2026-05-23T10:00:00+00:00",
+                fetched_at_utc="2026-05-23T10:01:00+00:00",
+                raw={"side": "home"},
+            ),
+            snapshot_store.MarketSnapshot(
+                provider="leisu",
+                source_key="leisu_odds",
+                event_id="evt_1",
+                league="EPL",
+                home_team="Arsenal",
+                away_team="Chelsea",
+                kickoff_utc="2026-05-23T12:30:00+00:00",
+                bookmaker="Bet365",
+                market_type="asian_handicap",
+                selection="Arsenal",
+                decimal_odds=1.95,
+                line=-0.25,
+                source_time_utc="2026-05-23T08:00:00+00:00",
+                fetched_at_utc="2026-05-23T08:01:00+00:00",
+                raw={"side": "home_cover"},
+            ),
+            snapshot_store.MarketSnapshot(
+                provider="leisu",
+                source_key="leisu_odds",
+                event_id="evt_1",
+                league="EPL",
+                home_team="Arsenal",
+                away_team="Chelsea",
+                kickoff_utc="2026-05-23T12:30:00+00:00",
+                bookmaker="Bet365",
+                market_type="asian_handicap",
+                selection="Arsenal",
+                decimal_odds=1.88,
+                line=-0.5,
+                source_time_utc="2026-05-23T10:00:00+00:00",
+                fetched_at_utc="2026-05-23T10:01:00+00:00",
+                raw={"side": "home_cover"},
+            ),
+        ],
+        db_path=str(db_path),
+    )
+
+    rows = snapshot_store.find_market_snapshots("Arsenal", "Chelsea", db_path=str(db_path))
+    movement = snapshot_store.build_market_movement_summary(rows, home_team="Arsenal", away_team="Chelsea")
+
+    assert movement["status"] == "available"
+    assert movement["markets"]["h2h"]["selections"]["home"]["direction"] == "shortening"
+    assert movement["markets"]["h2h"]["selections"]["home"]["odds_delta"] == -0.2
+    assert movement["markets"]["h2h"]["selections"]["home"]["implied_probability_delta"] == 0.050125
+    assert movement["markets"]["asian_handicap"]["selections"]["home_cover"]["line_delta"] == -0.25
+    assert movement["key_movements"][0]["selection_key"] in {"home", "home_cover"}
+
+
 def test_snapshot_store_calculates_closing_line_value_from_snapshots(tmp_path):
     db_path = tmp_path / "snapshots.sqlite3"
     snapshot_store.save_market_snapshots(
@@ -1132,7 +1219,24 @@ def test_analyze_single_match_exposes_snapshot_data_bundle(monkeypatch, tmp_path
                 line=None,
                 source_time_utc="2026-05-23T08:00:00+00:00",
                 fetched_at_utc="2026-05-23T08:01:00+00:00",
-                raw={},
+                raw={"side": "home"},
+            ),
+            snapshot_store.MarketSnapshot(
+                provider="the_odds_api",
+                source_key="soccer_epl",
+                event_id="evt_1",
+                league="EPL",
+                home_team="Arsenal",
+                away_team="Chelsea",
+                kickoff_utc="2026-05-23T12:30:00+00:00",
+                bookmaker="Bet365",
+                market_type="h2h",
+                selection="Arsenal",
+                decimal_odds=1.82,
+                line=None,
+                source_time_utc="2026-05-23T10:00:00+00:00",
+                fetched_at_utc="2026-05-23T10:01:00+00:00",
+                raw={"side": "home"},
             ),
         ],
         db_path=str(db_path),
@@ -1184,6 +1288,73 @@ def test_analyze_single_match_exposes_snapshot_data_bundle(monkeypatch, tmp_path
     )
 
     assert result["status"] == "ok"
-    assert result["data_bundle"]["snapshot_store"]["matching_snapshot_count"] == 1
+    assert result["data_bundle"]["snapshot_store"]["matching_snapshot_count"] == 2
+    assert result["data_bundle"]["market_movement"]["status"] == "available"
     assert result["analysis_pack"]["data_coverage"]["blocks"]["multi_bookmaker_snapshot"] is True
-    assert result["agent_brief"]["data_bundle"]["market_consensus"]["h2h"]["Arsenal"]["median_decimal_odds"] == 1.9
+    assert result["analysis_pack"]["data_coverage"]["blocks"]["market_movement_history"] is True
+    assert result["agent_brief"]["data_bundle"]["market_consensus"]["h2h"]["Arsenal"]["median_decimal_odds"] == 1.86
+    assert result["betting_decision_support"]["market_movement"]["status"] == "available"
+
+
+def test_betting_support_attaches_market_movement_to_candidate():
+    odds = sources_module.with_odds_quality_contract(
+        {
+            "moneyline_1x2": [
+                {
+                    "provider": "Fixture odds",
+                    "home": 1.9,
+                    "draw": 3.4,
+                    "away": 4.2,
+                    "columns": ["fixture"],
+                }
+            ],
+            "preferred_moneyline_1x2": {
+                "provider": "Fixture odds",
+                "current": {"home": 1.9, "draw": 3.4, "away": 4.2, "timestamp": "2026-05-23 10:00"},
+            },
+            "has_valid_numeric_odds": True,
+        }
+    )
+    movement_selection = {
+        "status": "available",
+        "direction": "shortening",
+        "direction_label": "升温",
+        "opening_decimal_odds": 2.1,
+        "latest_decimal_odds": 1.9,
+        "odds_delta": -0.2,
+        "implied_probability_delta": 0.050125,
+        "bookmaker_count": 1,
+        "snapshot_count": 2,
+        "first_observed_at_utc": "2026-05-23T08:00:00+00:00",
+        "latest_observed_at_utc": "2026-05-23T10:00:00+00:00",
+    }
+
+    support = sources_module.build_betting_decision_support(
+        match={
+            "home_team": "Arsenal",
+            "away_team": "Chelsea",
+            "kickoff_utc": "2026-05-23T12:30:00+00:00",
+            "time_window": {"in_window": True},
+        },
+        odds=odds,
+        form={"available": False},
+        match_context=None,
+        quality_flags=[],
+        quality_warnings=[],
+        market_movement={
+            "status": "available",
+            "markets": {
+                "h2h": {
+                    "selections": {
+                        "home": movement_selection,
+                        "draw": {**movement_selection, "direction": "stable", "direction_label": "平稳", "implied_probability_delta": 0.0},
+                        "away": {**movement_selection, "direction": "drifting", "direction_label": "降温", "implied_probability_delta": -0.02},
+                    }
+                }
+            },
+        },
+    )
+
+    candidate = next(item for item in support["market_candidates"] if item["market"] == "1x2")
+    assert candidate["market_movement_signal"] in {"supports_selection", "against_selection", "stable"}
+    assert "盘口走势" in candidate["market_movement_note"]

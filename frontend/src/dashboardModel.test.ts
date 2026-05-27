@@ -3018,6 +3018,167 @@ describe("dashboard model", () => {
     expect((view.candidateRows[0] as any).providerText).toBe("乐天*");
   });
 
+  it("summarizes market movement from odds snapshot history", () => {
+    const view = buildMatchDetailView({
+      ...matchDetail,
+      odds_snapshot: {
+        ...matchDetail.odds_snapshot,
+        movement: {
+          status: "available",
+          snapshot_count: 12,
+          bookmaker_count: 3,
+          key_movements: [
+            {
+              market_type: "asian_handicap",
+              selection_key: "away_cover",
+              selection: "大阪钢巴 +0.25",
+              direction: "shortening",
+              direction_label: "升温",
+              opening_decimal_odds: 1.96,
+              latest_decimal_odds: 1.82,
+              opening_line: 0.25,
+              latest_line: 0.25,
+              line_delta: 0,
+              implied_probability_delta: 0.0393,
+              bookmaker_count: 3,
+              snapshot_count: 6
+            }
+          ]
+        }
+      },
+      evidence: {
+        ...matchDetail.evidence,
+        market_candidates: [
+          {
+            provider: "公司B",
+            market: "asian_handicap",
+            selection: "大阪钢巴 +0.25",
+            decimal_odds: 1.82,
+            model_probability: 0.56,
+            edge: 0.03,
+            market_movement_signal: "supports_selection",
+            market_movement_note: "盘口走势：大阪钢巴 +0.25 升温，赔率 1.96->1.82。"
+          }
+        ]
+      }
+    });
+
+    expect(view.marketMovement.title).toBe("盘口变化已纳入分析");
+    expect(view.marketMovement.rows[0].directionText).toBe("升温");
+    expect(view.marketMovement.rows[0].probabilityText).toBe("+3.9%");
+    expect(view.candidateRows[0].movementText).toContain("盘口走势");
+  });
+
+  it("builds bookmaker-grouped odds trend index series", () => {
+    const view = buildMatchDetailView({
+      ...matchDetail,
+      record: {
+        ...matchDetail.record,
+        market: "asian_handicap",
+        selection: "大阪钢巴 +0.25",
+        line: 0.25
+      },
+      odds_snapshot: {
+        ...matchDetail.odds_snapshot,
+        latest_rows: [
+          {
+            provider: "leisu",
+            bookmaker: "公司A",
+            market_type: "asian_handicap",
+            selection: "大阪钢巴",
+            decimal_odds: 1.9,
+            line: 0.25,
+            source_time_utc: "2026-05-25T07:00:00+00:00",
+            fetched_at_utc: "2026-05-25T07:01:00+00:00"
+          },
+          {
+            provider: "leisu",
+            bookmaker: "公司A",
+            market_type: "asian_handicap",
+            selection: "大阪钢巴",
+            decimal_odds: 1.8,
+            line: 0.25,
+            source_time_utc: "2026-05-25T08:00:00+00:00",
+            fetched_at_utc: "2026-05-25T08:01:00+00:00"
+          },
+          {
+            provider: "leisu",
+            bookmaker: "公司B",
+            market_type: "asian_handicap",
+            selection: "大阪钢巴",
+            decimal_odds: 1.88,
+            line: 0.25,
+            source_time_utc: "2026-05-25T07:00:00+00:00",
+            fetched_at_utc: "2026-05-25T07:01:00+00:00"
+          },
+          {
+            provider: "leisu",
+            bookmaker: "公司B",
+            market_type: "asian_handicap",
+            selection: "大阪钢巴",
+            decimal_odds: 1.92,
+            line: 0.25,
+            source_time_utc: "2026-05-25T08:00:00+00:00",
+            fetched_at_utc: "2026-05-25T08:01:00+00:00"
+          }
+        ]
+      }
+    });
+
+    expect(view.oddsTrend.title).toBe("赔率走势指数图");
+    expect(view.oddsTrend.statusText).toBe("可看走势");
+    expect(view.oddsTrend.series.map((series) => series.bookmaker)).toEqual(["公司A", "公司B"]);
+    expect(view.oddsTrend.points).toHaveLength(2);
+    expect(view.oddsTrend.points[1].bookmaker_0).toBe(94.74);
+    expect(view.oddsTrend.points[1].bookmaker_1).toBe(102.13);
+  });
+
+  it("uses odds distribution when only one snapshot time exists", () => {
+    const view = buildMatchDetailView({
+      ...matchDetail,
+      record: {
+        ...matchDetail.record,
+        market: "asian_handicap",
+        selection: "大阪钢巴 +0.25",
+        line: 0.25
+      },
+      odds_snapshot: {
+        ...matchDetail.odds_snapshot,
+        latest_rows: [
+          {
+            provider: "leisu",
+            bookmaker: "低赔公司",
+            market_type: "asian_handicap",
+            selection: "大阪钢巴",
+            decimal_odds: 1.75,
+            line: 0.25,
+            source_time_utc: "2026-05-25T08:00:00+00:00",
+            fetched_at_utc: "2026-05-25T08:01:00+00:00"
+          },
+          {
+            provider: "leisu",
+            bookmaker: "高赔公司",
+            market_type: "asian_handicap",
+            selection: "大阪钢巴",
+            decimal_odds: 1.95,
+            line: 0.25,
+            source_time_utc: "2026-05-25T08:00:00+00:00",
+            fetched_at_utc: "2026-05-25T08:01:00+00:00"
+          }
+        ]
+      }
+    });
+
+    expect(view.oddsTrend.mode).toBe("distribution");
+    expect(view.oddsTrend.title).toBe("公司赔率横截面");
+    expect(view.oddsTrend.distributionSummary.lowOddsText).toBe("1.75");
+    expect(view.oddsTrend.distributionSummary.highOddsText).toBe("1.95");
+    expect(view.oddsTrend.distributionSummary.spreadText).toBe("0.20");
+    expect(view.oddsTrend.distributionRows.map((row) => row.bookmaker)).toEqual(["低赔公司", "高赔公司"]);
+    expect(view.oddsTrend.distributionRows[0].positionPercent).toBe("0.0%");
+    expect(view.oddsTrend.distributionRows[1].positionPercent).toBe("100.0%");
+  });
+
   it("groups odds snapshots by bookmaker for collapsible detail display", () => {
     const view = buildMatchDetailView({
       ...matchDetail,

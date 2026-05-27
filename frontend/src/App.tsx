@@ -53,7 +53,9 @@ import type { DashboardMatchDetail, DashboardRecord, DashboardSectionKey, Dashbo
 const API_URL = "/api/dashboard";
 type LedgerFilter = "all" | "recommendation" | "observation" | "settled" | "open" | "hit" | "miss";
 type DashboardViewModel = ReturnType<typeof buildDashboardView>;
+type MatchDetailViewModel = ReturnType<typeof buildMatchDetailView>;
 type BacktestChartPoint = DashboardViewModel["backtestCurve"]["points"][number];
+type OddsTrendChartPoint = MatchDetailViewModel["oddsTrend"]["points"][number];
 
 function currentDashboardRoute(): DashboardRoute {
   return parseDashboardRoute(`${window.location.pathname}${window.location.search}`);
@@ -1271,6 +1273,35 @@ function BacktestTooltip({
   );
 }
 
+function formatOddsIndexAxis(value: number): string {
+  if (!Number.isFinite(value)) return "100";
+  return value.toFixed(0);
+}
+
+function OddsTrendTooltip({
+  active,
+  payload,
+  label
+}: {
+  active?: boolean;
+  payload?: Array<{ color?: string; name?: string; value?: number | string | null; payload: OddsTrendChartPoint }>;
+  label?: string;
+}) {
+  const rows = (payload || []).filter((item) => typeof item.value === "number");
+  if (!active || !rows.length) return null;
+  return (
+    <div className="chart-tooltip odds-trend-tooltip">
+      <strong>{label || rows[0]?.payload.label || "赔率走势"}</strong>
+      <span>指数 100 = 该公司首个赔率点</span>
+      {rows.slice(0, 8).map((item) => (
+        <b key={item.name} style={{ color: item.color || "#334155" }}>
+          {item.name}：{typeof item.value === "number" ? item.value.toFixed(1) : item.value}
+        </b>
+      ))}
+    </div>
+  );
+}
+
 function BacktestCurvePanel({ view }: { view: ReturnType<typeof buildDashboardView> }) {
   const curve = view.backtestCurve;
   const iconMap = [TrendingUp, AlertTriangle, Target, Activity];
@@ -1757,6 +1788,131 @@ function MatchDetailPanel({
           <time>{view.clvTracking.timeText.includes("T") ? localTime(view.clvTracking.timeText) : view.clvTracking.timeText}</time>
         </div>
       </div>
+      <div className={`market-movement-card ${toneClass(view.marketMovement.tone)}`}>
+        <div className="market-movement-head">
+          <Activity size={16} />
+          <span>盘口走势</span>
+          <strong>{view.marketMovement.title}</strong>
+          <em>{view.marketMovement.statusText}</em>
+        </div>
+        <p>{view.marketMovement.detail}</p>
+        {view.marketMovement.rows.length > 0 && (
+          <div className="market-movement-grid">
+            {view.marketMovement.rows.map((row) => (
+              <div className={`market-movement-row ${toneClass(row.tone)}`} key={row.key}>
+                <div>
+                  <span>{row.marketText}</span>
+                  <strong>{row.selectionText}</strong>
+                  <em>{row.directionText}</em>
+                </div>
+                <b>{row.priceText}</b>
+                <small>{row.probabilityText}</small>
+                <small>{row.lineText}</small>
+                <time>{row.metaText}</time>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className={`odds-trend-card ${toneClass(view.oddsTrend.tone)}`}>
+        <div className="odds-trend-head">
+          <BarChart3 size={16} />
+          <span>赔率走势指数图</span>
+          <strong>{view.oddsTrend.title}</strong>
+          <em>{view.oddsTrend.statusText}</em>
+        </div>
+        <p>{view.oddsTrend.detail}</p>
+        {view.oddsTrend.mode === "trend" && view.oddsTrend.points.length > 0 && view.oddsTrend.series.length > 0 ? (
+          <>
+            <div className="odds-trend-chart" role="img" aria-label="按公司分组的赔率走势指数图">
+              <ResponsiveContainer width="100%" height={230} minWidth={0}>
+                <LineChart data={view.oddsTrend.points} margin={{ top: 12, right: 18, bottom: 8, left: 0 }}>
+                  <CartesianGrid stroke="#e4ebf2" strokeDasharray="4 4" vertical={false} />
+                  <XAxis
+                    dataKey="label"
+                    tickLine={false}
+                    axisLine={false}
+                    tickMargin={8}
+                    minTickGap={18}
+                    tick={{ fill: "#667085", fontSize: 11, fontWeight: 700 }}
+                  />
+                  <YAxis
+                    width={42}
+                    domain={["dataMin - 2", "dataMax + 2"]}
+                    tickLine={false}
+                    axisLine={false}
+                    tickFormatter={formatOddsIndexAxis}
+                    tick={{ fill: "#667085", fontSize: 11, fontWeight: 700 }}
+                  />
+                  <ReferenceLine y={100} stroke="#9aa8b6" strokeDasharray="5 5" />
+                  <Tooltip content={<OddsTrendTooltip />} cursor={{ stroke: "#91a7bd", strokeDasharray: "4 4" }} />
+                  {view.oddsTrend.series.map((series) => (
+                    <Line
+                      key={series.key}
+                      type="monotone"
+                      dataKey={series.key}
+                      name={series.bookmaker}
+                      stroke={series.color}
+                      strokeWidth={2.4}
+                      dot={{ r: 3, strokeWidth: 1.5, fill: "#ffffff", stroke: series.color }}
+                      activeDot={{ r: 4.5, strokeWidth: 2, fill: series.color, stroke: "#ffffff" }}
+                      connectNulls
+                      isAnimationActive={false}
+                    />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="odds-trend-legend" aria-label="公司分组">
+              {view.oddsTrend.series.map((series) => (
+                <div key={series.key}>
+                  <i style={{ background: series.color }} />
+                  <strong>{series.bookmaker}</strong>
+                  <span>{series.latestOddsText}</span>
+                  <em>指数 {series.latestIndexText}</em>
+                  <small>{series.pointCountText}</small>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : view.oddsTrend.mode === "distribution" && view.oddsTrend.distributionRows.length > 0 ? (
+          <div className="odds-distribution-panel" aria-label="公司赔率横截面分布">
+            <div className="odds-distribution-summary">
+              <div>
+                <span>低赔</span>
+                <strong>{view.oddsTrend.distributionSummary.lowOddsText}</strong>
+              </div>
+              <div>
+                <span>中位</span>
+                <strong>{view.oddsTrend.distributionSummary.medianOddsText}</strong>
+              </div>
+              <div>
+                <span>高赔</span>
+                <strong>{view.oddsTrend.distributionSummary.highOddsText}</strong>
+              </div>
+              <div>
+                <span>分歧</span>
+                <strong>{view.oddsTrend.distributionSummary.spreadText}</strong>
+              </div>
+            </div>
+            <div className="odds-distribution-list">
+              {view.oddsTrend.distributionRows.map((row) => (
+                <div className="odds-distribution-row" key={row.key}>
+                  <strong>{row.bookmaker}</strong>
+                  <div className="odds-distribution-track">
+                    <i style={{ left: row.positionPercent, background: row.color }} />
+                  </div>
+                  <b>{row.oddsText}</b>
+                  <em>指数 {row.indexText}</em>
+                  <small>{row.pointCountText}</small>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="empty-state compact">暂无可绘制的公司赔率走势。</div>
+        )}
+      </div>
       <div className="probability-stack">
         {view.probabilityRows.map((row) => (
           <div className="probability-row" key={row.label}>
@@ -1950,6 +2106,7 @@ function MatchDetailPanel({
                   <strong>{candidate.oddsText}</strong>
                   <b>{candidate.probabilityText}</b>
                   <em>{candidate.edgeText}</em>
+                  {candidate.movementText && <i className={toneClass(candidate.movementTone || "neutral")}>{candidate.movementText}</i>}
                 </div>
               ))}
             </div>
@@ -1983,6 +2140,7 @@ function MatchDetailPanel({
                 <strong>{candidate.oddsText}</strong>
                 <b>{candidate.probabilityText}</b>
                 <em>{candidate.edgeText}</em>
+                {candidate.movementText && <i className={toneClass(candidate.movementTone || "neutral")}>{candidate.movementText}</i>}
               </div>
             ))}
           </div>

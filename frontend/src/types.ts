@@ -376,6 +376,7 @@ export interface DashboardOddsSnapshotDetail {
   latest_rows: DashboardOddsSnapshotRow[];
   resolution?: DashboardOddsResolution;
   consensus: Record<string, unknown>;
+  movement?: Record<string, unknown>;
 }
 
 export interface DashboardClvResult {
@@ -1195,6 +1196,8 @@ export interface CandidateRow {
   oddsText: string;
   probabilityText: string;
   edgeText: string;
+  movementText?: string;
+  movementTone?: KpiCard["tone"];
 }
 
 export interface PredictionLedgerViewRow extends PredictionLedgerRow {
@@ -1616,6 +1619,31 @@ export interface OddsSnapshotBookmakerGroup {
   rows: OddsSnapshotRowView[];
 }
 
+export interface OddsTrendPoint {
+  observedAtUtc: string;
+  label: string;
+  [seriesKey: string]: string | number | null;
+}
+
+export interface OddsTrendSeries {
+  key: string;
+  bookmaker: string;
+  color: string;
+  latestOddsText: string;
+  latestIndexText: string;
+  pointCountText: string;
+}
+
+export interface OddsDistributionRow {
+  key: string;
+  bookmaker: string;
+  oddsText: string;
+  indexText: string;
+  pointCountText: string;
+  positionPercent: string;
+  color: string;
+}
+
 export interface PredictionDiagnosticView {
   title: string;
   statusText: string;
@@ -1684,6 +1712,40 @@ export interface MatchDetailView extends RecordDetailView {
     clvText: string;
     timeText: string;
     tone: KpiCard["tone"];
+  };
+  oddsTrend: {
+    mode: "trend" | "distribution" | "empty";
+    title: string;
+    detail: string;
+    statusText: string;
+    tone: KpiCard["tone"];
+    targetText: string;
+    points: OddsTrendPoint[];
+    series: OddsTrendSeries[];
+    distributionRows: OddsDistributionRow[];
+    distributionSummary: {
+      lowOddsText: string;
+      medianOddsText: string;
+      highOddsText: string;
+      spreadText: string;
+    };
+  };
+  marketMovement: {
+    title: string;
+    detail: string;
+    statusText: string;
+    tone: KpiCard["tone"];
+    rows: Array<{
+      key: string;
+      marketText: string;
+      selectionText: string;
+      directionText: string;
+      priceText: string;
+      probabilityText: string;
+      lineText: string;
+      metaText: string;
+      tone: KpiCard["tone"];
+    }>;
   };
   oddsRows: OddsSnapshotRowView[];
   oddsGroups: OddsSnapshotBookmakerGroup[];
