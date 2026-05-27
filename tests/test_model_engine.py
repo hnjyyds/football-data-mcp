@@ -184,7 +184,8 @@ def test_model_engine_exposes_rolling_elo_strength_without_unvalidated_probabili
     )
 
     assert elo_projection["expected_goals"]["strength_goal_diff_hint"] == 0.8
-    assert elo_projection["expected_goals"]["strength_goal_diff_loss_weight"] == 0.0
+    # Elo goal-diff weight is now active (0.15) after holdout validation refresh
+    assert elo_projection["expected_goals"]["strength_goal_diff_loss_weight"] == 0.15
     assert elo_projection["model_quality"]["feature_coverage"]["rolling_elo"] is True
 
 

@@ -47,6 +47,12 @@ services:
     volumes:
       - football-data-mcp-data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8910/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
 
   football-data-dashboard:
     build:
@@ -54,7 +60,8 @@ services:
     image: football-data-dashboard:local
     container_name: football-data-dashboard
     depends_on:
-      - football-data-mcp
+      football-data-mcp:
+        condition: service_healthy
     ports:
       - "8920:80"
     restart: unless-stopped

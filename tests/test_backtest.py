@@ -121,7 +121,7 @@ def test_walk_forward_backtest_uses_only_prior_matches_and_reports_metrics():
     assert result["records"][0]["leakage_policy"] == "only matches with kickoff before this sample are used for form features"
     assert result["records"][0]["form_summary"]["home"]["sample_size"] == 1
     rolling_elo = result["records"][0]["team_strength"]["rolling_elo"]
-    assert rolling_elo["method"] == "rolling_elo_from_prior_results_v1"
+    assert rolling_elo["method"] == "rolling_elo_time_weighted_v2"
     assert rolling_elo["home"]["team"] == "Arsenal"
     assert rolling_elo["away"]["team"] == "Spurs"
     assert rolling_elo["leakage_policy"] == "ratings are built only from prior completed samples"

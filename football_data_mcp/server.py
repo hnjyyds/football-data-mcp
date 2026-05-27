@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
+import time
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote
 
@@ -11,6 +14,17 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from football_data_mcp import backtest, sources
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%SZ",
+)
+logger = logging.getLogger("football_data_mcp.server")
+
+_server_start_time = time.time()
+_last_learning_cycle_time: float | None = None
+_last_learning_cycle_error: str | None = None
 
 
 mcp = FastMCP(
@@ -43,13 +57,84 @@ def _dashboard_cors_headers() -> dict[str, str]:
     }
 
 
+@mcp.custom_route("/api/health", methods=["GET", "OPTIONS"], include_in_schema=False)
+async def health_api(request: Request) -> Response:
+    """Lightweight health check endpoint for monitoring and Docker HEALTHCHECK."""
+    headers = _dashboard_cors_headers()
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+    from football_data_mcp.learning_store import learning_db_path
+    import os
+
+    db_path = learning_db_path()
+    db_accessible = os.path.exists(db_path) if db_path else False
+    uptime_seconds = int(time.time() - _server_start_time)
+    payload = {
+        "status": "ok",
+        "uptime_seconds": uptime_seconds,
+        "db_path": db_path,
+        "db_accessible": db_accessible,
+        "last_learning_cycle_at": (
+            datetime.fromtimestamp(_last_learning_cycle_time, tz=timezone.utc).isoformat()
+            if _last_learning_cycle_time
+            else None
+        ),
+        "last_learning_cycle_error": _last_learning_cycle_error,
+        "auto_learning_enabled": os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ENABLED", "").strip().lower()
+        in {"1", "true", "yes", "on"},
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    return JSONResponse(payload, headers=headers)
+
+
+@mcp.custom_route("/api/dashboard/summary", methods=["GET", "OPTIONS"], include_in_schema=False)
+async def dashboard_summary_api(request: Request) -> Response:
+    """Lightweight KPI summary for fast initial page load (< 1KB)."""
+    headers = _dashboard_cors_headers()
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+
+    def _build_summary() -> dict[str, Any]:
+        try:
+            snapshot = sources.dashboard_snapshot()
+            kpis = snapshot.get("kpis") or {}
+            prediction_kpis = snapshot.get("prediction_kpis") or {}
+            strategy_state = snapshot.get("strategy_state") or {}
+            return {
+                "status": "ok",
+                "generated_at_utc": snapshot.get("generated_at_utc"),
+                "kpis": {
+                    "open_records": kpis.get("open_records"),
+                    "settled_records": kpis.get("settled_records"),
+                    "asian_pick_count": kpis.get("asian_pick_count"),
+                    "live_calibration_active": kpis.get("live_calibration_active"),
+                },
+                "prediction_kpis": {
+                    "hit_rate": prediction_kpis.get("hit_rate"),
+                    "roi": prediction_kpis.get("roi"),
+                    "settled_count": prediction_kpis.get("settled_count"),
+                    "recommended_count": prediction_kpis.get("recommended_count"),
+                },
+                "strategy_status": strategy_state.get("status"),
+                "strategy_sample_count": strategy_state.get("sample_count"),
+            }
+        except Exception as exc:
+            logger.error("dashboard_summary error: %s", exc)
+            return {"status": "error", "error": str(exc)}
+
+    summary = await asyncio.to_thread(_build_summary)
+    return JSONResponse(summary, headers=headers)
+
+
 @mcp.custom_route("/api/dashboard", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def dashboard_api(request: Request) -> Response:
     """Read-only JSON snapshot for the local dashboard frontend."""
     headers = _dashboard_cors_headers()
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
+    t0 = time.time()
     snapshot = await asyncio.to_thread(sources.dashboard_snapshot)
+    logger.info("dashboard_api completed in %.2fs", time.time() - t0)
     return JSONResponse(snapshot, headers=headers)
 
 
@@ -725,11 +810,18 @@ def _start_auto_learning_daemon_if_enabled() -> None:
     config = _auto_learning_config_from_env()
 
     def runner() -> None:
-        asyncio.run(
-            sources.auto_learning_daemon(
-                **config,
+        global _last_learning_cycle_time, _last_learning_cycle_error
+        try:
+            asyncio.run(
+                sources.auto_learning_daemon(
+                    **config,
+                )
             )
-        )
+        except Exception as exc:
+            _last_learning_cycle_error = str(exc)
+            logger.error("auto_learning_daemon crashed: %s", exc)
+        finally:
+            _last_learning_cycle_time = time.time()
 
     thread = threading.Thread(target=runner, name="football-data-auto-learning", daemon=True)
     thread.start()
