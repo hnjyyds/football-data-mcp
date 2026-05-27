@@ -541,8 +541,42 @@ def leisu_odds_access_status(text: str) -> dict[str, Any]:
     }
 
 
+# Circuit breaker for Leisu mobile API — stop hammering when token is dead
+_LEISU_CB_CONSECUTIVE_403: int = 0
+_LEISU_CB_OPEN_UNTIL: float = 0.0
+_LEISU_CB_THRESHOLD: int = 10        # 10 consecutive 403s → trip the breaker
+_LEISU_CB_COOLDOWN_SECONDS: float = 1800.0  # stay disabled for 30 min
+
+
 def _leisu_mobile_api_enabled() -> bool:
-    return os.getenv("LEISU_MOBILE_API_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+    if os.getenv("LEISU_MOBILE_API_ENABLED", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    # Circuit breaker: if too many recent 403s, skip the API for cooldown period
+    if time.time() < _LEISU_CB_OPEN_UNTIL:
+        return False
+    return True
+
+
+def _leisu_cb_record_failure() -> None:
+    """Record a 403/auth failure; trip the breaker if threshold exceeded."""
+    global _LEISU_CB_CONSECUTIVE_403, _LEISU_CB_OPEN_UNTIL
+    _LEISU_CB_CONSECUTIVE_403 += 1
+    if _LEISU_CB_CONSECUTIVE_403 >= _LEISU_CB_THRESHOLD:
+        _LEISU_CB_OPEN_UNTIL = time.time() + _LEISU_CB_COOLDOWN_SECONDS
+        # Log once per trip
+        if _LEISU_CB_CONSECUTIVE_403 == _LEISU_CB_THRESHOLD:
+            print(
+                f"[leisu_circuit_breaker] tripped: {_LEISU_CB_CONSECUTIVE_403} 403s; "
+                f"disabling Leisu mobile API for {int(_LEISU_CB_COOLDOWN_SECONDS)}s",
+                flush=True,
+            )
+
+
+def _leisu_cb_record_success() -> None:
+    """Reset failure counter on successful call."""
+    global _LEISU_CB_CONSECUTIVE_403, _LEISU_CB_OPEN_UNTIL
+    _LEISU_CB_CONSECUTIVE_403 = 0
+    _LEISU_CB_OPEN_UNTIL = 0.0
 
 
 def _leisu_mobile_detail_company_limit() -> int:
@@ -741,8 +775,25 @@ async def fetch_leisu_mobile_api(
         response = await request_once({"alichlgref": referer})
         text = response.text
 
+    # 403/401 from upstream → record for circuit breaker
+    if response.status_code in (401, 403):
+        _leisu_cb_record_failure()
+        return {
+            "status": "forbidden",
+            "method": "mobile_api",
+            "data": None,
+            "access": {
+                "status": "forbidden",
+                "blocked": True,
+                "requires_cookie_or_proxy": True,
+                "reason": f"http_{response.status_code}_token_expired_or_invalid",
+            },
+            "source": evidence(str(response.url), time.time(), "leisu.com"),
+            "waf_solved": waf_solved,
+        }
     access = leisu_odds_access_status(text)
     if access.get("blocked"):
+        _leisu_cb_record_failure()
         return {
             "status": access.get("status") or "blocked",
             "method": "mobile_api",
@@ -768,6 +819,8 @@ async def fetch_leisu_mobile_api(
             "waf_solved": waf_solved,
         }
     decoded = decode_leisu_mobile_api_response(raw_payload)
+    if decoded is not None:
+        _leisu_cb_record_success()
     return {
         "status": "ok" if decoded is not None else "empty",
         "method": "mobile_api",
