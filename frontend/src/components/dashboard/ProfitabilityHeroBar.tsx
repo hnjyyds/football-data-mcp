@@ -7,6 +7,7 @@ function pct(n: number | null | undefined, digits = 1): string {
 }
 
 export function ProfitabilityHeroBar({ forecast }: { forecast?: DashboardProfitabilityForecast }) {
+  // Empty / loading state
   if (!forecast?.available) {
     return (
       <div className="rounded-xl border border-ink-200 dark:border-ink-700 bg-ink-50 dark:bg-ink-800/60 px-4 py-3 flex items-center gap-3">
@@ -23,6 +24,59 @@ export function ProfitabilityHeroBar({ forecast }: { forecast?: DashboardProfita
     );
   }
 
+  const state = forecast.model_state ?? "insufficient_data";
+
+  // Losing state — model is currently unprofitable
+  if (state === "losing") {
+    const breakEven = forecast.break_even_hit_rate_needed ?? 0;
+    const gap = forecast.hit_rate_gap ?? 0;
+    return (
+      <div className="rounded-xl border border-danger-500/40 bg-gradient-to-r from-danger-500/10 to-danger-500/5 dark:from-danger-900/30 dark:to-danger-900/10 px-4 py-3 shadow-sm animate-slide-up">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <Icon name="error" size={22} className="text-danger-600 dark:text-danger-500 flex-shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-bold text-ink-900 dark:text-white">
+              ⚠️ 模型当前在亏损 — 无法证明盈利路径
+            </div>
+            <div className="text-2xs text-ink-700 dark:text-ink-300 mt-1">
+              命中率 <strong className="tabular-nums text-danger-600 dark:text-danger-500">{pct(forecast.observed_hit_rate)}</strong> ·
+              单笔 ROI <strong className="tabular-nums text-danger-600 dark:text-danger-500">{pct(forecast.implied_roi_per_bet)}</strong> ·
+              需要 <strong className="tabular-nums">{pct(breakEven)}</strong> 才能盈亏平衡（差 {pct(gap)}）
+            </div>
+            <div className="text-2xs text-ink-500 dark:text-ink-400 mt-1">
+              💡 当务之急：重跑 holdout validation 检查 log-loss vs 市场基线，确认是否需要换模型/数据源
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Marginal edge — can't reach significance in reasonable time
+  if (state === "marginal_edge") {
+    return (
+      <div className="rounded-xl border border-warning-500/40 bg-gradient-to-r from-warning-500/10 to-warning-500/5 dark:from-warning-900/30 dark:to-warning-900/10 px-4 py-3 shadow-sm animate-slide-up">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <Icon name="warn" size={22} className="text-warning-600 dark:text-warning-500 flex-shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-bold text-ink-900 dark:text-white">
+              边际过小，难以统计验证
+            </div>
+            <div className="text-2xs text-ink-700 dark:text-ink-300 mt-1">
+              命中率 <strong className="tabular-nums">{pct(forecast.observed_hit_rate)}</strong> ·
+              单笔 ROI <strong className="tabular-nums">{pct(forecast.implied_roi_per_bet)}</strong> ·
+              需要 &gt;100000 笔才能证明
+            </div>
+            <div className="text-2xs text-ink-500 dark:text-ink-400 mt-1">
+              💡 建议：收紧候选过滤（提高 min_calibrated_probability 到 0.65+）或改进特征工程
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Profitable state
   const remaining = forecast.remaining_bets ?? 0;
   const total = forecast.required_bets_total ?? 1;
   const sofar = forecast.settled_bets_so_far ?? 0;

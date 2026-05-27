@@ -121,6 +121,86 @@ def compute_rest_days(
 # ─── Head-to-head features ───────────────────────────────────────────────────
 
 
+def compute_lineup_impact(
+    home_lineup: dict[str, Any] | None,
+    away_lineup: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Compute xG adjustment multipliers based on starting lineup quality.
+
+    Looks for:
+    - Missing key forwards / midfielders / goalkeepers (using basis_score
+      from lineup_analysis if available)
+    - Bench-strength indicators
+
+    Returns:
+        {
+          "available": bool,
+          "home_xg_multiplier": float (e.g., 0.93 for -7%),
+          "away_xg_multiplier": float,
+          "missing_key_players_home": list[str],
+          "missing_key_players_away": list[str],
+        }
+    """
+    if not home_lineup and not away_lineup:
+        return {"available": False, "reason": "no_lineup_data"}
+
+    def _side_impact(lineup: dict[str, Any] | None) -> dict[str, Any]:
+        if not lineup:
+            return {"multiplier": 1.0, "missing_key_players": [], "available": False}
+
+        analysis = lineup.get("lineup_analysis") or {}
+        starters = lineup.get("starting_xi") or lineup.get("starters") or []
+        missing = analysis.get("missing_key_players") or analysis.get("notable_absences") or []
+        availability_score = analysis.get("availability_score")
+
+        if not isinstance(missing, list):
+            missing = []
+        missing_names = [str(p.get("name") if isinstance(p, dict) else p) for p in missing if p]
+
+        # Heuristic multiplier:
+        # - missing key striker/CAM: -5% per player
+        # - missing key defender/GK: -3% per player (defenders matter less for xG)
+        # - cap at -15% total
+        forward_missing = sum(
+            1 for p in missing
+            if isinstance(p, dict) and str(p.get("position", "")).upper() in {"ST", "CF", "CAM", "RW", "LW", "FW"}
+        )
+        defender_missing = sum(
+            1 for p in missing
+            if isinstance(p, dict) and str(p.get("position", "")).upper() in {"CB", "RB", "LB", "GK", "DEF"}
+        )
+        # If no position info, treat each as 4% impact
+        unknown_missing = len(missing_names) - forward_missing - defender_missing
+
+        adjustment = -(forward_missing * 0.05 + defender_missing * 0.03 + unknown_missing * 0.04)
+        adjustment = max(-0.15, adjustment)  # cap
+        multiplier = round(1.0 + adjustment, 4)
+
+        return {
+            "multiplier": multiplier,
+            "missing_key_players": missing_names,
+            "forward_missing": forward_missing,
+            "defender_missing": defender_missing,
+            "availability_score": availability_score,
+            "starter_count": len(starters),
+            "available": True,
+        }
+
+    home_impact = _side_impact(home_lineup)
+    away_impact = _side_impact(away_lineup)
+
+    return {
+        "available": home_impact["available"] or away_impact["available"],
+        "method": "lineup_impact_v1",
+        "home_xg_multiplier": home_impact["multiplier"],
+        "away_xg_multiplier": away_impact["multiplier"],
+        "home": home_impact,
+        "away": away_impact,
+        "rule": "Each missing key forward: -5% xG; defender/GK: -3%; capped at -15%.",
+    }
+
+
 def compute_h2h_record(
     h2h_matches: list[dict[str, Any]],
     home_team: str,
