@@ -33,7 +33,7 @@ def test_rolling_elo_context_uses_only_prior_results_for_pre_match_strength():
     )
 
     assert context["available"] is True
-    assert context["method"] == "rolling_elo_from_prior_results_v1"
+    assert context["method"] == "rolling_elo_time_weighted_v2"
     assert context["home"]["team"] == "Alpha"
     assert context["away"]["team"] == "Beta"
     assert context["home"]["matches"] == 2

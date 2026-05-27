@@ -4,13 +4,15 @@ import math
 from functools import lru_cache
 from typing import Any
 
+import numpy as np
 
-MODEL_ENGINE_VERSION = "football-data-mcp-model-engine-2026-05-26"
+
+MODEL_ENGINE_VERSION = "football-data-mcp-model-engine-2026-05-27"
 MODEL_ENGINE_METHOD = "dixon_coles_adjusted_market_anchored_poisson_v1"
 INDEPENDENT_BASELINE_METHOD = "market_anchored_independent_poisson_baseline_v1"
-ROLLING_ELO_GOAL_DIFF_LOSS_WEIGHT = 0.0
-DIXON_COLES_RHO_GRID = (-0.12, -0.08, -0.04, 0.0, 0.04)
-HISTORICAL_DIXON_COLES_RHO_GRID = tuple(round(-0.20 + index * 0.02, 4) for index in range(21))
+ROLLING_ELO_GOAL_DIFF_LOSS_WEIGHT = 0.15
+DIXON_COLES_RHO_GRID = tuple(round(-0.20 + index * 0.02, 4) for index in range(21))
+HISTORICAL_DIXON_COLES_RHO_GRID = DIXON_COLES_RHO_GRID
 MONEYLINE_LOSS_WEIGHT = 2.0
 TOTALS_LOSS_WEIGHT = 1.5
 ASIAN_HANDICAP_LOSS_WEIGHT = 1.2
@@ -271,6 +273,10 @@ def _market_probabilities(metrics: dict[str, Any], keys: tuple[str, ...]) -> dic
     }
 
 
+_FORM_DECAY_WEIGHTS = np.array([0.40, 0.25, 0.16, 0.11, 0.08], dtype=np.float64)
+_FORM_DECAY_WEIGHTS = _FORM_DECAY_WEIGHTS / _FORM_DECAY_WEIGHTS.sum()
+
+
 def _form_total_goals(form: dict[str, Any]) -> float | None:
     summary = (form or {}).get("recent_record_summary") or {}
     home = summary.get("home") or {}
@@ -287,6 +293,17 @@ def _form_total_goals(form: dict[str, Any]) -> float | None:
     if estimates:
         return round_metric(sum(estimates), 4)
     return None
+
+
+def apply_form_decay_weights(goals_sequence: list[float]) -> float:
+    """Apply exponential decay weighting to a sequence of per-match goal values (most recent first)."""
+    if not goals_sequence:
+        return 0.0
+    n = min(len(goals_sequence), len(_FORM_DECAY_WEIGHTS))
+    weights = _FORM_DECAY_WEIGHTS[:n]
+    weights = weights / weights.sum()
+    values = np.array(goals_sequence[:n], dtype=np.float64)
+    return float(np.dot(values, weights))
 
 
 def _strength_goal_diff_hint(form: dict[str, Any]) -> float | None:
@@ -411,6 +428,82 @@ def _fit_expected_goals(
                     )
 
     return best_home, best_away, best_rho, best_loss, best_distribution
+
+
+KELLY_FRACTION = 0.25
+KELLY_MAX_STAKE = 0.05
+
+
+def _kelly_fraction(model_probability: float, decimal_odds: float, fraction: float = KELLY_FRACTION) -> dict[str, Any] | None:
+    """Compute fractional Kelly criterion stake recommendation (paper_only signal)."""
+    if decimal_odds <= 1.0 or model_probability <= 0.0 or model_probability >= 1.0:
+        return None
+    b = decimal_odds - 1.0
+    q = 1.0 - model_probability
+    full_kelly = (model_probability * b - q) / b
+    if full_kelly <= 0:
+        return None
+    frac_kelly = min(full_kelly * fraction, KELLY_MAX_STAKE)
+    return {
+        "full_kelly": round_metric(full_kelly, 4),
+        "fractional_kelly": round_metric(frac_kelly, 4),
+        "fraction_used": fraction,
+        "max_stake_cap": KELLY_MAX_STAKE,
+        "paper_only": True,
+    }
+
+
+def _confidence_band(home_xg: float, away_xg: float, distribution: list[dict[str, Any]]) -> dict[str, Any]:
+    """Estimate 68% and 95% credible intervals for xG from the scoreline distribution."""
+    home_probs = np.zeros(len(distribution))
+    away_probs = np.zeros(len(distribution))
+    home_goals_arr = np.zeros(len(distribution))
+    away_goals_arr = np.zeros(len(distribution))
+    for i, row in enumerate(distribution):
+        home_probs[i] = row["probability"]
+        away_probs[i] = row["probability"]
+        home_goals_arr[i] = row["home_goals"]
+        away_goals_arr[i] = row["away_goals"]
+
+    # Marginal distributions
+    max_g = int(max(home_goals_arr.max(), away_goals_arr.max())) + 1
+    home_marginal = np.zeros(max_g)
+    away_marginal = np.zeros(max_g)
+    for row in distribution:
+        hg = row["home_goals"]
+        ag = row["away_goals"]
+        p = row["probability"]
+        if hg < max_g:
+            home_marginal[hg] += p
+        if ag < max_g:
+            away_marginal[ag] += p
+
+    def _credible_interval(pmf: np.ndarray, center: float) -> dict[str, float]:
+        cdf = np.cumsum(pmf)
+        lo68 = float(np.searchsorted(cdf, 0.16))
+        hi68 = float(np.searchsorted(cdf, 0.84))
+        lo95 = float(np.searchsorted(cdf, 0.025))
+        hi95 = float(np.searchsorted(cdf, 0.975))
+        spread = hi68 - lo68
+        # model_certainty: 1.0 = very tight (spread ≤ 1), 0.0 = very wide (spread ≥ 4)
+        certainty = max(0.0, min(1.0, 1.0 - (spread - 1) / 3.0))
+        return {
+            "mean": round_metric(center, 3),
+            "ci68_low": lo68,
+            "ci68_high": hi68,
+            "ci95_low": lo95,
+            "ci95_high": hi95,
+            "model_certainty": round_metric(certainty, 3),
+        }
+
+    home_band = _credible_interval(home_marginal, home_xg)
+    away_band = _credible_interval(away_marginal, away_xg)
+    overall_certainty = round_metric((home_band["model_certainty"] + away_band["model_certainty"]) / 2, 3)
+    return {
+        "home_xg": home_band,
+        "away_xg": away_band,
+        "overall_model_certainty": overall_certainty,
+    }
 
 
 def _top_scorelines(distribution: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
@@ -645,10 +738,10 @@ def build_model_projection(
         (
             "Dixon-Coles rho is estimated from prior completed league scorelines by conditional maximum likelihood; per-match xG remains market anchored."
             if historical_rho_value is not None
-            else "Dixon-Coles rho is fitted on the current market snapshot grid when no prior league MLE is available."
+            else "Dixon-Coles rho is fitted on a 21-point market snapshot grid (-0.20 to 0.00, step 0.02) when no prior league MLE is available."
         ),
         "Quarter-line Asian handicap and totals are represented as split-line settlement probabilities.",
-        "Rolling Elo is exposed as context; its probability weight remains zero until holdout validation supports it.",
+        f"Rolling Elo goal-diff hint is active (weight={ROLLING_ELO_GOAL_DIFF_LOSS_WEIGHT}) and contributes to xG fitting when available.",
     ]
 
     return {
@@ -694,6 +787,7 @@ def build_model_projection(
             for row in distribution
         ],
         "top_scorelines": _top_scorelines(distribution),
+        "confidence_band": _confidence_band(home_xg, away_xg, list(distribution)),
         "model_quality": {
             "fallback_used": False,
             "calibration_loss": round_metric(loss),

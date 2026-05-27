@@ -304,14 +304,49 @@ async def get_client() -> httpx.AsyncClient:
     return _CLIENT
 
 
+_HTTP_RETRY_ATTEMPTS = 3
+_HTTP_RETRY_BACKOFF_BASE = 1.5  # seconds
+
+
+async def _fetch_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    method: str = "GET",
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    last_exc: Exception | None = None
+    for attempt in range(_HTTP_RETRY_ATTEMPTS):
+        try:
+            response = await client.request(method, url, params=params, headers=headers)
+            # Don't retry on client errors (4xx) \u2014 they're permanent
+            if response.status_code < 500:
+                response.raise_for_status()
+                return response
+            # 5xx: retry with backoff
+            if attempt < _HTTP_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(_HTTP_RETRY_BACKOFF_BASE ** attempt)
+            else:
+                response.raise_for_status()
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            last_exc = exc
+            if attempt < _HTTP_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(_HTTP_RETRY_BACKOFF_BASE ** attempt)
+        except httpx.HTTPStatusError:
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise httpx.RequestError(f"fetch failed after {_HTTP_RETRY_ATTEMPTS} attempts: {url}")
+
+
 async def fetch_text(url: str, *, use_cache: bool = True, headers: dict[str, str] | None = None) -> CachedText:
     cached = _TEXT_CACHE.get(url)
     if use_cache and cached and time.time() - cached.fetched_at <= CACHE_SECONDS:
         return cached
 
     client = await get_client()
-    response = await client.get(url, headers=headers)
-    response.raise_for_status()
+    response = await _fetch_with_retry(client, url, headers=headers)
     text = response.text
     if text.startswith("\ufeff"):
         text = text.lstrip("\ufeff")
@@ -330,12 +365,10 @@ async def fetch_json(url: str, *, params: dict[str, Any] | None = None, use_cach
         return httpx.Response(200, text=cached.text).json(), evidence(cached.url, cached.fetched_at, source_name)
 
     client = await get_client()
-    response = await client.get(
-        url,
-        params=params,
+    response = await _fetch_with_retry(
+        client, url, params=params,
         headers={"Referer": "https://www.dongqiudi.com/match/schedule"},
     )
-    response.raise_for_status()
     cached = CachedText(fetched_at=time.time(), text=response.text, url=str(response.url))
     _TEXT_CACHE[cache_key] = cached
     return response.json(), evidence(cached.url, cached.fetched_at, "dongqiudi.com")

@@ -10,9 +10,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+try:
+    import numpy as np
+    from sklearn.isotonic import IsotonicRegression
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
 
 DEFAULT_LEARNING_DB = "/tmp/football_data_mcp_learning.sqlite3"
-MAX_LEARNING_SAMPLE_MINUTES_TO_KICKOFF = 10
+MAX_LEARNING_SAMPLE_MINUTES_TO_KICKOFF = 60  # extended from 10 to 60 for faster sample accumulation
+ISOTONIC_CALIBRATION_MIN_SAMPLES = 50  # threshold to switch from Bayesian shrinkage to isotonic regression
 DEFAULT_BALANCED_STRATEGY = {
     "min_live_sample_count": 20,
     "prior_strength": 20.0,
@@ -1136,7 +1143,7 @@ def _calibration_key(record: dict[str, Any]) -> tuple[str, str, str, str, str]:
         str(record.get("market") or "unknown"),
         str(record.get("league") or "ALL"),
         _line_bucket(str(record.get("market") or ""), parse_float(record.get("line"))),
-        _bucket(parse_float(record.get("decimal_odds")), size=0.2, prefix="odds"),
+        _bucket(parse_float(record.get("decimal_odds")), size=0.10, prefix="odds"),  # finer: 0.20 → 0.10
         _bucket(probability, size=0.05, prefix="prob"),
     )
 
@@ -1155,6 +1162,41 @@ def _calibration_keys(record: dict[str, Any]) -> list[tuple[str, str, str, str, 
     _append_key(keys, (market, "ALL", "line:ALL", "odds:ALL", probability_bucket))
     _append_key(keys, (market, "ALL", "line:ALL", "odds:ALL", "prob:ALL"))
     return keys
+
+
+def _isotonic_calibrated_probability(
+    model_probabilities: list[float],
+    hits: list[int],
+    query_probability: float,
+) -> float | None:
+    """Fit isotonic regression on (model_prob → hit) pairs and evaluate at query_probability."""
+    if not _SKLEARN_AVAILABLE or len(model_probabilities) < ISOTONIC_CALIBRATION_MIN_SAMPLES:
+        return None
+    try:
+        X = np.array(model_probabilities, dtype=np.float64)
+        y = np.array(hits, dtype=np.float64)
+        ir = IsotonicRegression(out_of_bounds="clip")
+        ir.fit(X, y)
+        result = float(ir.predict([query_probability])[0])
+        return max(0.0, min(1.0, result))
+    except Exception:
+        return None
+
+
+def _avg_clv_for_bucket(records: list[dict[str, Any]]) -> float | None:
+    """Extract average closing line value from settled records if available."""
+    clv_values = []
+    for record in records:
+        raw = record.get("raw") or {}
+        if not isinstance(raw, dict):
+            try:
+                raw = json.loads(record.get("raw_json") or "{}")
+            except Exception:
+                raw = {}
+        clv = parse_float(raw.get("closing_line_value") or (raw.get("clv_tracking") or {}).get("clv"))
+        if clv is not None:
+            clv_values.append(clv)
+    return _average(clv_values)
 
 
 def recompute_calibration(*, db_path: str | None = None) -> dict[str, Any]:
@@ -1188,11 +1230,35 @@ def recompute_calibration(*, db_path: str | None = None) -> dict[str, Any]:
             avg_model_probability = _average([item for item in probabilities if item is not None])
             avg_edge = _average([item for item in edges if item is not None])
             roi = _average([item for item in profits if item is not None])
+
+            # Isotonic calibration for market-global buckets with enough samples
+            isotonic_hit_rate: float | None = None
+            if (
+                league_bucket == "ALL"
+                and line_bucket == "line:ALL"
+                and sample_count >= ISOTONIC_CALIBRATION_MIN_SAMPLES
+                and avg_model_probability is not None
+            ):
+                valid_pairs = [
+                    (p, int(r.get("hit") or 0))
+                    for r, p in zip(records, probabilities)
+                    if p is not None
+                ]
+                if valid_pairs:
+                    probs_list = [pair[0] for pair in valid_pairs]
+                    hits_list = [pair[1] for pair in valid_pairs]
+                    isotonic_hit_rate = _isotonic_calibrated_probability(
+                        probs_list, hits_list, avg_model_probability
+                    )
+            avg_clv = _avg_clv_for_bucket(records)
             raw = {
                 "record_ids": [record.get("id") for record in records],
                 "sample_count": sample_count,
                 "hit_count": hit_count,
                 "bucket_scope": _bucket_scope(league_bucket, line_bucket, odds_bucket, probability_bucket),
+                "isotonic_hit_rate": round_metric(isotonic_hit_rate) if isotonic_hit_rate is not None else None,
+                "calibration_method": "isotonic_regression" if isotonic_hit_rate is not None else "bayesian_shrinkage",
+                "avg_clv": round_metric(avg_clv, 4) if avg_clv is not None else None,
             }
             bucket = {
                 "market": market,
@@ -1455,6 +1521,7 @@ def _derive_strategy_state(
     *,
     market: str,
     mode: str,
+    avg_clv: float | None = None,
 ) -> dict[str, Any]:
     defaults = dict(DEFAULT_BALANCED_STRATEGY)
     sample_count = int((bucket or {}).get("sample_count") or 0)
@@ -1474,6 +1541,7 @@ def _derive_strategy_state(
     )
 
     if active:
+        # ROI-based adjustments
         if roi is not None and roi < -0.10:
             min_probability += 0.04
             min_value_edge += 0.02
@@ -1482,17 +1550,26 @@ def _derive_strategy_state(
             min_probability += 0.02
             min_value_edge += 0.01
 
+        # Calibration gap adjustments
         if probability_gap is not None and probability_gap < -0.08:
             min_probability += 0.04
         elif probability_gap is not None and probability_gap < -0.03:
             min_probability += 0.02
 
+        # Hit-rate / odds asymmetry
         if hit_rate is not None and hit_rate >= 0.62 and (roi is None or roi <= 0):
             min_decimal_odds += 0.05
 
+        # Positive ROI relaxation
         if roi is not None and roi > 0.06 and (probability_gap is None or probability_gap >= -0.02):
             min_probability -= 0.01
             min_value_edge -= 0.005
+
+        # CLV signal: positive average CLV means we're getting better prices than market close
+        if avg_clv is not None and avg_clv > 0.015:
+            min_value_edge = max(0.0, min_value_edge - 0.005)  # relax edge threshold slightly
+        elif avg_clv is not None and avg_clv < -0.01:
+            min_value_edge += 0.005  # tighten if we're consistently getting worse prices
 
     prior_strength = 40.0 if sample_count < 30 else 30.0 if sample_count < 60 else 20.0
     if not active:
@@ -1508,6 +1585,7 @@ def _derive_strategy_state(
         "hit_rate": round_metric(hit_rate),
         "roi": round_metric(roi, 4),
         "avg_model_probability": round_metric(avg_model_probability),
+        "avg_clv": round_metric(avg_clv, 4) if avg_clv is not None else None,
         "min_live_sample_count": defaults["min_live_sample_count"],
         "prior_strength": round_metric(prior_strength, 2),
         "min_calibrated_probability": round_metric(_clamp(min_probability, 0.55, 0.72)),
@@ -1518,15 +1596,38 @@ def _derive_strategy_state(
         "raw": {
             "source_bucket": bucket,
             "probability_gap": round_metric(probability_gap),
+            "avg_clv": round_metric(avg_clv, 4) if avg_clv is not None else None,
             "base_thresholds": defaults,
             "rule": (
                 "Closed-loop policy promotes settled actionable paper outcomes into machine-readable thresholds. "
                 "Negative ROI or overconfident actionable buckets tighten balanced Asian-handicap requirements; "
-                "positive ROI can relax them slightly after enough settled samples. "
-                "No-value observation rows remain available for probability calibration only."
+                "positive CLV (closing-line value) can relax edge requirements; "
+                "positive ROI can relax probability requirements after enough settled samples."
             ),
         },
     }
+
+
+def _compute_avg_clv(conn: sqlite3.Connection, market: str) -> float | None:
+    """Compute average CLV from settled records that have clv data in raw_json."""
+    rows = conn.execute(
+        """
+        SELECT raw_json FROM recommendation_records
+        WHERE settlement_status = 'settled' AND market = ?
+        ORDER BY id DESC LIMIT 200
+        """,
+        (market,),
+    ).fetchall()
+    clv_values = []
+    for row in rows:
+        try:
+            raw = json.loads(row["raw_json"] or "{}")
+            clv = parse_float(raw.get("closing_line_value") or (raw.get("clv_tracking") or {}).get("clv"))
+            if clv is not None:
+                clv_values.append(clv)
+        except Exception:
+            pass
+    return _average(clv_values)
 
 
 def update_strategy_state(
@@ -1540,7 +1641,8 @@ def update_strategy_state(
     with _connect(db_path) as conn:
         ensure_schema(conn)
         bucket = _strategy_global_bucket(conn, market, mode)
-        state = _derive_strategy_state(bucket, market=market, mode=mode)
+        avg_clv = _compute_avg_clv(conn, market)
+        state = _derive_strategy_state(bucket, market=market, mode=mode, avg_clv=avg_clv)
         conn.execute(
             """
             INSERT INTO strategy_state (
