@@ -111,19 +111,19 @@ function readableEventDetail(detail: string): string {
 
 // ─── Panel wrapper ───────────────────────────────────────────────────────────
 
-function Panel({ title, icon: Icon, children, className = "", badge }: {
-  title?: string; icon?: typeof Target; children: React.ReactNode; className?: string; badge?: string;
+function Panel({ title, icon: Icon, children, className = "", badge, dense = false }: {
+  title?: string; icon?: typeof Target; children: React.ReactNode; className?: string; badge?: string; dense?: boolean;
 }) {
   return (
     <section className={`rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden ${className}`}>
       {title && (
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100 dark:border-slate-700/50">
-          {Icon && <Icon size={16} className="text-slate-500 dark:text-slate-400" />}
+        <div className={`flex items-center gap-2 ${dense ? "px-3 py-2" : "px-4 py-3"} border-b border-slate-100 dark:border-slate-700/50`}>
+          {Icon && <Icon size={14} className="text-slate-500 dark:text-slate-400" />}
           <span className="font-semibold text-slate-900 dark:text-white text-sm flex-1">{title}</span>
           {badge && <Badge variant="neutral">{badge}</Badge>}
         </div>
       )}
-      <div className="p-4">{children}</div>
+      <div className={dense ? "p-3" : "p-4"}>{children}</div>
     </section>
   );
 }
@@ -145,73 +145,92 @@ function OverviewSection({ snapshot, view, onSelectRecommendation }: {
   onSelectRecommendation: (r: DashboardRecord) => void;
 }) {
   const accountability = view.predictionAccountability;
-  const primaryPick = view.primaryPick;
+  const hitRate = snapshot.prediction_kpis.hit_rate;
+  const roi = snapshot.prediction_kpis.roi;
+  const accentTone = toneVariant(accountability.tone);
 
-  // Hero stats
-  const heroTone = accountability.tone ?? "neutral";
-  const heroBg: Record<string, string> = {
-    good: "bg-gradient-to-r from-emerald-50 to-white dark:from-emerald-900/20 dark:to-slate-800 border-emerald-200 dark:border-emerald-800",
-    bad: "bg-gradient-to-r from-red-50 to-white dark:from-red-900/20 dark:to-slate-800 border-red-200 dark:border-red-800",
-    caution: "bg-gradient-to-r from-amber-50 to-white dark:from-amber-900/20 dark:to-slate-800 border-amber-200 dark:border-amber-800",
-    neutral: "bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700",
-  };
+  // Top stat row data
+  const topStats = [
+    {
+      label: "当前推荐",
+      value: snapshot.kpis.asian_pick_count,
+      caption: "可发布",
+      tone: snapshot.kpis.asian_pick_count > 0 ? "good" : "neutral",
+    },
+    {
+      label: "未结算",
+      value: snapshot.prediction_kpis.open_count,
+      caption: "等待结算",
+      tone: "info",
+    },
+    {
+      label: "命中率",
+      value: hitRate != null ? `${Math.round(hitRate * 100)}%` : "—",
+      caption: `${snapshot.prediction_kpis.settled_count ?? 0} 场已结算`,
+      tone: hitRate != null && hitRate >= 0.55 ? "good" : "neutral",
+    },
+    {
+      label: "ROI",
+      value: roi != null ? `${roi >= 0 ? "+" : ""}${(roi * 100).toFixed(1)}%` : "—",
+      caption: "纸面收益",
+      tone: roi != null && roi > 0 ? "good" : roi != null && roi < 0 ? "bad" : "neutral",
+    },
+  ];
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* Hero */}
-      <div className={`rounded-xl border p-4 sm:p-6 shadow-sm ${heroBg[heroTone] ?? heroBg.neutral}`}>
-        <div className="flex flex-col sm:flex-row sm:items-start gap-4">
-          <div className="flex-1 min-w-0">
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">策略总览</span>
-            <h2 className="text-xl font-bold text-slate-900 dark:text-white mt-1">{accountability.headline}</h2>
-            <p className="text-sm text-slate-600 dark:text-slate-300 mt-1">{accountability.detail}</p>
-            <div className="flex flex-wrap gap-2 mt-3">
-              <Badge variant={toneVariant(accountability.tone)}>{accountability.policyText}</Badge>
-              <Badge variant={toneVariant(view.productionReadiness.tone)}>{view.productionReadiness.actionText}</Badge>
-              <Badge variant="neutral">{view.strategyLabel}</Badge>
-            </div>
+    <div className="flex flex-col gap-3">
+      {/* Status bar - 单行，紧凑 */}
+      <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <Badge variant={accentTone}>{accountability.policyText}</Badge>
+            <Badge variant={toneVariant(view.productionReadiness.tone)}>{view.productionReadiness.actionText}</Badge>
+            <Badge variant="neutral">{view.strategyLabel}</Badge>
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:w-48 flex-shrink-0">
-            <div className="rounded-lg bg-white/70 dark:bg-slate-900/40 p-3 text-center">
-              <div className="text-2xl font-bold text-slate-900 dark:text-white tabular-nums">{snapshot.kpis.asian_pick_count}</div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">当前推荐</div>
-            </div>
-            <div className="rounded-lg bg-white/70 dark:bg-slate-900/40 p-3 text-center">
-              <div className="text-2xl font-bold text-slate-900 dark:text-white tabular-nums">{snapshot.prediction_kpis.open_count}</div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">未结算</div>
-            </div>
-            <div className="rounded-lg bg-white/70 dark:bg-slate-900/40 p-3 text-center">
-              <div className="text-2xl font-bold text-slate-900 dark:text-white tabular-nums">
-                {snapshot.prediction_kpis.hit_rate != null ? `${Math.round(snapshot.prediction_kpis.hit_rate * 100)}%` : "—"}
-              </div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">命中率</div>
-            </div>
-            <div className="rounded-lg bg-white/70 dark:bg-slate-900/40 p-3 text-center">
-              <div className={`text-2xl font-bold tabular-nums ${(snapshot.prediction_kpis.roi ?? 0) > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-slate-900 dark:text-white"}`}>
-                {snapshot.prediction_kpis.roi != null ? `${(snapshot.prediction_kpis.roi * 100).toFixed(1)}%` : "—"}
-              </div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">ROI</div>
-            </div>
-          </div>
+          <p className="text-xs text-slate-600 dark:text-slate-400 truncate">{accountability.detail}</p>
         </div>
       </div>
 
-      {/* KPI strip */}
-      <KpiCards cards={view.kpiCards} />
+      {/* Top stat row - 4 columns always */}
+      <div className="grid grid-cols-4 gap-2 md:gap-3">
+        {topStats.map((s) => {
+          const toneTextMap: Record<string, string> = {
+            good: "text-emerald-600 dark:text-emerald-400",
+            bad: "text-red-600 dark:text-red-400",
+            info: "text-sky-600 dark:text-sky-400",
+            neutral: "text-slate-900 dark:text-white",
+          };
+          return (
+            <div key={s.label} className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-3 shadow-sm">
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">{s.label}</div>
+              <div className={`text-xl md:text-2xl font-bold tabular-nums ${toneTextMap[s.tone] ?? toneTextMap.neutral}`}>
+                {s.value}
+              </div>
+              <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5">{s.caption}</div>
+            </div>
+          );
+        })}
+      </div>
 
-      {/* Picks */}
-      <Panel title="当前推荐" icon={TrendingUp} badge="亚盘">
-        <PickGrid
-          records={snapshot.asian_picks}
-          onSelect={onSelectRecommendation}
-          emptyMessage="暂无可发布推荐信号"
-        />
-      </Panel>
+      {/* Main grid: picks (2/3) + side column (1/3) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        {/* Picks column */}
+        <div className="lg:col-span-2 flex flex-col gap-3">
+          <Panel title="当前推荐" icon={TrendingUp} badge={`${snapshot.asian_picks?.length ?? 0} 条·亚盘`} dense>
+            <PickGrid
+              records={snapshot.asian_picks}
+              onSelect={onSelectRecommendation}
+              emptyMessage="暂无可发布推荐信号"
+            />
+          </Panel>
+          <SettlementFeed records={snapshot.recent_settlements ?? []} />
+        </div>
 
-      {/* Settlement feed */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <SettlementFeed records={snapshot.recent_settlements ?? []} />
-        <StrategyStateCard snapshot={snapshot} />
+        {/* Side column */}
+        <div className="flex flex-col gap-3">
+          <StrategyStateCard snapshot={snapshot} />
+          <KpiCards cards={view.kpiCards} compact />
+        </div>
       </div>
     </div>
   );
@@ -645,10 +664,10 @@ export function App() {
           <Sidebar active={activeSection} onChange={setActiveSection} />
 
           {/* Main content */}
-          <main className="flex-1 min-w-0 px-4 py-4 pb-20 lg:pb-4">
+          <main className="flex-1 min-w-0 px-3 sm:px-4 py-3 pb-20 lg:pb-4">
             {error && (
-              <div className="mb-3 rounded-xl border border-amber-200 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-4 py-2 text-sm text-amber-800 dark:text-amber-200 flex items-center gap-2">
-                <AlertTriangle size={14} />
+              <div className="mb-3 rounded-lg border border-amber-200 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-200 flex items-center gap-2">
+                <AlertTriangle size={12} />
                 数据刷新失败：{error}。显示最近快照。
               </div>
             )}
@@ -680,8 +699,8 @@ export function App() {
                 )}
                 {activeSection === "data" && <DataSection snapshot={snapshot} view={view} />}
 
-                <footer className="mt-8 text-xs text-slate-400 dark:text-slate-600 text-center py-4 border-t border-slate-200 dark:border-slate-800">
-                  只读监控台 · 不执行交易动作 · 数据来自自动学习库与结算校准状态
+                <footer className="mt-6 text-[10px] text-slate-400 dark:text-slate-600 text-center py-3 border-t border-slate-100 dark:border-slate-800">
+                  只读监控台 · 不执行交易动作
                 </footer>
               </>
             )}
