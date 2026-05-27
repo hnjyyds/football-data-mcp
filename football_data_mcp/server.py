@@ -1007,9 +1007,12 @@ def _auto_learning_config_from_env() -> dict[str, Any]:
         "top_n": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_TOP_N", "12") or "12"),
         "limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_LIMIT", "80") or "80"),
         "timezone_name": os.getenv("FOOTBALL_DATA_AUTO_LEARNING_TIMEZONE", "Asia/Shanghai"),
-        "asian_window_minutes": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES", "10") or "10"),
+        # 60-min default window: 10-min was too tight for low-activity periods
+        # and small leagues (often 0 candidates near midnight CST), leading to
+        # the daemon writing nothing for hours.
+        "asian_window_minutes": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES", "60") or "60"),
         "parlay_window_minutes": int(
-            os.getenv("FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES", "10") or "10"
+            os.getenv("FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES", "60") or "60"
         ),
         "learning_observation_limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_OBSERVATION_LIMIT", "30") or "30"),
         "analysis_candidate_limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CANDIDATE_LIMIT", "80") or "80"),
