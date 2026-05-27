@@ -1162,16 +1162,19 @@ export interface DashboardSnapshot {
 
 export interface DashboardProfitabilityForecast {
   available: boolean;
+  model_state?: "profitable" | "losing" | "marginal_edge" | "insufficient_data";
   method?: string;
   observed_hit_rate?: number;
   assumed_avg_odds?: number;
   implied_roi_per_bet?: number;
   settled_per_day_estimate?: number;
-  required_bets_total?: number;
+  required_bets_total?: number | null;
   settled_bets_so_far?: number;
-  remaining_bets?: number;
+  remaining_bets?: number | null;
   remaining_days?: number | null;
   confidence_level?: number;
+  break_even_hit_rate_needed?: number;
+  hit_rate_gap?: number;
   reason?: string;
   min_required?: number;
   settled_count?: number;

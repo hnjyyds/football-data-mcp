@@ -34,6 +34,7 @@ import { TeamMatchup, TeamLogo } from "./components/shared/TeamLogo";
 import { ProfitabilityHeroBar } from "./components/dashboard/ProfitabilityHeroBar";
 import { ProfitabilityPanel } from "./components/dashboard/ProfitabilityPanel";
 import { HeatMap } from "./components/charts/HeatMap";
+import { ReliabilityDiagram } from "./components/charts/ReliabilityDiagram";
 
 const API_URL = "/api/dashboard";
 type DashboardViewModel = ReturnType<typeof buildDashboardView>;
@@ -354,11 +355,53 @@ function ProductionSection({ view }: { view: DashboardViewModel }) {
 
 function ModelSection({ view, snapshot }: { view: DashboardViewModel; snapshot: DashboardSnapshot }) {
   const backtestCurve = view.backtestCurve;
+  const buckets = snapshot.buckets ?? [];
+
+  // Build reliability points from market-global buckets (probability bucket ALL × line ALL)
+  const reliabilityPoints = buckets
+    .filter((b: any) => b.league_bucket === "ALL" && b.sample_count >= 3 && b.avg_model_probability != null && b.hit_rate != null)
+    .map((b: any) => ({
+      predicted: Number(b.avg_model_probability),
+      actual: Number(b.hit_rate),
+      samples: Number(b.sample_count),
+      bucket: String(b.probability_bucket || "").replace("prob:", ""),
+    }));
+
+  const latestValidation = (snapshot as any).latest_validation;
 
   return (
     <div className="flex flex-col gap-4">
       {/* Profitability forecast - top of model section */}
       <ProfitabilityPanel forecast={snapshot.profitability_forecast} />
+
+      {/* Latest holdout validation snapshot */}
+      {latestValidation && (
+        <Panel title="最近一次 Holdout 验证" icon="gauge" badge={latestValidation.beats_market ? "✓ 跑赢市场" : "✗ 未跑赢"}>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+            <Metric label="Log Loss 差" value={latestValidation.log_loss_diff != null ? (latestValidation.log_loss_diff < 0 ? "" : "+") + latestValidation.log_loss_diff.toFixed(4) : "—"} />
+            <Metric label="Brier 差" value={latestValidation.brier_diff != null ? (latestValidation.brier_diff < 0 ? "" : "+") + latestValidation.brier_diff.toFixed(4) : "—"} />
+            <Metric label="ROI" value={latestValidation.roi != null ? `${(latestValidation.roi * 100).toFixed(1)}%` : "—"} />
+            <Metric label="样本数" value={`${latestValidation.bet_count}/${latestValidation.evaluated_count}`} />
+          </div>
+          <div className="text-xs text-ink-600 dark:text-ink-400 leading-relaxed">
+            自动化就绪度: <strong className={latestValidation.automation_readiness === "paper_trade_only" ? "text-success-600" : latestValidation.automation_readiness === "watchlist" ? "text-warning-600" : "text-danger-600"}>{latestValidation.automation_readiness}</strong>
+            <span className="mx-2">·</span>
+            训练赛季: {latestValidation.training_seasons?.join(", ")}
+            <span className="mx-2">·</span>
+            验证赛季: {latestValidation.validation_seasons?.join(", ")}
+            <span className="mx-2">·</span>
+            {new Date(latestValidation.created_at_utc).toLocaleString()}
+          </div>
+        </Panel>
+      )}
+
+      {/* Reliability diagram - probability calibration */}
+      {reliabilityPoints.length > 0 && (
+        <ReliabilityDiagram
+          points={reliabilityPoints}
+          subtitle={`基于 ${reliabilityPoints.length} 个概率桶 · 散点越靠近对角线，模型概率越准`}
+        />
+      )}
 
       {/* Per-market breakdown table */}
       {(snapshot.market_breakdown?.by_market?.length ?? 0) > 0 && (

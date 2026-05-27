@@ -12985,12 +12985,17 @@ def _dashboard_production_readiness(
     clv_tracked_count = int((clv_tracking or {}).get("tracked_count") or 0)
     avg_clv_return = parse_float((clv_tracking or {}).get("avg_clv_return"))
     positive_clv_rate = parse_float((clv_tracking or {}).get("positive_clv_rate"))
+    # Stricter CLV gate: not just "non-negative" but "demonstrably positive"
+    # CLV is the strongest leading indicator of true model edge
+    # - 30+ samples (was 20; lower variance threshold)
+    # - avg CLV >= +0.5% (was 0)
+    # - positive_clv_rate >= 55% (was 50%)
     clv_ready = bool(
-        clv_available_count >= 20
+        clv_available_count >= 30
         and avg_clv_return is not None
-        and avg_clv_return >= 0
+        and avg_clv_return >= 0.005
         and positive_clv_rate is not None
-        and positive_clv_rate >= 0.5
+        and positive_clv_rate >= 0.55
     )
     is_empty_loop = total_predictions <= 0
     production_ready = bool(
@@ -13082,31 +13087,32 @@ def _dashboard_production_readiness(
     if clv_required:
         if clv_ready:
             clv_status = "ok"
-            clv_title = "收盘价验证通过"
-        elif clv_available_count < 20:
+            clv_title = "CLV 验证通过 — 强信号"
+        elif clv_available_count < 30:
+            clv_status = "warning"
+            clv_title = "CLV 样本积累中"
+        elif avg_clv_return is None or avg_clv_return < 0.005:
             clv_status = "blocked"
-            clv_title = "收盘价样本不足"
-        elif avg_clv_return is None or avg_clv_return < 0:
-            clv_status = "blocked"
-            clv_title = "平均 CLV 为负"
+            clv_title = "CLV 边际不足 — 模型可能没有真实优势"
         else:
             clv_status = "blocked"
-            clv_title = "正 CLV 比例不足"
+            clv_title = "正 CLV 比例不足 55%"
         gates.append(
             gate(
                 "closing_line_value",
-                "CLV 收盘价",
+                "CLV 收盘线价值（强信号）",
                 clv_status,
                 clv_title,
                 (
                     f"已对齐 {clv_available_count}/{clv_tracked_count} 条收盘价；"
                     f"平均 CLV {_percent_text(avg_clv_return) or '暂无'}，"
-                    f"正 CLV {_percent_text(positive_clv_rate) or '暂无'}。"
-                    "生产发布至少需要 20 条可计算 CLV，且平均 CLV 非负、正 CLV 不低于 50%。"
+                    f"正 CLV 比例 {_percent_text(positive_clv_rate) or '暂无'}。"
+                    "CLV 是统计上最早出现的模型质量信号 — 生产发布要求 ≥30 条样本、"
+                    "平均 CLV ≥ +0.5%、正 CLV 比例 ≥ 55%。"
                 ),
                 current=clv_available_count,
-                target=20,
-                ratio=_dashboard_ratio(clv_available_count, 20),
+                target=30,
+                ratio=_dashboard_ratio(clv_available_count, 30),
             )
         )
     if shadow_walk_gate:
@@ -13240,7 +13246,35 @@ def _dashboard_profitability_forecast(
             settled_per_day = max(1, min(20, int(sample_count / 30)))
 
     if settled_count >= 5 and hit_rate > 0:
-        # Use observed rate if we have enough data
+        # Compute implied ROI before deciding what scenario to forecast
+        observed_roi_per_bet = implied_roi(hit_rate, avg_odds)
+
+        # Critical: if observed ROI is non-positive, the model is currently
+        # losing money. Don't try to "forecast time to profitability" —
+        # there's no statistical path from here.
+        if observed_roi_per_bet <= 0:
+            return {
+                "available": True,
+                "model_state": "losing",
+                "method": "diagnostic_only",
+                "observed_hit_rate": round(hit_rate, 4),
+                "assumed_avg_odds": round(avg_odds, 3),
+                "implied_roi_per_bet": round(observed_roi_per_bet, 4),
+                "settled_per_day_estimate": settled_per_day,
+                "settled_bets_so_far": settled_count,
+                "required_bets_total": None,
+                "remaining_bets": None,
+                "remaining_days": None,
+                "confidence_level": 0.95,
+                "break_even_hit_rate_needed": round(1.0 / avg_odds, 4),
+                "hit_rate_gap": round((1.0 / avg_odds) - hit_rate, 4),
+                "interpretation": (
+                    f"模型当前在亏损（命中率 {hit_rate*100:.1f}% < 盈亏平衡线 "
+                    f"{100.0/avg_odds:.1f}%）。无法证明盈利路径——需要先改进模型，"
+                    f"而不是积累更多样本。建议：重跑 holdout validation 检查 log-loss vs market。"
+                ),
+            }
+
         edge = EdgeAssumptions(
             true_win_rate=max(0.51, min(0.70, hit_rate)),
             average_decimal_odds=avg_odds,
@@ -13248,17 +13282,38 @@ def _dashboard_profitability_forecast(
             cycles_per_day=settled_per_day,
         )
         forecast = required_bets_bayesian(edge)
-        roi_per_bet = implied_roi(edge.true_win_rate, edge.average_decimal_odds)
+        # Cap absurd values: if N > 100000, the edge is too small to forecast
+        if forecast.required_bets > 100000:
+            return {
+                "available": True,
+                "model_state": "marginal_edge",
+                "method": "edge_too_small_to_forecast",
+                "observed_hit_rate": round(hit_rate, 4),
+                "assumed_avg_odds": round(avg_odds, 3),
+                "implied_roi_per_bet": round(observed_roi_per_bet, 4),
+                "settled_per_day_estimate": settled_per_day,
+                "settled_bets_so_far": settled_count,
+                "required_bets_total": None,
+                "remaining_bets": None,
+                "remaining_days": None,
+                "confidence_level": 0.95,
+                "interpretation": (
+                    f"边际过小（命中率 {hit_rate*100:.1f}%，仅略高于平衡线）。"
+                    f"统计上需要 >100000 笔才能证明，远超合理时间窗口。"
+                ),
+            }
+
         remaining_bets = max(0, forecast.required_bets - settled_count)
         remaining_days = (
             round(remaining_bets / settled_per_day, 1) if settled_per_day else None
         )
         return {
             "available": True,
+            "model_state": "profitable",
             "method": "bayesian_beta_binomial_v1",
             "observed_hit_rate": round(hit_rate, 4),
             "assumed_avg_odds": round(avg_odds, 3),
-            "implied_roi_per_bet": round(roi_per_bet, 4),
+            "implied_roi_per_bet": round(observed_roi_per_bet, 4),
             "settled_per_day_estimate": settled_per_day,
             "required_bets_total": forecast.required_bets,
             "settled_bets_so_far": settled_count,
@@ -13267,19 +13322,20 @@ def _dashboard_profitability_forecast(
             "confidence_level": forecast.confidence_level,
             "notes": forecast.notes,
             "interpretation": (
-                "Already at statistical confidence — pause and validate."
+                "已达到统计置信度。可以暂停验证。"
                 if remaining_bets == 0
-                else f"At current rate, ~{int(remaining_days)} days to {int(forecast.confidence_level*100)}% confidence."
+                else f"按当前速率，约 {int(remaining_days)} 天达到 {int(forecast.confidence_level*100)}% 置信度。"
                 if remaining_days is not None
-                else "Need more data to estimate timeline."
+                else "需要更多数据估算时间线。"
             ),
         }
     return {
         "available": False,
+        "model_state": "insufficient_data",
         "reason": "insufficient_settled_samples",
         "settled_count": settled_count,
         "min_required": 5,
-        "interpretation": "Need ≥5 settled samples before forecasting timeline.",
+        "interpretation": "需要 ≥5 笔已结算样本才能预估时间线。",
     }
 
 
@@ -15364,6 +15420,16 @@ def dashboard_snapshot(
         clv_tracking=clv_tracking,
     )
     market_breakdown = _dashboard_market_breakdown(full_prediction_ledger)
+    try:
+        from football_data_mcp import validation_store
+        latest_validation = validation_store.get_latest_validation(db_path=db_path)
+    except Exception:
+        latest_validation = None
+    try:
+        from football_data_mcp import league_strategy
+        league_breakdown = league_strategy.compute_league_breakdown(db_path=db_path)
+    except Exception:
+        league_breakdown = None
     return {
         "status": "ok",
         "tool": "dashboard_snapshot",
@@ -15398,6 +15464,8 @@ def dashboard_snapshot(
         "prediction_accountability": prediction_accountability,
         "profitability_forecast": profitability_forecast,
         "market_breakdown": market_breakdown,
+        "latest_validation": latest_validation,
+        "league_breakdown": league_breakdown,
         "buckets": calibration.get("buckets") or [],
         "policy": {
             "read_only": True,

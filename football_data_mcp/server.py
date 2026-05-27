@@ -231,6 +231,57 @@ async def fetch_fdo_upcoming_matches(
 
 
 @mcp.tool()
+async def run_and_persist_validation(
+    divisions: list[str] | None = None,
+    training_seasons: list[str] | None = None,
+    validation_seasons: list[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Run holdout validation and persist summary to model_validation_history.
+
+    Defaults: top 5 European leagues × 2122/2223/2324 → 2425.
+    Result includes log_loss_diff vs market and beats_market flag.
+    """
+    from football_data_mcp import validation_store
+
+    divs = divisions or ["E0", "SP1", "I1", "D1", "F1"]
+    train = training_seasons or ["2122", "2223", "2324"]
+    val = validation_seasons or ["2425"]
+
+    try:
+        result = await asyncio.to_thread(
+            backtest.run_holdout_validation,
+            divisions=divs,
+            training_seasons=train,
+            validation_seasons=val,
+        )
+    except Exception as exc:
+        logger.error("holdout validation failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+    persisted = await asyncio.to_thread(
+        validation_store.save_validation_result,
+        result=result,
+        method="holdout_validation_v1",
+        divisions=divs,
+        training_seasons=train,
+        validation_seasons=val,
+    )
+    return {"validation_result": result, "persisted": persisted}
+
+
+@mcp.tool()
+async def train_residual_model() -> dict[str, Any]:
+    """
+    Train the XGResidualModel on settled records and persist to disk.
+    Requires ≥100 settled samples. The model tilts market-anchored xG using
+    GradientBoosting on engineered features (form, elo, h2h).
+    """
+    from football_data_mcp import residual_model_store
+    return await asyncio.to_thread(residual_model_store.train_and_save)
+
+
+@mcp.tool()
 async def fetch_fdo_competitions() -> dict[str, Any]:
     """
     List football-data.org competitions accessible with the current API key.

@@ -751,6 +751,87 @@ def build_model_projection(
         max_goals=max_goals,
         rho_values=dixon_coles_rho_values,
     )
+
+    # --- Lineup impact: missing key players reduce xG ---
+    lineup_impact: dict[str, Any] = {"applied": False}
+    try:
+        from football_data_mcp import feature_engine
+        match_context = (form or {}).get("match_context") or {}
+        lineup_data = match_context.get("lineup") or {}
+        home_lineup = lineup_data.get("home") or {}
+        away_lineup = lineup_data.get("away") or {}
+        impact = feature_engine.compute_lineup_impact(home_lineup, away_lineup)
+        if impact.get("available"):
+            home_mult = float(impact.get("home_xg_multiplier") or 1.0)
+            away_mult = float(impact.get("away_xg_multiplier") or 1.0)
+            # Only apply if at least one side has a non-trivial adjustment
+            if abs(home_mult - 1.0) > 0.01 or abs(away_mult - 1.0) > 0.01:
+                new_home = max(0.3, home_xg * home_mult)
+                new_away = max(0.3, away_xg * away_mult)
+                distribution = list(
+                    _scoreline_distribution(new_home, new_away, max_goals=max_goals, dixon_coles_rho=dixon_coles_rho)
+                )
+                lineup_impact = {
+                    "applied": True,
+                    "home_xg_multiplier": home_mult,
+                    "away_xg_multiplier": away_mult,
+                    "home_xg_before": round(home_xg, 3),
+                    "away_xg_before": round(away_xg, 3),
+                    "home_xg_after": round(new_home, 3),
+                    "away_xg_after": round(new_away, 3),
+                    "missing_home": impact["home"].get("missing_key_players") or [],
+                    "missing_away": impact["away"].get("missing_key_players") or [],
+                }
+                home_xg, away_xg = new_home, new_away
+    except Exception as exc:
+        lineup_impact = {"applied": False, "reason": f"error: {exc}"}
+
+    # --- XGResidualModel tilt: GradientBoosting learned biases on top of market xG ---
+    residual_correction: dict[str, Any] = {"applied": False}
+    try:
+        from football_data_mcp import residual_model_store
+        residual_features = {
+            "form_goals_for": (form_total or 0) / 2,
+            "form_goals_against": (form_total or 0) / 2,
+            "form_weighted_momentum": strength_goal_diff or 0,
+            "rest_days": 0,
+            "elo_rating": 1500,
+            "elo_diff": strength_goal_diff * 260 if strength_goal_diff else 0,
+            "h2h_home_win_rate": 0.5,
+            "h2h_avg_goals": (form_total or 2.5),
+        }
+        correction = residual_model_store.predict_residual_correction(
+            residual_features, home_xg, away_xg
+        )
+        if correction.get("available"):
+            new_home = max(0.3, min(5.0, home_xg + correction["home_residual"]))
+            new_away = max(0.3, min(5.0, away_xg + correction["away_residual"]))
+            # Only apply if change is non-trivial (> 0.02 in absolute terms)
+            if abs(new_home - home_xg) > 0.02 or abs(new_away - away_xg) > 0.02:
+                # Re-derive distribution with corrected xG
+                distribution = list(
+                    _scoreline_distribution(new_home, new_away, max_goals=max_goals, dixon_coles_rho=dixon_coles_rho)
+                )
+                residual_correction = {
+                    "applied": True,
+                    "home_residual": correction["home_residual"],
+                    "away_residual": correction["away_residual"],
+                    "home_xg_before": round(home_xg, 3),
+                    "away_xg_before": round(away_xg, 3),
+                    "home_xg_after": round(new_home, 3),
+                    "away_xg_after": round(new_away, 3),
+                }
+                home_xg, away_xg = new_home, new_away
+            else:
+                residual_correction = {
+                    "applied": False,
+                    "reason": "residual_below_threshold",
+                    "home_residual": correction["home_residual"],
+                    "away_residual": correction["away_residual"],
+                }
+    except Exception as exc:
+        residual_correction = {"applied": False, "reason": f"error: {exc}"}
+
     baseline = _baseline_projection_summary(
         home_xg=baseline_home_xg,
         away_xg=baseline_away_xg,
@@ -832,6 +913,8 @@ def build_model_projection(
         ],
         "top_scorelines": _top_scorelines(distribution),
         "confidence_band": _confidence_band(home_xg, away_xg, list(distribution)),
+        "residual_model": residual_correction,
+        "lineup_impact": lineup_impact,
         "model_quality": {
             "fallback_used": False,
             "calibration_loss": round_metric(loss),
