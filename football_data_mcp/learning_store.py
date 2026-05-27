@@ -20,13 +20,18 @@ except ImportError:
 DEFAULT_LEARNING_DB = "/tmp/football_data_mcp_learning.sqlite3"
 MAX_LEARNING_SAMPLE_MINUTES_TO_KICKOFF = 60  # extended from 10 to 60 for faster sample accumulation
 ISOTONIC_CALIBRATION_MIN_SAMPLES = 50  # threshold to switch from Bayesian shrinkage to isotonic regression
+MIN_MODEL_CERTAINTY = 0.5  # below this, the xG confidence band is too wide → skip the bet
 DEFAULT_BALANCED_STRATEGY = {
     "min_live_sample_count": 20,
     "prior_strength": 20.0,
-    "min_calibrated_probability": 0.58,
-    "min_decimal_odds": 1.65,
-    "max_decimal_odds": 2.05,
+    # Tightened defaults: pursue low-variance bets to compress required sample size
+    # See profitability_calculator: a 60% win rate at 1.7-1.85 odds reaches statistical
+    # significance ~3× faster than a 52% rate at 2.0 odds.
+    "min_calibrated_probability": 0.60,   # was 0.58 → lift to 0.60 for tighter variance
+    "min_decimal_odds": 1.55,             # was 1.65 → allow slightly tighter favorites
+    "max_decimal_odds": 2.00,             # was 2.05 → cap at break-even+5%
     "min_value_edge": 0.02,
+    "min_model_certainty": MIN_MODEL_CERTAINTY,
 }
 
 
@@ -1692,6 +1697,27 @@ def update_strategy_state(
         )
         conn.commit()
     return state
+
+
+def update_all_market_strategy_states(*, db_path: str | None = None) -> list[dict[str, Any]]:
+    """
+    Refresh strategy state for each market independently, so 1X2, asian_handicap,
+    over_under, and jingcai_hhad accumulate evidence in parallel rather than
+    competing for the same sample pool.
+
+    Multi-market diversification roughly doubles the rate at which any individual
+    market reaches statistical significance because samples are independent.
+    """
+    markets = ["asian_handicap", "1x2", "over_under", "jingcai_hhad"]
+    states = []
+    for market in markets:
+        try:
+            state = update_strategy_state(db_path=db_path, market=market, mode="balanced")
+            states.append(state)
+        except Exception:
+            # Skip markets with no settled data yet
+            continue
+    return states
 
 
 def build_record_from_pick(

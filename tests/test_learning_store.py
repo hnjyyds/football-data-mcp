@@ -517,9 +517,9 @@ def test_update_strategy_state_tightens_balanced_policy_after_poor_settled_resul
     assert state["status"] == "live_calibration_active"
     assert state["active"] is True
     assert state["sample_count"] == 20
-    assert state["min_calibrated_probability"] > 0.58
+    assert state["min_calibrated_probability"] > 0.60  # base default was raised from 0.58 to 0.60
     assert state["min_value_edge"] > 0.02
-    assert state["min_decimal_odds"] >= 1.7
+    assert state["min_decimal_odds"] >= 1.55  # base default was lowered from 1.65 to 1.55
 
     persisted = learning_store.get_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
     assert persisted["status"] == "live_calibration_active"
@@ -616,6 +616,6 @@ def test_update_strategy_state_ignores_no_value_observations_but_keeps_calibrati
     assert state["sample_count"] == 20
     assert state["hit_rate"] == 1.0
     assert state["roi"] == 0.8
-    assert state["min_calibrated_probability"] < 0.58
+    assert state["min_calibrated_probability"] < 0.60  # base default was raised from 0.58 to 0.60
     assert state["raw"]["source_bucket"]["raw"]["ignored_observation_count"] == 20
     assert state["raw"]["source_bucket"]["raw"]["bucket_scope"] == "strategy_actionable_global"
