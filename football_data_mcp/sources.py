@@ -15612,7 +15612,9 @@ async def auto_learning_daemon(
             "enforce_settlement_coverage": bool(enforce_settlement_coverage),
             "league_allowlist_size": (
                 len(league_allowlist) if league_allowlist is not None
-                else (len(SETTLEMENT_COVERED_LEAGUES_DEFAULT) if enforce_settlement_coverage else 0)
+                else (
+                    _empirical_allowlist_size() if enforce_settlement_coverage else 0
+                )
             ),
         }
     )
@@ -15753,6 +15755,15 @@ def _normalize_league_for_match(name: str | None) -> str:
     return s.strip()
 
 
+def _empirical_allowlist_size() -> int:
+    """Return current merged allowlist size for daemon state reporting."""
+    try:
+        from football_data_mcp.empirical_allowlist import merged_allowlist
+        return len(merged_allowlist(SETTLEMENT_COVERED_LEAGUES_DEFAULT))
+    except Exception:
+        return len(SETTLEMENT_COVERED_LEAGUES_DEFAULT)
+
+
 def _league_in_allowlist(league: str | None, allowlist: frozenset[str] | set[str] | list[str]) -> bool:
     """Check if a league is in the allowlist with bidirectional substring match."""
     if not league:
@@ -15852,11 +15863,20 @@ async def shortlist_value_matches(
 
     # Apply settlement-coverage allowlist filter BEFORE analysis to save compute
     # and prevent unsettleable records from entering the recommendation pool.
+    # The effective allowlist combines the curated default with empirically-
+    # proven leagues (>=3 settled records in past 60 days).
     effective_allowlist: frozenset[str] | None = None
     if league_allowlist is not None:
         effective_allowlist = frozenset(league_allowlist)
     elif enforce_settlement_coverage:
-        effective_allowlist = SETTLEMENT_COVERED_LEAGUES_DEFAULT
+        try:
+            from football_data_mcp.empirical_allowlist import merged_allowlist
+            effective_allowlist = merged_allowlist(
+                SETTLEMENT_COVERED_LEAGUES_DEFAULT,
+                db_path=db_path,
+            )
+        except Exception:
+            effective_allowlist = SETTLEMENT_COVERED_LEAGUES_DEFAULT
 
     if effective_allowlist:
         allowed_matches = []
