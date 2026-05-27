@@ -1,4 +1,4 @@
-import { TrendingUp, Calendar, Target, AlertCircle } from "lucide-react";
+import { Icon } from "../shared/Icon";
 import type { DashboardProfitabilityForecast } from "../../types";
 
 function pct(n: number | null | undefined, digits = 1): string {
@@ -16,11 +16,11 @@ export function ProfitabilityPanel({ forecast }: { forecast?: DashboardProfitabi
     return (
       <section className="card overflow-hidden">
         <div className="px-3 py-2 border-b border-ink-100 dark:border-ink-800 flex items-center gap-2">
-          <TrendingUp size={14} className="text-ink-500" />
+          <Icon name="trendUp" size={14} className="text-ink-500" />
           <span className="font-semibold text-ink-900 dark:text-white text-sm">盈利时间预估</span>
         </div>
         <div className="p-4 text-center">
-          <AlertCircle size={28} className="mx-auto text-ink-400 dark:text-ink-500 mb-2" />
+          <Icon name="alert" size={28} className="mx-auto text-ink-400 dark:text-ink-500 mb-2" />
           <div className="text-sm text-ink-600 dark:text-ink-400">
             {forecast?.interpretation ?? "需要更多结算样本"}
           </div>
@@ -41,7 +41,7 @@ export function ProfitabilityPanel({ forecast }: { forecast?: DashboardProfitabi
   return (
     <section className="card overflow-hidden">
       <div className="px-3 py-2 border-b border-ink-100 dark:border-ink-800 flex items-center gap-2">
-        <TrendingUp size={14} className="text-brand-500" />
+        <Icon name="trendUp" size={14} className="text-brand-500" />
         <span className="font-semibold text-ink-900 dark:text-white text-sm">盈利时间预估（贝叶斯）</span>
         <span className="ml-auto text-2xs text-ink-500 dark:text-ink-400">
           {pct(forecast.confidence_level, 0)} 置信度
@@ -52,9 +52,9 @@ export function ProfitabilityPanel({ forecast }: { forecast?: DashboardProfitabi
         <div className="flex items-center gap-3">
           <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-brand-500/15 to-strike-500/15 flex flex-col items-center justify-center flex-shrink-0">
             {isReady ? (
-              <Target size={22} className="text-success-600 dark:text-success-500" />
+              <Icon name="target" size={22} className="text-success-600 dark:text-success-500" />
             ) : (
-              <Calendar size={22} className="text-brand-600 dark:text-brand-400" />
+              <Icon name="calendar" size={22} className="text-brand-600 dark:text-brand-400" />
             )}
           </div>
           <div className="flex-1 min-w-0">

@@ -1,4 +1,4 @@
-import { CheckCircle2, XCircle, History } from "lucide-react";
+import { Icon } from "../shared/Icon";
 import type { DashboardRecord } from "../../types";
 import { TeamLogo } from "../shared/TeamLogo";
 
@@ -13,7 +13,7 @@ export function SettlementFeed({ records }: { records: DashboardRecord[] }) {
   return (
     <section className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-100 dark:border-slate-700/50">
-        <History size={14} className="text-slate-500 dark:text-slate-400" />
+        <Icon name="history" size={14} className="text-ink-500 dark:text-ink-400" />
         <span className="font-semibold text-slate-900 dark:text-white text-sm flex-1">近期结算</span>
         <span className="text-xs text-slate-400 dark:text-slate-500">{records.length} 条</span>
       </div>
@@ -28,8 +28,8 @@ export function SettlementFeed({ records }: { records: DashboardRecord[] }) {
             return (
               <div key={r.id} className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
                 {hit
-                  ? <CheckCircle2 size={14} className="flex-shrink-0 text-emerald-500" />
-                  : <XCircle size={14} className="flex-shrink-0 text-red-400" />
+                  ? <Icon name="success" size={14} className="flex-shrink-0 text-success-500" />
+                  : <Icon name="error" size={14} className="flex-shrink-0 text-danger-500" />
                 }
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <TeamLogo name={r.home_team ?? ""} logoUrl={r.home_team_logo_url} size="xs" />

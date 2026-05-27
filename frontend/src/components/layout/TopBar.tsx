@@ -1,4 +1,4 @@
-import { Database, Clock, RefreshCw, Moon, Sun, AlertCircle } from "lucide-react";
+import { Icon } from "../shared/Icon";
 import type { DashboardSnapshot } from "../../types";
 import { BrandLogo, BrandWordmark } from "../shared/BrandLogo";
 
@@ -49,7 +49,7 @@ export function TopBar({
         <div className="flex items-center gap-1.5 sm:gap-3 text-xs">
           {lastRefreshError ? (
             <span className="hidden sm:flex items-center gap-1 px-2 py-1 rounded-md bg-danger-500/10 text-danger-600 dark:text-danger-500 text-2xs font-medium">
-              <AlertCircle size={11} />
+              <Icon name="alert" size={11} />
               刷新失败
             </span>
           ) : (
@@ -63,15 +63,15 @@ export function TopBar({
               ? "bg-success-500/10 text-success-700 dark:text-success-500"
               : "bg-warning-500/10 text-warning-700 dark:text-warning-500"
           }`}>
-            <Database size={11} />
+            <Icon name="database" size={11} />
             {isCalibrationActive ? "实时校准" : "收集中"}
           </span>
           <span className="hidden sm:flex items-center gap-1 text-2xs text-ink-500 dark:text-ink-400 tabular-nums font-mono">
-            <Clock size={11} />
+            <Icon name="clock" size={11} />
             {snapshot ? localTime(snapshot.generated_at_utc) : "—"}
           </span>
           <span className="flex items-center gap-1 text-2xs text-ink-500 dark:text-ink-400">
-            <RefreshCw size={11} className={refreshing ? "animate-spin text-brand-500" : ""} />
+            <Icon name="refresh" size={11} className={refreshing ? "animate-spin text-brand-500" : ""} />
             <span className="hidden lg:inline tabular-nums">{snapshot ? relativeTime(snapshot.generated_at_utc) : "—"}</span>
           </span>
         </div>
@@ -83,7 +83,7 @@ export function TopBar({
           className="p-1.5 rounded-lg text-ink-500 dark:text-ink-400 hover:bg-ink-100 dark:hover:bg-ink-800 hover:text-brand-600 dark:hover:text-brand-400 transition-colors"
           aria-label={darkMode ? "切换浅色模式" : "切换深色模式"}
         >
-          {darkMode ? <Sun size={15} /> : <Moon size={15} />}
+          <Icon name={darkMode ? "sun" : "moon"} size={15} />
         </button>
       </div>
     </header>

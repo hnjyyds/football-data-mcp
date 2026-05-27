@@ -9611,6 +9611,46 @@ def _dashboard_logo_url(value: Any) -> str:
     return ""
 
 
+def _ensure_fdo_index_warm() -> None:
+    """Warm the FDO team enrichment index in a background-safe way."""
+    try:
+        from football_data_mcp.data_sources_registry import (
+            build_fdo_team_index,
+            _FDO_TEAM_INDEX_BUILT_AT,
+            _FDO_TEAM_INDEX_TTL,
+        )
+    except ImportError:
+        return
+    if time.time() - _FDO_TEAM_INDEX_BUILT_AT < _FDO_TEAM_INDEX_TTL:
+        return  # still fresh
+    import asyncio as _aio
+    try:
+        try:
+            loop = _aio.get_running_loop()
+            # Already in async context: schedule and forget
+            loop.create_task(build_fdo_team_index())
+        except RuntimeError:
+            # No loop running: run sync
+            _aio.run(build_fdo_team_index())
+    except Exception:
+        pass  # silent — enrichment is best-effort
+
+
+def _dashboard_fdo_logo_fallback(record: dict[str, Any], side: str) -> str:
+    """If FDO index has this team, use its crest URL. Falls back to '' silently."""
+    try:
+        from football_data_mcp.data_sources_registry import lookup_fdo_enrichment
+    except ImportError:
+        return ""
+    home_team = record.get("home_team") or ""
+    away_team = record.get("away_team") or ""
+    kickoff = record.get("kickoff_utc") or record.get("kickoff_utc_plus_8") or ""
+    enrichment = lookup_fdo_enrichment(home_team, away_team, kickoff)
+    if not enrichment:
+        return ""
+    return enrichment.get(f"{side}_team_logo_url") or ""
+
+
 def _dashboard_team_logo_url(record: dict[str, Any], side: str) -> str:
     raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
     paths = (
@@ -9647,6 +9687,10 @@ def _dashboard_team_logo_url(record: dict[str, Any], side: str) -> str:
         logo_url = _dashboard_logo_url(_dashboard_get_path(raw, path))
         if logo_url:
             return logo_url
+    # Final fallback: football-data.org enrichment index
+    fdo_url = _dashboard_fdo_logo_fallback(record, side)
+    if fdo_url:
+        return fdo_url
     return ""
 
 
@@ -15155,6 +15199,8 @@ def dashboard_snapshot(
 ) -> dict[str, Any]:
     """Build a read-only dashboard snapshot from persisted paper-learning state."""
     bounded_limit = max(10, min(int(limit or 500), 500))
+    # Warm the football-data.org enrichment index in the background; safe to fail
+    _ensure_fdo_index_warm()
     calibration = learning_store.calibration_status(db_path=db_path, limit=20)
     strategy_states = calibration.get("strategy_states") or []
     strategy_state = next(

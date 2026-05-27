@@ -1,4 +1,4 @@
-import { Rocket, Hourglass, Target } from "lucide-react";
+import { Icon } from "../shared/Icon";
 import type { DashboardProfitabilityForecast } from "../../types";
 
 function pct(n: number | null | undefined, digits = 1): string {
@@ -10,7 +10,7 @@ export function ProfitabilityHeroBar({ forecast }: { forecast?: DashboardProfita
   if (!forecast?.available) {
     return (
       <div className="rounded-xl border border-ink-200 dark:border-ink-700 bg-ink-50 dark:bg-ink-800/60 px-4 py-3 flex items-center gap-3">
-        <Hourglass size={18} className="text-ink-400" />
+        <Icon name="hourglass" size={18} className="text-ink-400" />
         <div className="flex-1 min-w-0">
           <div className="text-sm font-semibold text-ink-900 dark:text-white">
             盈利预估暂未启用
@@ -39,9 +39,9 @@ export function ProfitabilityHeroBar({ forecast }: { forecast?: DashboardProfita
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">
         <div className="flex items-center gap-2 min-w-0 flex-1">
           {isReady ? (
-            <Rocket size={22} className="text-success-600 dark:text-success-500 flex-shrink-0 animate-tick" />
+            <Icon name="production" size={22} className="text-success-600 dark:text-success-500 flex-shrink-0 animate-tick" />
           ) : (
-            <Target size={20} className="text-brand-600 dark:text-brand-400 flex-shrink-0" />
+            <Icon name="target" size={20} className="text-brand-600 dark:text-brand-400 flex-shrink-0" />
           )}
           <div className="min-w-0">
             <div className="text-sm font-bold text-ink-900 dark:text-white">

@@ -1,10 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  ArrowLeft, BarChart3, BrainCircuit, CheckCircle2, ChevronDown, ChevronRight, ChevronUp,
-  Clock, Database, Eye, Gauge, ListChecks, RefreshCw, ShieldCheck, Target, TrendingUp,
-  Activity, AlertTriangle, XCircle, Rocket, MapPin, CloudSun, UserRound, UsersRound,
-  CircleHelp
-} from "lucide-react";
+import { Icon, type IconName } from "./components/shared/Icon";
 import {
   CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis
 } from "recharts";
@@ -114,15 +109,15 @@ function readableEventDetail(detail: string): string {
 
 // ─── Panel wrapper ───────────────────────────────────────────────────────────
 
-function Panel({ title, icon: Icon, children, className = "", badge, dense = false }: {
-  title?: string; icon?: typeof Target; children: React.ReactNode; className?: string; badge?: string; dense?: boolean;
+function Panel({ title, icon, children, className = "", badge, dense = false }: {
+  title?: string; icon?: IconName; children: React.ReactNode; className?: string; badge?: string; dense?: boolean;
 }) {
   return (
-    <section className={`rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden ${className}`}>
+    <section className={`rounded-xl border border-ink-200 dark:border-ink-700 bg-white dark:bg-ink-800 shadow-sm overflow-hidden ${className}`}>
       {title && (
-        <div className={`flex items-center gap-2 ${dense ? "px-3 py-2" : "px-4 py-3"} border-b border-slate-100 dark:border-slate-700/50`}>
-          {Icon && <Icon size={14} className="text-slate-500 dark:text-slate-400" />}
-          <span className="font-semibold text-slate-900 dark:text-white text-sm flex-1">{title}</span>
+        <div className={`flex items-center gap-2 ${dense ? "px-3 py-2" : "px-4 py-3"} border-b border-ink-100 dark:border-ink-700/50`}>
+          {icon && <Icon name={icon} size={14} className="text-ink-500 dark:text-ink-400" />}
+          <span className="font-semibold text-ink-900 dark:text-white text-sm flex-1">{title}</span>
           {badge && <Badge variant="neutral">{badge}</Badge>}
         </div>
       )}
@@ -222,7 +217,7 @@ function OverviewSection({ snapshot, view, onSelectRecommendation }: {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         {/* Picks column */}
         <div className="lg:col-span-2 flex flex-col gap-3">
-          <Panel title="当前推荐" icon={TrendingUp} badge={`${snapshot.asian_picks?.length ?? 0} 条·亚盘`} dense>
+          <Panel title="当前推荐" icon="trendUp" badge={`${snapshot.asian_picks?.length ?? 0} 条·亚盘`} dense>
             <PickGrid
               records={snapshot.asian_picks}
               onSelect={onSelectRecommendation}
@@ -300,7 +295,7 @@ function SignalsSection({ snapshot, view, onSelectLedger, onSelectRecommendation
       )}
 
       {/* Candidate funnel */}
-      <Panel title="候选分析漏斗" icon={Eye}>
+      <Panel title="候选分析漏斗" icon="eye">
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           {view.filterGroups.map((f) => (
             <div key={f.reason} className="text-center p-3 rounded-lg bg-slate-50 dark:bg-slate-700/40">
@@ -340,7 +335,7 @@ function ProductionSection({ view }: { view: DashboardViewModel }) {
         overallLabel={view.productionReadiness.actionText ?? "—"}
       />
       {view.recommendationOpportunity && (
-        <Panel title="推荐发布机会" icon={Rocket}>
+        <Panel title="推荐发布机会" icon="production">
           <div className="text-sm text-slate-700 dark:text-slate-300 mb-3">
             {view.recommendationOpportunity.releaseGate?.detail ?? view.recommendationOpportunity.detail ?? "暂无分析"}
           </div>
@@ -367,7 +362,7 @@ function ModelSection({ view, snapshot }: { view: DashboardViewModel; snapshot: 
 
       {/* Per-market breakdown table */}
       {(snapshot.market_breakdown?.by_market?.length ?? 0) > 0 && (
-        <Panel title="按市场表现分组" icon={TrendingUp}>
+        <Panel title="按市场表现分组" icon="trendUp">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -401,7 +396,7 @@ function ModelSection({ view, snapshot }: { view: DashboardViewModel; snapshot: 
 
       {/* Backtest curve */}
       {backtestCurve?.points?.length > 0 && (
-        <Panel title="累计 ROI 曲线" icon={BarChart3}>
+        <Panel title="累计 ROI 曲线" icon="chart">
           <OddsChart
             points={backtestCurve.points.map((p) => ({ label: String((p as any).x ?? p.index), roi: p.y }))}
             lines={["roi"]}
@@ -412,7 +407,7 @@ function ModelSection({ view, snapshot }: { view: DashboardViewModel; snapshot: 
 
       {/* Calibration bands from snapshot */}
       {(snapshot.buckets ?? []).length > 0 && (
-        <Panel title="概率校准分组" icon={Gauge}>
+        <Panel title="概率校准分组" icon="gauge">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -442,7 +437,7 @@ function ModelSection({ view, snapshot }: { view: DashboardViewModel; snapshot: 
 
       {/* CLV Tracking */}
       {view.clvTracking?.metrics && view.clvTracking.metrics.length > 0 && (
-        <Panel title="收盘线价值 (CLV)" icon={TrendingUp}>
+        <Panel title="收盘线价值 (CLV)" icon="trendUp">
           <div className="text-sm text-slate-700 dark:text-slate-300 mb-3">{view.clvTracking.detail}</div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {view.clvTracking.metrics.map((m, i) => (
@@ -474,7 +469,7 @@ function DataSection({ snapshot, view }: { snapshot: DashboardSnapshot; view: Da
   return (
     <div className="flex flex-col gap-4">
       {/* Auto-learning status */}
-      <Panel title="自动学习运行状态" icon={Activity} badge={statusText}>
+      <Panel title="自动学习运行状态" icon="activity" badge={statusText}>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
           <Metric label="候选/分析" value={`${numericValue(resultSummary.asian_total_candidates) ?? 0}/${analyzedCount}`} />
           <Metric label="发布/观察/影子" value={`${formalRecords}/${observationRecords}/${shadowRecords}`} />
@@ -493,7 +488,7 @@ function DataSection({ snapshot, view }: { snapshot: DashboardSnapshot; view: Da
 
       {/* Events log */}
       {(snapshot.learning_events ?? []).length > 0 && (
-        <Panel title="系统事件" icon={Clock}>
+        <Panel title="系统事件" icon="clock">
           <div className="space-y-2 max-h-64 overflow-y-auto">
             {(snapshot.learning_events ?? []).slice(0, 30).map((event, i) => (
               <div key={i} className="flex items-start gap-2 text-xs">
@@ -533,7 +528,7 @@ function MatchDetailPage({
         onClick={onBack}
         className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white mb-4 transition-colors"
       >
-        <ArrowLeft size={16} />
+        <Icon name="back" size={16} />
         返回总览
       </button>
 
@@ -571,7 +566,7 @@ function MatchDetailPage({
           </div>
 
           {/* Probabilities */}
-          <Panel title="概率分析" icon={Gauge}>
+          <Panel title="概率分析" icon="gauge">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <Metric label="模型概率" value={detail.record.model_probability != null ? formatPercent(detail.record.model_probability) : "—"} />
               <Metric label="校准概率" value={detail.record.learned_probability != null ? formatPercent(detail.record.learned_probability) : "—"} />
@@ -591,7 +586,7 @@ function MatchDetailPage({
 
           {/* Odds snapshots */}
           {view.oddsGroups?.length > 0 && (
-            <Panel title="多公司赔率快照" icon={Database}>
+            <Panel title="多公司赔率快照" icon="database">
               <div className="space-y-3">
                 {view.oddsGroups.map((group: any, gi: number) => (
                   <div key={gi} className="border border-slate-100 dark:border-slate-700/50 rounded-lg overflow-hidden">
@@ -614,7 +609,7 @@ function MatchDetailPage({
 
           {/* Risk flags */}
           {((detail.record as any).risk_flags?.length ?? 0) > 0 && (
-            <Panel title="风险标记" icon={AlertTriangle}>
+            <Panel title="风险标记" icon="warn">
               <div className="flex flex-wrap gap-2">
                 {((detail.record as any).risk_flags as string[]).map((flag: string, i: number) => (
                   <Badge key={i} variant="error">{statusFlagLabel(flag)}</Badge>
@@ -757,7 +752,7 @@ export function App() {
           <main className="flex-1 min-w-0 px-3 sm:px-4 py-3 pb-20 lg:pb-4">
             {error && (
               <div className="mb-3 rounded-lg border border-amber-200 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-200 flex items-center gap-2">
-                <AlertTriangle size={12} />
+                <Icon name="warn" size={12} />
                 数据刷新失败：{error}。显示最近快照。
               </div>
             )}
