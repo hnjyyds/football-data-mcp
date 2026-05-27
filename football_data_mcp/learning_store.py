@@ -1377,27 +1377,77 @@ def get_strategy_state(
     return _default_strategy_state(market=market, mode=mode)
 
 
-def _strategy_global_bucket(conn: sqlite3.Connection, market: str) -> dict[str, Any] | None:
-    row = conn.execute(
+def _strategy_global_bucket(conn: sqlite3.Connection, market: str, mode: str) -> dict[str, Any] | None:
+    mode = str(mode or "").strip().lower()
+    observation_mode = f"{mode}_observation" if mode else ""
+    rows = conn.execute(
         """
-        SELECT * FROM calibration_buckets
-        WHERE market = ?
-          AND league_bucket = 'ALL'
-          AND line_bucket = 'line:ALL'
-          AND odds_bucket = 'odds:ALL'
-          AND probability_bucket = 'prob:ALL'
-        LIMIT 1
+        SELECT *
+        FROM recommendation_records
+        WHERE settlement_status = 'settled'
+          AND market = ?
+          AND (
+                lower(mode) = ?
+                OR (
+                    lower(mode) = ?
+                    AND recommendation IN ('immediate_bet', 'condition_observe')
+                )
+          )
         """,
-        (market,),
-    ).fetchone()
-    if not row:
+        (market, mode, observation_mode),
+    ).fetchall()
+    if not rows:
         return None
-    item = dict(row)
-    try:
-        item["raw"] = json.loads(item.get("raw_json") or "{}")
-    except json.JSONDecodeError:
-        item["raw"] = {}
-    return item
+
+    records = [dict(row) for row in rows]
+    sample_count = len(records)
+    hit_count = sum(int(record.get("hit") or 0) for record in records)
+    hit_rate = hit_count / sample_count if sample_count else None
+    probabilities = [
+        parse_float(record.get("calibrated_probability")) or parse_float(record.get("model_probability"))
+        for record in records
+    ]
+    edges = [parse_float(record.get("edge")) for record in records]
+    profits = [parse_float(record.get("profit_units")) for record in records]
+    ignored_observation_count = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM recommendation_records
+        WHERE settlement_status = 'settled'
+          AND market = ?
+          AND lower(mode) = ?
+          AND recommendation NOT IN ('immediate_bet', 'condition_observe')
+        """,
+        (market, observation_mode),
+    ).fetchone()["count"]
+    return {
+        "market": market,
+        "league_bucket": "ALL",
+        "line_bucket": "line:ALL",
+        "odds_bucket": "odds:ALL",
+        "probability_bucket": "prob:ALL",
+        "sample_count": sample_count,
+        "hit_count": hit_count,
+        "hit_rate": round_metric(hit_rate),
+        "avg_model_probability": round_metric(
+            _average([item for item in probabilities if item is not None])
+        ),
+        "avg_edge": round_metric(_average([item for item in edges if item is not None]), 4),
+        "roi": round_metric(_average([item for item in profits if item is not None]), 4),
+        "raw": {
+            "record_ids": [record.get("id") for record in records],
+            "sample_count": sample_count,
+            "hit_count": hit_count,
+            "bucket_scope": "strategy_actionable_global",
+            "included_modes": [item for item in [mode, observation_mode] if item],
+            "included_observation_recommendations": ["immediate_bet", "condition_observe"],
+            "ignored_observation_count": int(ignored_observation_count or 0),
+            "sample_policy": (
+                "Strategy thresholds use settled formal strategy rows plus actionable observation rows. "
+                "No-value observations remain in calibration buckets but do not tune strategy ROI."
+            ),
+        },
+    }
 
 
 def _derive_strategy_state(
@@ -1470,9 +1520,10 @@ def _derive_strategy_state(
             "probability_gap": round_metric(probability_gap),
             "base_thresholds": defaults,
             "rule": (
-                "Closed-loop policy promotes settled paper outcomes into machine-readable thresholds. "
-                "Negative ROI or overconfident buckets tighten balanced Asian-handicap requirements; "
-                "positive ROI can relax them slightly after enough settled samples."
+                "Closed-loop policy promotes settled actionable paper outcomes into machine-readable thresholds. "
+                "Negative ROI or overconfident actionable buckets tighten balanced Asian-handicap requirements; "
+                "positive ROI can relax them slightly after enough settled samples. "
+                "No-value observation rows remain available for probability calibration only."
             ),
         },
     }
@@ -1488,7 +1539,7 @@ def update_strategy_state(
     mode = str(mode or "balanced").strip().lower()
     with _connect(db_path) as conn:
         ensure_schema(conn)
-        bucket = _strategy_global_bucket(conn, market)
+        bucket = _strategy_global_bucket(conn, market, mode)
         state = _derive_strategy_state(bucket, market=market, mode=mode)
         conn.execute(
             """
@@ -1637,6 +1688,17 @@ def build_shadow_prediction_records_from_shortlist(
     ]
     for decision, rejection_reason, item in source_items:
         best = item.get("best_candidate") or {}
+        if not (
+            best.get("market")
+            and best.get("selection")
+            and best.get("selection_key")
+            and parse_float(best.get("decimal_odds")) is not None
+            and (
+                parse_float(best.get("model_probability")) is not None
+                or parse_float(best.get("calibrated_probability")) is not None
+            )
+        ):
+            continue
         match = item.get("match") or {}
         records.append(
             {

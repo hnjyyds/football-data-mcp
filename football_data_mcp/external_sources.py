@@ -55,6 +55,17 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _logo_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        return f"https:{text}"
+    if text.startswith(("http://", "https://")):
+        return text
+    return ""
+
+
 def _normalize_team_name(value: str) -> str:
     value = (value or "").lower()
     value = re.sub(r"\b(fc|cf|afc|sc|u23|u21|club)\b", " ", value)
@@ -361,6 +372,8 @@ def normalize_api_football_fixture_context(payload: dict[str, Any], home_team: s
             "season": league.get("season"),
             "home_team": home.get("name") or home_team,
             "away_team": away.get("name") or away_team,
+            "home_team_logo_url": _logo_url(home.get("logo")),
+            "away_team_logo_url": _logo_url(away.get("logo")),
         },
         "score": {
             "home": score_home,
@@ -463,6 +476,8 @@ def normalize_football_data_org_match_context(payload: dict[str, Any], home_team
             "competition_code": competition.get("code") or "",
             "home_team": home.get("name") or home.get("shortName") or home_team,
             "away_team": away.get("name") or away.get("shortName") or away_team,
+            "home_team_logo_url": _logo_url(home.get("crest")),
+            "away_team_logo_url": _logo_url(away.get("crest")),
         },
         "score": {
             "home": score_home,
@@ -542,6 +557,19 @@ def _participant_name_by_location(fixture: dict[str, Any], location: str) -> str
     return ""
 
 
+def _participant_logo_by_location(fixture: dict[str, Any], location: str) -> str:
+    for participant in fixture.get("participants") or []:
+        meta = participant.get("meta") or {}
+        if str(meta.get("location") or "").lower() == location:
+            return _logo_url(
+                participant.get("image_path")
+                or participant.get("logo_path")
+                or participant.get("logo")
+                or participant.get("image")
+            )
+    return ""
+
+
 def normalize_sportmonks_fixture_context(payload: dict[str, Any]) -> dict[str, Any]:
     fixtures = payload.get("data") or []
     fixture = fixtures[0] if fixtures else {}
@@ -570,6 +598,8 @@ def normalize_sportmonks_fixture_context(payload: dict[str, Any]) -> dict[str, A
             "league": (fixture.get("league") or {}).get("name") or "",
             "home_team": _participant_name_by_location(fixture, "home"),
             "away_team": _participant_name_by_location(fixture, "away"),
+            "home_team_logo_url": _participant_logo_by_location(fixture, "home"),
+            "away_team_logo_url": _participant_logo_by_location(fixture, "away"),
         },
         "coverage": {
             "participants": bool(participants),

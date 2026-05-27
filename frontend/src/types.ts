@@ -22,6 +22,7 @@ export interface PredictionKpis {
   final_pending_count?: number;
   maybe_live_count?: number;
   result_pending_count?: number;
+  postponed_count?: number;
   match_phase_counts?: Record<string, number>;
   settled_count: number;
   hit_count: number;
@@ -104,6 +105,8 @@ export interface DashboardRecord {
   matchup: string;
   home_team: string;
   away_team: string;
+  home_team_logo_url?: string | null;
+  away_team_logo_url?: string | null;
   kickoff_utc_plus_8: string;
   market: string;
   selection: string;
@@ -198,6 +201,8 @@ export interface PredictionLedgerRow {
   matchup: string;
   home_team: string;
   away_team: string;
+  home_team_logo_url?: string | null;
+  away_team_logo_url?: string | null;
   kickoff_utc_plus_8: string;
   market: string;
   selection: string;
@@ -778,6 +783,10 @@ export interface DashboardRecommendationOpportunityCandidate {
   ledger_id: string;
   league: string;
   matchup: string;
+  home_team?: string;
+  away_team?: string;
+  home_team_logo_url?: string | null;
+  away_team_logo_url?: string | null;
   selection: string;
   recommendation: string;
   primary_blocker: string;
@@ -1766,6 +1775,10 @@ export interface RecommendationOpportunityView {
     ledgerId: string;
     matchup: string;
     league: string;
+    homeTeam?: string;
+    awayTeam?: string;
+    homeTeamLogoUrl?: string | null;
+    awayTeamLogoUrl?: string | null;
     selection: string;
     actionLabel: string;
     blockerLabel: string;
@@ -1787,6 +1800,10 @@ export interface RecommendationOpportunityView {
       ledgerId: string;
       matchup: string;
       league: string;
+      homeTeam?: string;
+      awayTeam?: string;
+      homeTeamLogoUrl?: string | null;
+      awayTeamLogoUrl?: string | null;
       selection: string;
       signalLabel: string;
       signalReason: string;

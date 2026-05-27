@@ -958,7 +958,7 @@ describe("dashboard model", () => {
       "预测样本",
       "推荐发布",
       "观察样本",
-      "等待回测",
+      "未结算",
       "已回测",
       "学习状态"
     ]);
@@ -979,7 +979,7 @@ describe("dashboard model", () => {
     expect(view.predictionRows[1].statusText).toBe("等待赛果");
     expect(view.predictionRows[1].oddsCoverageText).toBe("暂无快照");
     expect(view.oddsCoveredCount).toBe(1);
-    expect(view.predictionSummary).toBe("共 3 场 · 发布 1 场 · 观察 2 场 · 已结算 2 场 · 等待赛果 1 场 · 发布命中 1/1 · 观察命中 0/1 · 收益率 -5.0%");
+    expect(view.predictionSummary).toBe("共 3 场 · 发布 1 场 · 观察 2 场 · 已结算 2 场 · 未结算 1 场 · 发布命中 1/1 · 观察命中 0/1 · 收益率 -5.0%");
     expect(view.snapshotSummary).toBe("共 139 条 · 18 场 · 12 家公司");
     expect(view.snapshotProviders[0].providerLabel).toBe("雷速体育");
     expect(view.snapshotProviders[0].marketTypesText).toBe("亚盘、胜平负、大小球");
@@ -1114,7 +1114,7 @@ describe("dashboard model", () => {
     expect(view.productionReadiness.metrics.map((item) => `${item.label}:${item.value}:${item.caption}`)).toEqual([
       "系统状态:运行中:已有预测闭环",
       "推荐发布:否:继续验证",
-      "已回测:24:0 场等待赛果",
+      "已回测:24:0 场未结算",
       "验证收益:-12.0%:命中率 41.0%"
     ]);
     expect(view.productionReadiness.gateRows.map((item) => `${item.label}:${item.statusText}`)).toEqual([
@@ -1904,7 +1904,7 @@ describe("dashboard model", () => {
 
     const view = buildDashboardView(openObservationSnapshot);
 
-    expect(view.predictionSummary).toBe("共 12 场 · 发布 0 场 · 观察 12 场 · 已结算 0 场 · 等待赛果 12 场 · 暂无可计算命中率 · 收益率 —");
+    expect(view.predictionSummary).toBe("共 12 场 · 发布 0 场 · 观察 12 场 · 已结算 0 场 · 未结算 12 场 · 暂无可计算命中率 · 收益率 —");
   });
 
   it("summarizes prediction accountability above the recommendation gate", () => {
@@ -1969,7 +1969,7 @@ describe("dashboard model", () => {
       "预测样本:12",
       "推荐发布:0",
       "观察样本:12",
-      "等待赛果:12"
+      "未结算:12"
     ]);
     expect(view.predictionAccountability.checkRows.map((item) => `${item.label}:${item.statusText}`)).toEqual([
       "预测闭环:通过",

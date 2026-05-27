@@ -1616,7 +1616,13 @@ async def fetch_leisu_odds_page(
             "source": {},
             "access": leisu_odds_access_status(""),
         }
-    if _leisu_mobile_api_enabled() and match_id and not os.getenv("LEISU_ODDS_PROXY_URL", "").strip():
+    proxy_url = os.getenv("LEISU_ODDS_PROXY_URL", "").strip()
+    direct_access_configured = bool(
+        proxy_url
+        or os.getenv("LEISU_COOKIE", "").strip()
+        or os.getenv("LEISU_ACW_SC_V2", "").strip()
+    )
+    if _leisu_mobile_api_enabled() and match_id and not proxy_url:
         try:
             mobile_result = await fetch_leisu_mobile_odds_payload(match_id=match_id)
         except Exception as exc:
@@ -1647,7 +1653,20 @@ async def fetch_leisu_odds_page(
                 "mobile_api": mobile_result.get("mobile_api") or {},
                 "waf_solved": mobile_result.get("waf_solved", False),
             }
-    proxy_url = os.getenv("LEISU_ODDS_PROXY_URL", "").strip()
+        if not direct_access_configured:
+            source = mobile_result.get("source") or {}
+            return {
+                "status": mobile_result.get("status") or "empty",
+                "method": "mobile_api",
+                "match_id": match_id,
+                "odds_url": odds_url,
+                "fetch_url": str(source.get("url") or f"{LEISU_MOBILE_API_BASE_URL}{LEISU_MOBILE_ODDS_LIST_PATH}"),
+                "source": source,
+                "access": mobile_result.get("access") or {"status": "ok", "blocked": False, "requires_cookie_or_proxy": False, "reason": ""},
+                "text": "",
+                "mobile_api": mobile_result.get("mobile_api") or {},
+                "waf_solved": mobile_result.get("waf_solved", False),
+            }
     method = "proxy" if proxy_url else "direct_http"
     fetch_url = _leisu_proxy_url(proxy_url, match_id=match_id, odds_url=odds_url) if proxy_url else odds_url
     headers = {"Accept": "application/json,text/html,*/*"} if proxy_url else _leisu_odds_headers()
@@ -1696,7 +1715,10 @@ async def probe_leisu_odds(
         match_id=str(fetched.get("match_id") or match_id or ""),
         source_url=str((fetched.get("source") or {}).get("url") or odds_url or ""),
     )
-    status = "ok" if parsed.get("available") else parsed.get("access", {}).get("status") or fetched.get("status") or "unavailable"
+    if not parsed.get("available") and fetched.get("method") == "mobile_api" and fetched.get("access"):
+        parsed["access"] = fetched.get("access") or {}
+        parsed["quality_gate"] = leisu_odds_quality_gate(parsed.get("odds") or {}, parsed["access"])
+    status = "ok" if parsed.get("available") else fetched.get("status") or parsed.get("access", {}).get("status") or "unavailable"
     result = {
         "tool": "probe_leisu_odds",
         "status": status,
@@ -7284,10 +7306,39 @@ def _shortlist_value_score(analysis: dict[str, Any], *, mode: str = "confidence"
     return round(score, 4)
 
 
+def _compact_model_engine_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
+    support = analysis.get("betting_decision_support") if isinstance(analysis.get("betting_decision_support"), dict) else {}
+    analysis_pack = analysis.get("analysis_pack") if isinstance(analysis.get("analysis_pack"), dict) else {}
+    engine_candidates = (
+        analysis.get("model_engine"),
+        support.get("model_engine"),
+        analysis_pack.get("model_engine"),
+    )
+    engine = next((item for item in engine_candidates if isinstance(item, dict) and item), {})
+    if not engine:
+        return {}
+
+    evidence_keys = (
+        "available",
+        "version",
+        "method",
+        "match_key",
+        "expected_goals",
+        "dixon_coles",
+        "fitted_market_targets",
+        "top_scorelines",
+        "model_quality",
+        "probability_source",
+        "penaltyblog_adapter",
+    )
+    return {key: engine[key] for key in evidence_keys if key in engine}
+
+
 def _shortlist_pick_from_analysis(analysis: dict[str, Any], *, mode: str = "confidence") -> dict[str, Any]:
     support = analysis.get("betting_decision_support") or {}
     coverage = _shortlist_coverage_score(analysis)
     selection_confidence = _shortlist_selection_confidence(analysis, mode=mode)
+    model_engine_evidence = _compact_model_engine_evidence(analysis)
     return {
         "match": analysis.get("match") or (analysis.get("agent_brief") or {}).get("match") or {},
         "match_context": analysis.get("match_context") or {},
@@ -7305,6 +7356,7 @@ def _shortlist_pick_from_analysis(analysis: dict[str, Any], *, mode: str = "conf
         "confidence": support.get("confidence"),
         "quality": analysis.get("quality") or {},
         "time_window": analysis.get("time_window") or {},
+        "model_engine": model_engine_evidence,
         "rationale": {
             "ranking_inputs": [
                 "MCP best_candidate recommendation",
@@ -8897,6 +8949,7 @@ def _snapshot_reanalysis_record_item(
             "match_context": targeted_analysis.get("match_context") or {},
             "query": query,
             "reason": reason,
+            "model_engine": _compact_model_engine_evidence(targeted_analysis),
             "best_candidate": targeted_analysis.get("best_candidate") or support.get("best_candidate") or {},
             "blocking_flags": support.get("blocking_flags") or [],
             "quality": targeted_analysis.get("quality") or {},
@@ -9154,61 +9207,8 @@ async def run_auto_learning_cycle(
         "failed_count": 0,
     }
 
-    if include_market_snapshot_sync:
-        try:
-            market_snapshot_sync = _market_snapshot_sync_summary(
-                await sync_leisu_odds_snapshots(
-                    as_of=as_of,
-                    timezone_name=timezone_name,
-                    window_minutes=bounded_market_snapshot_window,
-                    limit=bounded_market_snapshot_limit,
-                    concurrency=bounded_market_snapshot_concurrency,
-                    require_quality_gate=market_snapshot_require_quality_gate,
-                )
-            )
-            AUTO_LEARNING_STATE["last_market_snapshot_sync"] = market_snapshot_sync
-        except Exception as exc:
-            market_snapshot_sync = {
-                "enabled": True,
-                "provider": "leisu",
-                "status": "error",
-                "saved_snapshot_count": 0,
-                "generated_snapshot_count": 0,
-                "error": f"{type(exc).__name__}: {exc}",
-                "db_path": snapshot_store.snapshot_db_path(),
-                "at_utc": now_utc().isoformat(),
-            }
-            AUTO_LEARNING_STATE["last_market_snapshot_sync"] = market_snapshot_sync
-
-    if include_snapshot_reanalysis:
-        try:
-            snapshot_reanalysis = {
-                "enabled": True,
-                **(
-                    await reanalyze_snapshot_backlog(
-                        as_of=as_of,
-                        timezone_name=timezone_name,
-                        limit=snapshot_reanalysis_limit,
-                        concurrency=snapshot_reanalysis_concurrency,
-                        db_path=db_path,
-                    )
-                ),
-            }
-            AUTO_LEARNING_STATE["last_snapshot_reanalysis"] = snapshot_reanalysis
-        except Exception as exc:
-            snapshot_reanalysis = {
-                "enabled": True,
-                "status": "error",
-                "reanalyzed_count": 0,
-                "formal_promoted_count": 0,
-                "still_observation_count": 0,
-                "failed_count": 0,
-                "error": f"{type(exc).__name__}: {exc}",
-                "at_utc": now_utc().isoformat(),
-            }
-            AUTO_LEARNING_STATE["last_snapshot_reanalysis"] = snapshot_reanalysis
-
     if include_asian_shortlist:
+        AUTO_LEARNING_STATE["current_step"] = "asian_shortlist"
         asian_result = await shortlist_value_matches(
             query=query or "",
             league=league,
@@ -9262,7 +9262,11 @@ async def run_auto_learning_cycle(
             "learning_observation_record_count": len(learning_observation_records),
             "shadow_prediction_record_count": len(shadow_prediction_records),
             "saved_shadow_prediction_count": saved_shadow_prediction_count,
+            "total_candidates": asian_result.get("total_candidates"),
+            "analyzed_count": asian_result.get("analyzed_count"),
+            "not_analyzed_count": asian_result.get("not_analyzed_count"),
             "eligible_count": asian_result.get("eligible_count"),
+            "returned_count": asian_result.get("returned_count"),
             "rejected_count": asian_result.get("rejected_count"),
             "funnel_report": asian_result.get("funnel_report") or {},
             "target_market": asian_result.get("target_market"),
@@ -9271,6 +9275,7 @@ async def run_auto_learning_cycle(
         }
 
     if include_jingcai_parlay:
+        AUTO_LEARNING_STATE["current_step"] = "jingcai_parlay"
         parlay_result = await recommend_jingcai_parlay(
             query=query or "",
             league=league,
@@ -9294,8 +9299,65 @@ async def run_auto_learning_cycle(
             "recommended_tickets": parlay_result.get("recommended_tickets") or [],
         }
 
+    if include_market_snapshot_sync:
+        AUTO_LEARNING_STATE["current_step"] = "market_snapshot_sync"
+        try:
+            market_snapshot_sync = _market_snapshot_sync_summary(
+                await sync_leisu_odds_snapshots(
+                    as_of=as_of,
+                    timezone_name=timezone_name,
+                    window_minutes=bounded_market_snapshot_window,
+                    limit=bounded_market_snapshot_limit,
+                    concurrency=bounded_market_snapshot_concurrency,
+                    require_quality_gate=market_snapshot_require_quality_gate,
+                )
+            )
+            AUTO_LEARNING_STATE["last_market_snapshot_sync"] = market_snapshot_sync
+        except Exception as exc:
+            market_snapshot_sync = {
+                "enabled": True,
+                "provider": "leisu",
+                "status": "error",
+                "saved_snapshot_count": 0,
+                "generated_snapshot_count": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+                "db_path": snapshot_store.snapshot_db_path(),
+                "at_utc": now_utc().isoformat(),
+            }
+            AUTO_LEARNING_STATE["last_market_snapshot_sync"] = market_snapshot_sync
+
+    if include_snapshot_reanalysis:
+        AUTO_LEARNING_STATE["current_step"] = "snapshot_reanalysis"
+        try:
+            snapshot_reanalysis = {
+                "enabled": True,
+                **(
+                    await reanalyze_snapshot_backlog(
+                        as_of=as_of,
+                        timezone_name=timezone_name,
+                        limit=snapshot_reanalysis_limit,
+                        concurrency=snapshot_reanalysis_concurrency,
+                        db_path=db_path,
+                    )
+                ),
+            }
+            AUTO_LEARNING_STATE["last_snapshot_reanalysis"] = snapshot_reanalysis
+        except Exception as exc:
+            snapshot_reanalysis = {
+                "enabled": True,
+                "status": "error",
+                "reanalyzed_count": 0,
+                "formal_promoted_count": 0,
+                "still_observation_count": 0,
+                "failed_count": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+                "at_utc": now_utc().isoformat(),
+            }
+            AUTO_LEARNING_STATE["last_snapshot_reanalysis"] = snapshot_reanalysis
+
     settlement = None
     if auto_settle:
+        AUTO_LEARNING_STATE["current_step"] = "settlement"
         settlement = await settle_learning_recommendations(
             auto_fetch=True,
             as_of=as_of,
@@ -9307,6 +9369,7 @@ async def run_auto_learning_cycle(
     else:
         calibration = learning_store.recompute_calibration(db_path=db_path)
         strategy_state = learning_store.update_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
+    AUTO_LEARNING_STATE["current_step"] = "idle"
     shadow_prediction_metrics = learning_store.shadow_prediction_metrics(db_path=db_path)
     learning_phase = "collecting_samples"
     if int((calibration or {}).get("settled_count") or 0) >= 20:
@@ -9356,6 +9419,56 @@ def _dashboard_matchup(record: dict[str, Any]) -> str:
 
 def _dashboard_record_has_display_match(record: dict[str, Any]) -> bool:
     return bool(str(record.get("home_team") or "").strip() and str(record.get("away_team") or "").strip())
+
+
+def _dashboard_logo_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        return f"https:{text}"
+    if text.startswith(("http://", "https://")):
+        return text
+    return ""
+
+
+def _dashboard_team_logo_url(record: dict[str, Any], side: str) -> str:
+    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    paths = (
+        (f"{side}_team_logo_url",),
+        (f"{side}_logo_url",),
+        (f"{side}_team_logo",),
+        (f"{side}_logo",),
+        ("team_logos", side),
+        ("logos", side),
+        ("match", f"{side}_team_logo_url"),
+        ("match", f"{side}_logo_url"),
+        ("match", f"{side}_team_logo"),
+        ("match", f"{side}_logo"),
+        ("fixture", f"{side}_team_logo_url"),
+        ("fixture", f"{side}_logo_url"),
+        ("fixture", f"{side}_team_logo"),
+        ("match_context", "fixture", f"{side}_team_logo_url"),
+        ("match_context", "fixture", f"{side}_logo_url"),
+        ("match_context", "teams", side, "logo_url"),
+        ("match_context", "teams", side, "logo"),
+        ("match_context", "teams", side, "crest"),
+        ("match_context", "teams", side, "image_path"),
+        ("context", "fixture", f"{side}_team_logo_url"),
+        ("context", "fixture", f"{side}_logo_url"),
+        ("context", "teams", side, "logo_url"),
+        ("context", "teams", side, "logo"),
+        ("context", "teams", side, "crest"),
+        ("context", "teams", side, "image_path"),
+    )
+    for path in paths:
+        logo_url = _dashboard_logo_url(_dashboard_get_path(record, path))
+        if logo_url:
+            return logo_url
+        logo_url = _dashboard_logo_url(_dashboard_get_path(raw, path))
+        if logo_url:
+            return logo_url
+    return ""
 
 
 def _dashboard_probability(record: dict[str, Any]) -> float | None:
@@ -9528,6 +9641,8 @@ def _dashboard_record_row(record: dict[str, Any]) -> dict[str, Any]:
         "matchup": _dashboard_matchup(record),
         "home_team": record.get("home_team") or "",
         "away_team": record.get("away_team") or "",
+        "home_team_logo_url": _dashboard_team_logo_url(record, "home"),
+        "away_team_logo_url": _dashboard_team_logo_url(record, "away"),
         "kickoff_utc_plus_8": record.get("kickoff_utc_plus_8") or "",
         "market": record.get("market") or "",
         "selection": record.get("selection") or "",
@@ -9911,6 +10026,70 @@ def _dashboard_prediction_diagnostic(
     }
 
 
+def _dashboard_record_kickoff_utc(record: dict[str, Any]) -> datetime | None:
+    kickoff = None
+    kickoff_raw = record.get("kickoff_utc_plus_8") or record.get("kickoff_utc")
+    if kickoff_raw:
+        try:
+            kickoff = datetime.fromisoformat(str(kickoff_raw).replace("Z", "+00:00"))
+        except ValueError:
+            kickoff = None
+    if not kickoff:
+        return None
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=DEFAULT_USER_TIMEZONE)
+    return kickoff.astimezone(timezone.utc)
+
+
+def _dashboard_time_based_open_match_state(record: dict[str, Any]) -> dict[str, Any] | None:
+    if str(record.get("settlement_status") or "") != "open":
+        return None
+    kickoff_utc = _dashboard_record_kickoff_utc(record)
+    if not kickoff_utc:
+        return None
+    current = now_utc()
+    if kickoff_utc > current:
+        return {
+            "phase": "scheduled",
+            "label": "未开赛",
+            "score": "",
+            "minute": "",
+            "period": "",
+            "status": "scheduled",
+            "source": "kickoff",
+        }
+    if current - kickoff_utc <= timedelta(hours=3):
+        return {
+            "phase": "maybe_live",
+            "label": "可能进行中",
+            "score": "",
+            "minute": "",
+            "period": "",
+            "status": "estimated",
+            "source": "kickoff",
+        }
+    return {
+        "phase": "result_pending",
+        "label": "赛果待确认",
+        "score": "",
+        "minute": "",
+        "period": "",
+        "status": "result_pending",
+        "source": "kickoff",
+    }
+
+
+def _dashboard_terminal_match_state(phase: str, source_status: str) -> dict[str, str] | None:
+    normalized = f"{phase} {source_status}".strip().lower()
+    if any(token in normalized for token in ("postponed", "delay", "延期", "推迟")):
+        return {"phase": "postponed", "label": "比赛延期"}
+    if any(token in normalized for token in ("cancelled", "canceled", "abandoned", "取消", "腰斩")):
+        return {"phase": "cancelled", "label": "比赛取消"}
+    if any(token in normalized for token in ("suspended", "interrupted", "中断")):
+        return {"phase": "interrupted", "label": "比赛中断"}
+    return None
+
+
 def _dashboard_normalized_match_state(record: dict[str, Any]) -> dict[str, Any]:
     status = str(record.get("settlement_status") or "")
     final_score = _dashboard_score_text(record.get("home_score"), record.get("away_score"))
@@ -9929,15 +10108,38 @@ def _dashboard_normalized_match_state(record: dict[str, Any]) -> dict[str, Any]:
 
     raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
     state = raw.get("match_state") if isinstance(raw.get("match_state"), dict) else {}
+    time_state = _dashboard_time_based_open_match_state(record)
     if state:
         phase = str(state.get("phase") or "unknown")
+        source_status = str(state.get("status") or "")
+        terminal_state = _dashboard_terminal_match_state(phase, source_status)
+        if terminal_state:
+            return {
+                **terminal_state,
+                "score": str(state.get("score") or ""),
+                "home_score": state.get("home_score"),
+                "away_score": state.get("away_score"),
+                "minute": str(state.get("minute") or ""),
+                "period": str(state.get("period") or ""),
+                "status": source_status,
+                "source": str(state.get("source") or ""),
+                "updated_at_utc": state.get("updated_at_utc") or "",
+            }
+        if phase == "scheduled" and time_state and time_state.get("phase") != "scheduled":
+            return {
+                **time_state,
+                "source": "kickoff_stale_scheduled_state",
+                "status": source_status or time_state.get("status") or "",
+                "updated_at_utc": state.get("updated_at_utc") or "",
+            }
         label = str(state.get("label") or "")
         if not label:
             label = {
                 "live": "比赛进行中",
                 "scheduled": "未开赛",
                 "final": "已完场待结算",
-            }.get(phase, "等待赛果")
+                "result_pending": "赛果待确认",
+            }.get(phase, "赛果待确认")
         return {
             "phase": phase,
             "label": label,
@@ -9946,28 +10148,14 @@ def _dashboard_normalized_match_state(record: dict[str, Any]) -> dict[str, Any]:
             "away_score": state.get("away_score"),
             "minute": str(state.get("minute") or ""),
             "period": str(state.get("period") or ""),
-            "status": str(state.get("status") or ""),
+            "status": source_status,
             "source": str(state.get("source") or ""),
             "updated_at_utc": state.get("updated_at_utc") or "",
         }
 
-    kickoff = None
-    kickoff_raw = record.get("kickoff_utc_plus_8") or record.get("kickoff_utc")
-    if kickoff_raw:
-        try:
-            kickoff = datetime.fromisoformat(str(kickoff_raw).replace("Z", "+00:00"))
-        except ValueError:
-            kickoff = None
-    if status == "open" and kickoff:
-        current = now_utc()
-        if kickoff.tzinfo is None:
-            kickoff = kickoff.replace(tzinfo=DEFAULT_USER_TIMEZONE)
-        kickoff_utc = kickoff.astimezone(timezone.utc)
-        if kickoff_utc > current:
-            return {"phase": "scheduled", "label": "未开赛", "score": "", "minute": "", "period": "", "status": "scheduled", "source": "kickoff"}
-        if current - kickoff_utc <= timedelta(hours=3):
-            return {"phase": "maybe_live", "label": "可能进行中", "score": "", "minute": "", "period": "", "status": "estimated", "source": "kickoff"}
-    return {"phase": "unknown", "label": "等待赛果", "score": "", "minute": "", "period": "", "status": status or "unknown", "source": ""}
+    if time_state:
+        return time_state
+    return {"phase": "unknown", "label": "赛果待确认", "score": "", "minute": "", "period": "", "status": status or "unknown", "source": ""}
 
 
 def _dashboard_prediction_status_label(record: dict[str, Any]) -> str:
@@ -10062,6 +10250,8 @@ def _dashboard_prediction_row(
         "matchup": _dashboard_matchup(record),
         "home_team": record.get("home_team") or "",
         "away_team": record.get("away_team") or "",
+        "home_team_logo_url": _dashboard_team_logo_url(record, "home"),
+        "away_team_logo_url": _dashboard_team_logo_url(record, "away"),
         "kickoff_utc_plus_8": record.get("kickoff_utc_plus_8") or "",
         "market": record.get("market") or "",
         "selection": record.get("selection") or "",
@@ -10210,7 +10400,7 @@ def _dashboard_prediction_kpis(rows: list[dict[str, Any]]) -> dict[str, Any]:
         row for row in settled_rows if row.get("prediction_type") == "observation"
     ]
     phase_counts: Counter[str] = Counter()
-    live_count = scheduled_count = final_pending_count = maybe_live_count = result_pending_count = 0
+    live_count = scheduled_count = final_pending_count = maybe_live_count = result_pending_count = postponed_count = 0
     for row in rows:
         state = row.get("match_state") if isinstance(row.get("match_state"), dict) else {}
         phase = str(state.get("phase") or "unknown")
@@ -10225,6 +10415,8 @@ def _dashboard_prediction_kpis(rows: list[dict[str, Any]]) -> dict[str, Any]:
             final_pending_count += 1
         elif phase == "maybe_live":
             maybe_live_count += 1
+        elif phase in {"postponed", "cancelled", "interrupted"}:
+            postponed_count += 1
         else:
             result_pending_count += 1
 
@@ -10253,6 +10445,7 @@ def _dashboard_prediction_kpis(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "final_pending_count": final_pending_count,
         "maybe_live_count": maybe_live_count,
         "result_pending_count": result_pending_count,
+        "postponed_count": postponed_count,
         "match_phase_counts": dict(sorted(phase_counts.items())),
         "settled_count": len(settled_rows),
         "hit_count": hit_count,
@@ -11472,6 +11665,10 @@ def _dashboard_opportunity_candidate(row: dict[str, Any]) -> dict[str, Any]:
         "ledger_id": row.get("ledger_id") or "",
         "league": row.get("league") or "",
         "matchup": row.get("matchup") or "",
+        "home_team": row.get("home_team") or "",
+        "away_team": row.get("away_team") or "",
+        "home_team_logo_url": row.get("home_team_logo_url") or "",
+        "away_team_logo_url": row.get("away_team_logo_url") or "",
         "selection": row.get("selection") or "",
         "recommendation": row.get("recommendation") or "",
         "primary_blocker": diagnostic.get("primary_reason") or row.get("rejection_reason") or "",
@@ -11602,13 +11799,7 @@ def _dashboard_recommendation_release_gate(
     )
     calibration_health = calibration_health or {}
     calibration_inverted = str(calibration_health.get("status") or "") == "inverted_probability_bands"
-    if sample_count < min_sample_count:
-        status = "collecting_samples"
-        formal_enabled = False
-        title = "样本收集中"
-        detail = f"已结算 {sample_count} 场，达到 {min_sample_count} 场前只做预测和回测。"
-        severity = "warning"
-    elif calibration_inverted:
+    if calibration_inverted:
         status = "paper_only_calibration_guardrail"
         formal_enabled = False
         title = "校准异常保护"
@@ -11616,6 +11807,12 @@ def _dashboard_recommendation_release_gate(
             f"{calibration_health.get('detail') or '概率分桶出现反向表现。'}"
             f" 当前 {counter_signal_count} 场只进入反向校准观察，不升级为正式推荐。"
         )
+        severity = "warning"
+    elif sample_count < min_sample_count:
+        status = "collecting_samples"
+        formal_enabled = False
+        title = "样本收集中"
+        detail = f"已结算 {sample_count} 场，达到 {min_sample_count} 场前只做预测和回测。"
         severity = "warning"
     elif shadow_walk_failed:
         status = "paper_only_shadow_walk_forward"
@@ -12261,7 +12458,51 @@ def _dashboard_record_model_engine(record: dict[str, Any]) -> dict[str, Any]:
         value = _dashboard_get_path(raw, path)
         if isinstance(value, dict) and value:
             return value
-    return {}
+    return _dashboard_legacy_candidate_model_engine(record, raw)
+
+
+def _dashboard_legacy_candidate_model_engine(record: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    best = raw.get("best_candidate") if isinstance(raw.get("best_candidate"), dict) else {}
+    if not best:
+        return {}
+
+    probability_source = str(best.get("probability_source") or "")
+    edge_source = str(best.get("edge_source") or "")
+    has_model_probability = parse_float(best.get("model_probability")) is not None
+    if edge_source != "model_engine" and "Dixon-Coles" not in probability_source and not has_model_probability:
+        return {}
+
+    market = str(best.get("market") or record.get("market") or "")
+    fitted_targets = {
+        "moneyline_1x2": market in {"1x2", "jingcai_had", "jingcai_hhad"},
+        "asian_handicap": market == "asian_handicap",
+        "over_under": market == "over_under",
+        "side_neutrality_prior": False,
+    }
+    if not any(fitted_targets.values()) and parse_float(best.get("market_probability")) is not None:
+        fitted_targets["asian_handicap"] = str(record.get("market") or "") == "asian_handicap"
+
+    dixon_coles = {
+        "rho_source": "not_persisted_legacy_candidate",
+        "low_score_adjustment": "Dixon-Coles" in probability_source,
+        "historical_rho": {},
+    }
+    return {
+        "available": True,
+        "version": "legacy_shortlist_candidate_summary",
+        "method": model_engine.MODEL_ENGINE_METHOD,
+        "dixon_coles": dixon_coles,
+        "fitted_market_targets": fitted_targets,
+        "model_quality": {
+            "fallback_used": False,
+            "evidence_scope": "legacy_best_candidate",
+            "limits": [
+                "This legacy row predates compact model_engine persistence; dashboard governance inferred model usage from the stored best_candidate summary.",
+                "Historical rho and expected-goal internals are unavailable for this row unless the compact model_engine object was persisted.",
+            ],
+        },
+        "probability_source": probability_source or "stored best_candidate model_probability",
+    }
 
 
 def _dashboard_model_governance_check(
@@ -12484,7 +12725,7 @@ def _dashboard_model_governance(
         "method_counts": dict(method_counts),
         "version_counts": dict(version_counts),
         "checks": checks,
-        "rule": "模型审计只读取已入库的 model_engine、结算校准指标和赔率快照，不会创建新的推荐信号。",
+        "rule": "模型审计只读取已入库的 compact model_engine、旧样本候选级模型摘要、结算校准指标和赔率快照，不会创建新的推荐信号。",
     }
 
 
@@ -14879,6 +15120,7 @@ async def auto_learning_daemon(
             AUTO_LEARNING_STATE["last_result_summary"] = {
                 "run_id": result.get("run_id"),
                 "saved_record_count": result.get("saved_record_count"),
+                "saved_shadow_prediction_count": result.get("saved_shadow_prediction_count"),
                 "learning_phase": result.get("learning_phase"),
                 "asian_record_count": (result.get("asian_shortlist") or {}).get("record_count"),
                 "asian_learning_observation_record_count": (result.get("asian_shortlist") or {}).get(
@@ -14886,6 +15128,16 @@ async def auto_learning_daemon(
                 ),
                 "asian_shadow_prediction_record_count": (result.get("asian_shortlist") or {}).get(
                     "shadow_prediction_record_count"
+                ),
+                "asian_total_candidates": (result.get("asian_shortlist") or {}).get("total_candidates"),
+                "asian_analyzed_count": (result.get("asian_shortlist") or {}).get("analyzed_count"),
+                "asian_not_analyzed_count": (result.get("asian_shortlist") or {}).get("not_analyzed_count"),
+                "asian_eligible_count": (result.get("asian_shortlist") or {}).get("eligible_count"),
+                "asian_returned_count": (result.get("asian_shortlist") or {}).get("returned_count"),
+                "asian_rejected_count": (result.get("asian_shortlist") or {}).get("rejected_count"),
+                "asian_rejection_reasons": (
+                    ((result.get("asian_shortlist") or {}).get("funnel_report") or {}).get("rejection_reasons")
+                    or {}
                 ),
                 "parlay_record_count": (result.get("jingcai_parlay") or {}).get("record_count"),
                 "market_snapshot_sync": result.get("market_snapshot_sync"),
@@ -14897,6 +15149,7 @@ async def auto_learning_daemon(
             AUTO_LEARNING_STATE["last_error"] = f"{type(exc).__name__}: {exc}"
             print(f"football-data auto-learning error: {AUTO_LEARNING_STATE['last_error']}", flush=True)
         finally:
+            AUTO_LEARNING_STATE["current_step"] = "idle"
             AUTO_LEARNING_STATE["last_finished_at_utc"] = now_utc().isoformat()
         await asyncio.sleep(max(60, int(interval_seconds or 600)))
 
@@ -14970,7 +15223,7 @@ async def shortlist_value_matches(
         timezone_name=timezone_name,
         window_hours=window_hours,
         limit=limit,
-        analysis_ready_only=True,
+        analysis_ready_only=False,
     )
     matches = match_list.get("matches") or []
     picks: list[dict[str, Any]] = []
@@ -15029,6 +15282,7 @@ async def shortlist_value_matches(
                     "match_context": targeted_analysis.get("match_context") or {},
                     "query": match_query,
                     "reason": reason,
+                    "model_engine": _compact_model_engine_evidence(targeted_analysis),
                     "best_candidate": targeted_analysis.get("best_candidate")
                     or (targeted_analysis.get("betting_decision_support") or {}).get("best_candidate")
                     or {},
@@ -15146,6 +15400,11 @@ async def shortlist_value_matches(
         "funnel_report": funnel_report,
         "picks": returned,
         "rejected": rejected,
+        "analysis_input_policy": (
+            "The shortlist scans all schedule-anchored fixtures in the time window, then analyze_single_match tries to "
+            "resolve usable odds from fixture odds, detail pages, and supplemental sources. Matches without calculable "
+            "odds are rejected as data-blocked and are not given a betting direction."
+        ),
         "ranking_policy": (
             "MCP lightly lists upcoming matches, concurrently analyzes up to 100 listed candidates, "
             "rejects hard blockers/missing core markets/no positive edge, then ranks by calibrated_probability, "

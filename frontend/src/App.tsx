@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  CircleHelp,
   CloudSun,
   Clock,
   Database,
@@ -23,6 +24,7 @@ import {
   UsersRound
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 import {
   CartesianGrid,
   Line,
@@ -46,7 +48,7 @@ import {
   strategyStatusLabel
 } from "./dashboardModel";
 import { dashboardPath, matchDetailPath, parseDashboardRoute, type DashboardRoute } from "./appRouting";
-import type { DashboardMatchDetail, DashboardRecord, DashboardSectionKey, DashboardSnapshot, KpiCard, LearningEvent, ProbabilityRow } from "./types";
+import type { DashboardMatchDetail, DashboardRecord, DashboardSectionKey, DashboardSnapshot, KpiCard, LearningEvent, PredictionLedgerRow, ProbabilityRow } from "./types";
 
 const API_URL = "/api/dashboard";
 type LedgerFilter = "all" | "recommendation" | "observation" | "settled" | "open" | "hit" | "miss";
@@ -62,7 +64,7 @@ const LEDGER_FILTERS: Array<{ key: LedgerFilter; label: string }> = [
   { key: "recommendation", label: "推荐发布" },
   { key: "observation", label: "观察样本" },
   { key: "settled", label: "已结算" },
-  { key: "open", label: "等待赛果" },
+  { key: "open", label: "未结算" },
   { key: "hit", label: "命中" },
   { key: "miss", label: "未命中" }
 ];
@@ -73,6 +75,15 @@ const SECTION_ICONS: Record<DashboardSectionKey, typeof Target> = {
   model: Gauge,
   signals: TrendingUp,
   data: Database
+};
+
+const AUTO_STEP_LABELS: Record<string, string> = {
+  asian_shortlist: "临场亚盘分析",
+  jingcai_parlay: "竞彩组合扫描",
+  market_snapshot_sync: "赔率快照补强",
+  snapshot_reanalysis: "快照复算",
+  settlement: "赛果结算",
+  idle: "等待下一轮"
 };
 
 function toneClass(tone: KpiCard["tone"]): string {
@@ -92,8 +103,149 @@ function localTime(value: string | null | undefined): string {
   }).format(date);
 }
 
+function fullLocalTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function numericValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function boolValue(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+  return false;
+}
+
+function isAfterTime(left: unknown, right: unknown): boolean {
+  const leftDate = new Date(typeof left === "string" ? left : "");
+  const rightDate = new Date(typeof right === "string" ? right : "");
+  if (Number.isNaN(leftDate.getTime())) return false;
+  if (Number.isNaN(rightDate.getTime())) return true;
+  return leftDate.getTime() > rightDate.getTime();
+}
+
+function latestTime(rows: PredictionLedgerRow[], key: "created_at_utc" | "settled_at_utc"): string | null {
+  let latest: string | null = null;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const row of rows) {
+    const value = row[key];
+    if (!value) continue;
+    const ms = new Date(value).getTime();
+    if (!Number.isNaN(ms) && ms > latestMs) {
+      latest = value;
+      latestMs = ms;
+    }
+  }
+  return latest;
+}
+
 function displayMatchup(value: string | null | undefined): string {
   return (value || "—").replace(/\s+vs\s+/gi, " 对 ");
+}
+
+type TeamVisualRecord = {
+  matchup?: string | null;
+  home_team?: string | null;
+  away_team?: string | null;
+  home_team_logo_url?: string | null;
+  away_team_logo_url?: string | null;
+};
+
+function splitMatchup(value: string | null | undefined): { home: string; away: string } {
+  const [home, away] = (value || "").split(/\s+(?:vs|对)\s+/i).map((part) => part.trim());
+  return { home: home || "主队", away: away || "客队" };
+}
+
+function teamInitials(teamName: string | null | undefined): string {
+  const clean = (teamName || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "FC";
+  const compact = clean.replace(/[^\p{L}\p{N}\u4e00-\u9fff]/gu, "");
+  const chinese = compact.match(/[\u4e00-\u9fff]/gu);
+  if (chinese?.length) return chinese.slice(0, 2).join("");
+  const parts = clean.split(/[\s·._-]+/).filter(Boolean);
+  const initials = parts.length > 1 ? `${parts[0][0] || ""}${parts[1][0] || ""}` : compact.slice(0, 2);
+  return (initials || "FC").toUpperCase();
+}
+
+function teamAccent(teamName: string | null | undefined): string {
+  const palette = ["#0f766e", "#2563eb", "#c2410c", "#7c3aed", "#be123c", "#047857", "#b45309", "#155e75"];
+  const value = teamName || "";
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) % palette.length;
+  }
+  return palette[Math.abs(hash) % palette.length];
+}
+
+function TeamBadge({
+  teamName,
+  logoUrl,
+  size = "small"
+}: {
+  teamName: string;
+  logoUrl?: string | null;
+  size?: "small" | "medium" | "large";
+}) {
+  const initials = teamInitials(teamName);
+  return (
+    <span
+      className={`team-badge ${size}`}
+      style={{ "--team-accent": teamAccent(teamName) } as CSSProperties}
+      aria-label={`${teamName || "球队"} 队徽`}
+      title={teamName || "球队"}
+    >
+      {logoUrl ? <img src={logoUrl} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <span>{initials}</span>}
+    </span>
+  );
+}
+
+function TeamMatchup({
+  record,
+  meta,
+  size = "small",
+  compact = false
+}: {
+  record: TeamVisualRecord;
+  meta?: string;
+  size?: "small" | "medium" | "large";
+  compact?: boolean;
+}) {
+  const parsed = splitMatchup(record.matchup);
+  const homeTeam = record.home_team || parsed.home;
+  const awayTeam = record.away_team || parsed.away;
+  return (
+    <div className={`team-matchup ${compact ? "compact-matchup" : ""}`}>
+      <div className="team-line">
+        <TeamBadge teamName={homeTeam} logoUrl={record.home_team_logo_url} size={size} />
+        <strong>{homeTeam}</strong>
+      </div>
+      <div className="team-line">
+        <TeamBadge teamName={awayTeam} logoUrl={record.away_team_logo_url} size={size} />
+        <strong>{awayTeam}</strong>
+      </div>
+      {meta && <span>{meta}</span>}
+    </div>
+  );
 }
 
 function countdown(value: string): string {
@@ -108,7 +260,7 @@ function countdown(value: string): string {
 
 function recordStatusText(status: string, hit?: number | null): string {
   if (status === "settled") return hit ? "命中" : "未命中";
-  if (status === "open") return "等待赛果";
+  if (status === "open") return "赛果待确认";
   if (status === "tracked_only") return "仅跟踪";
   if (status === "unsupported_market") return "不支持结算";
   return status || "未知";
@@ -238,7 +390,7 @@ function DashboardHero({
         </div>
         <div className="hero-signal-grid">
           <Metric label="观察样本" value={`${snapshot.kpis.observation_count}`} />
-          <Metric label="等待赛果" value={`${snapshot.prediction_kpis.open_count}`} />
+          <Metric label="未结算" value={`${snapshot.prediction_kpis.open_count}`} />
           <Metric label="赔率快照" value={`${snapshot.market_snapshot_summary.total_snapshot_count}`} />
           <Metric label="已回测" value={`${snapshot.prediction_kpis.settled_count}`} />
         </div>
@@ -278,6 +430,170 @@ function MatchPhaseStrip({ view }: { view: ReturnType<typeof buildDashboardView>
           </div>
         );
       })}
+    </section>
+  );
+}
+
+function OperationStatusPanel({
+  snapshot,
+  view
+}: {
+  snapshot: DashboardSnapshot;
+  view: DashboardViewModel;
+}) {
+  const auto = objectRecord(snapshot.auto_learning_state);
+  const resultSummary = objectRecord(auto.last_result_summary);
+  const enabled = boolValue(auto.enabled);
+  const running = isAfterTime(auto.last_started_at_utc, auto.last_finished_at_utc);
+  const runCount = numericValue(auto.run_count) ?? 0;
+  const intervalSeconds = numericValue(auto.interval_seconds) ?? 120;
+  const asianWindow = numericValue(auto.asian_window_minutes) ?? 10;
+  const formalRecords = numericValue(resultSummary.asian_record_count) ?? 0;
+  const observationRecords = numericValue(resultSummary.asian_learning_observation_record_count) ?? 0;
+  const shadowRecords = numericValue(resultSummary.asian_shadow_prediction_record_count) ?? numericValue(resultSummary.saved_shadow_prediction_count) ?? 0;
+  const savedRecords = formalRecords + observationRecords + shadowRecords;
+  const candidateCount = numericValue(resultSummary.asian_total_candidates) ?? 0;
+  const analyzedCount = numericValue(resultSummary.asian_analyzed_count) ?? 0;
+  const rejectedCount = numericValue(resultSummary.asian_rejected_count) ?? 0;
+  const rejectionReasons = objectRecord(resultSummary.asian_rejection_reasons);
+  const topRejection = Object.entries(rejectionReasons)
+    .map(([reason, count]) => ({ reason, count: numericValue(count) ?? 0 }))
+    .sort((a, b) => b.count - a.count)[0];
+  const snapshotSync = objectRecord(resultSummary.market_snapshot_sync);
+  const snapshotStatus = typeof snapshotSync.status === "string" ? snapshotSync.status : "";
+  const snapshotAccessible = numericValue(snapshotSync.accessible_match_count) ?? 0;
+  const snapshotSaved = numericValue(snapshotSync.saved_snapshot_count) ?? 0;
+  const snapshotProbed = numericValue(snapshotSync.probed_match_count) ?? 0;
+  const settledRecords = (numericValue(resultSummary.settled_count) ?? 0) + (numericValue(resultSummary.shadow_settled_count) ?? 0);
+  const latestSettledAt = latestTime(snapshot.prediction_ledger || [], "settled_at_utc");
+  const openRows = (snapshot.prediction_ledger || []).filter((row) => row.settlement_status !== "settled").slice(0, 3);
+  const phaseParts = [
+    snapshot.prediction_kpis.scheduled_count ? `未开赛 ${snapshot.prediction_kpis.scheduled_count}` : "",
+    snapshot.prediction_kpis.maybe_live_count ? `可能进行中 ${snapshot.prediction_kpis.maybe_live_count}` : "",
+    snapshot.prediction_kpis.result_pending_count ? `赛果待确认 ${snapshot.prediction_kpis.result_pending_count}` : "",
+    snapshot.prediction_kpis.final_pending_count ? `完场待结算 ${snapshot.prediction_kpis.final_pending_count}` : "",
+    snapshot.prediction_kpis.postponed_count ? `延期/取消 ${snapshot.prediction_kpis.postponed_count}` : ""
+  ].filter(Boolean);
+  const hasError = Boolean(auto.last_error);
+  const currentStep = typeof auto.current_step === "string" ? auto.current_step : "";
+  const stepLabel = AUTO_STEP_LABELS[currentStep] || (currentStep ? currentStep : "等待下一轮");
+  const statusText = !enabled ? "自动学习关闭" : hasError ? "自动学习异常" : running ? "正在扫描" : runCount > 0 ? "上一轮已完成" : "等待首轮";
+  const statusTone: KpiCard["tone"] = hasError ? "bad" : running ? "caution" : enabled ? "good" : "bad";
+  const headline = snapshot.prediction_kpis.recommended_count > 0
+    ? "有推荐信号可发布"
+    : enabled
+      ? "系统正在观察，推荐发布仍关闭"
+      : "自动学习未开启";
+  const detail = enabled
+    ? `后台按约 ${Math.max(1, Math.round(intervalSeconds / 60))} 分钟轮询。临场分析先写入观察/影子台账，雷速多公司快照作为后续补强，不再挡住基础分析。`
+    : "自动学习关闭时不会扫描新比赛，也不会写入新的观察预测。";
+
+  return (
+    <section className={`ops-command-center tone-${statusTone}`} aria-label="当前运行状态">
+      <div className="ops-hero">
+        <div>
+          <span className="eyebrow">现在系统在做什么</span>
+          <h2>{headline}</h2>
+          <p>{detail}</p>
+        </div>
+        <span className={`status-pill ${statusTone === "good" ? "good" : statusTone === "bad" ? "bad" : "caution"}`}>
+          {statusText}
+        </span>
+      </div>
+
+      <div className="ops-answer-grid">
+        <div className="ops-answer">
+          <span>有没有在预测？</span>
+          <strong>{enabled ? `有，${running ? stepLabel : "按轮扫描候选"}` : "没有，自动学习关闭"}</strong>
+          <p>{running ? "当前轮次还在执行，但临场分析已排在慢速快照同步之前。" : `上一轮结束：${fullLocalTime(typeof auto.last_finished_at_utc === "string" ? auto.last_finished_at_utc : null)}`}</p>
+        </div>
+        <div className="ops-answer">
+          <span>为什么没推荐？</span>
+          <strong>{snapshot.prediction_kpis.recommended_count > 0 ? "已有可发布信号" : "发布闸门未打开"}</strong>
+          <p>{view.recommendationOpportunity.releaseGate?.detail || view.predictionAccountability.policyText}</p>
+        </div>
+        <div className="ops-answer">
+          <span>上一轮分析了吗？</span>
+          <strong>{analyzedCount} 场分析 · 新增 {savedRecords} 条</strong>
+          <p>{analyzedCount > 0 ? `发布 ${formalRecords} 条，观察 ${observationRecords} 条，影子 ${shadowRecords} 条；${topRejection ? `主要阻断：${reasonLabel(topRejection.reason)} ${topRejection.count} 场。` : "没有候选阻断。"}` : "没有候选进入当前赛前窗口，或赛程源暂未给出可扫描比赛。"}</p>
+        </div>
+        <div className="ops-answer">
+          <span>数据源阻塞？</span>
+          <strong>{snapshotStatus === "partial" || snapshotStatus === "error" ? "快照补强受阻" : snapshotSaved > 0 ? "快照可用" : "暂无新增快照"}</strong>
+          <p>{snapshotProbed > 0 ? `雷速快照探测 ${snapshotProbed} 场，可访问 ${snapshotAccessible} 场，保存 ${snapshotSaved} 条；基础赔率不足时不会生成方向。` : "多公司快照没有开始或本轮未探测，基础分析仍可使用已有盘口。"}</p>
+        </div>
+      </div>
+
+      <div className="ops-metric-grid">
+        <Metric label="候选/分析" value={`${candidateCount}/${analyzedCount} 场`} />
+        <Metric label="发布/观察/影子" value={`${formalRecords}/${observationRecords}/${shadowRecords}`} />
+        <Metric label="上一轮结算" value={`${settledRecords} 条`} />
+        <Metric label="最新结算" value={localTime(latestSettledAt)} />
+        <Metric label="未结算拆分" value={phaseParts.join(" / ") || "0"} />
+      </div>
+
+      <div className="ops-open-list" aria-label="未结算样本">
+        <div className="ops-open-head">
+          <ListChecks size={16} />
+          <strong>当前未结算</strong>
+          <span>{snapshot.prediction_kpis.open_count} 场</span>
+        </div>
+        {openRows.length ? openRows.map((row) => (
+          <div className="ops-open-row" key={row.ledger_id}>
+            <TeamMatchup record={row} meta={row.league} compact />
+            <span>{localTime(row.kickoff_utc_plus_8)}</span>
+            <b>{row.status_label || "未结算"}</b>
+          </div>
+        )) : (
+          <div className="empty-state compact">当前没有未结算样本。</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+const PRODUCT_TERMS = [
+  {
+    term: "预测样本",
+    plain: "模型已经算过方向并写入台账，哪怕不发布，也会等赛果回测。"
+  },
+  {
+    term: "推荐发布",
+    plain: "通过概率、价值边际、赔率范围和风控闸门后，才展示给使用者的信号。"
+  },
+  {
+    term: "价值边际",
+    plain: "模型判断的概率优势扣掉市场隐含概率后的空间，负数通常不值得发布。"
+  },
+  {
+    term: "Brier",
+    plain: "概率预测误差，越低越好，用来判断学习后概率是否更准。"
+  },
+  {
+    term: "rho",
+    plain: "历史强弱或盘口方向的相关证据；为 0 多半表示模型引擎证据还没入库。"
+  },
+  {
+    term: "CLV",
+    plain: "预测赔率和收盘赔率的差，用来判断是否早于市场发现价值。"
+  }
+];
+
+function MetricGlossaryPanel() {
+  return (
+    <section className="panel metric-glossary" aria-label="名词速查">
+      <div className="panel-title">
+        <CircleHelp size={18} />
+        <h2>名词速查</h2>
+      </div>
+      <div className="term-list">
+        {PRODUCT_TERMS.map((item) => (
+          <div className="term-row" key={item.term}>
+            <strong>{item.term}</strong>
+            <span>{item.plain}</span>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
@@ -1167,7 +1483,16 @@ function RecommendationOpportunityPanel({
             {opportunity.counterSignal.candidates.length ? opportunity.counterSignal.candidates.map((candidate) => (
               <div className="counter-signal-row" key={candidate.ledgerId}>
                 <div>
-                  <strong>{candidate.matchup}</strong>
+                  <TeamMatchup
+                    record={{
+                      matchup: candidate.matchup,
+                      home_team: candidate.homeTeam,
+                      away_team: candidate.awayTeam,
+                      home_team_logo_url: candidate.homeTeamLogoUrl,
+                      away_team_logo_url: candidate.awayTeamLogoUrl
+                    }}
+                    compact
+                  />
                   <span>{[candidate.league, candidate.selection, candidate.signalLabel, candidate.bandText].filter(Boolean).join(" · ")}</span>
                   <em>{candidate.signalReason}</em>
                 </div>
@@ -1199,7 +1524,16 @@ function RecommendationOpportunityPanel({
             {opportunity.candidates.length ? opportunity.candidates.map((candidate) => (
               <div className="opportunity-candidate-row" key={candidate.ledgerId}>
                 <div>
-                  <strong>{candidate.matchup}</strong>
+                  <TeamMatchup
+                    record={{
+                      matchup: candidate.matchup,
+                      home_team: candidate.homeTeam,
+                      away_team: candidate.awayTeam,
+                      home_team_logo_url: candidate.homeTeamLogoUrl,
+                      away_team_logo_url: candidate.awayTeamLogoUrl
+                    }}
+                    compact
+                  />
                   <span>{[candidate.league, candidate.selection, candidate.actionLabel].filter(Boolean).join(" · ")}</span>
                 </div>
                 <div className="candidate-metrics">
@@ -1282,10 +1616,7 @@ function PickTable({
             <tr className={ledgerId === selectedLedgerId ? "selected-row" : ""} key={row.id}>
               <td>{row.league || "—"}</td>
               <td>
-                <div className="match-cell">
-                  <strong>{displayMatchup(row.matchup)}</strong>
-                  <span>{countdown(row.kickoff_utc_plus_8)}</span>
-                </div>
+                <TeamMatchup record={row} meta={countdown(row.kickoff_utc_plus_8)} />
               </td>
               <td>{localTime(row.kickoff_utc_plus_8)}</td>
               <td>{row.selection || "—"}</td>
@@ -1403,10 +1734,7 @@ function MatchDetailPanel({
         </span>
       </div>
       <div className="detail-heading">
-        <div>
-          <strong>{view.title}</strong>
-          <span>{view.subtitle || "—"}</span>
-        </div>
+        <TeamMatchup record={detail.record} meta={view.subtitle || "—"} size="large" />
         <b>{view.marketSummary}</b>
       </div>
       <div className="detail-grid">
@@ -1522,12 +1850,15 @@ function MatchDetailPanel({
         {view.lineup.available ? (
           <div className="lineup-grid">
             {[
-              { label: detail.record.home_team || "主队", team: view.lineup.home },
-              { label: detail.record.away_team || "客队", team: view.lineup.away }
+              { label: detail.record.home_team || "主队", logoUrl: detail.record.home_team_logo_url, team: view.lineup.home },
+              { label: detail.record.away_team || "客队", logoUrl: detail.record.away_team_logo_url, team: view.lineup.away }
             ].map((item) => (
               <div className="lineup-team" key={item.label}>
                 <div className="lineup-team-head">
-                  <strong>{item.label}</strong>
+                  <div className="lineup-team-title">
+                    <TeamBadge teamName={item.label} logoUrl={item.logoUrl} />
+                    <strong>{item.label}</strong>
+                  </div>
                   <span>{item.team.formation} · {item.team.starterCountText}</span>
                 </div>
                 <div className="player-list">
@@ -1948,8 +2279,7 @@ function SettlementPanel({ rows }: { rows: DashboardRecord[] }) {
                 <span>{primary.league}</span>
                 {group.rows.length > 1 && <em>同场多盘口 {group.rows.length}</em>}
               </div>
-              <strong>{primary.matchup}</strong>
-              <p>真实比分 {primary.score}</p>
+              <TeamMatchup record={primary} meta={`真实比分 ${primary.score || "—"}`} compact />
               <div className="settlement-lines">
                 {group.rows.map((row) => (
                   <div className="settlement-line" key={row.id}>
@@ -2095,7 +2425,7 @@ function PredictionLedgerPanel({
                     </td>
                     <td><span className={`result-pill ${row.statusText === "命中" ? "hit" : row.statusText === "未命中" ? "miss" : ""}`}>{row.statusText}</span></td>
                     <td>{row.league || "—"}</td>
-                    <td>{row.matchup}</td>
+                    <td><TeamMatchup record={row} meta={row.oddsCoverageText} compact /></td>
                     <td>{localTime(row.kickoff_utc_plus_8)}</td>
                     <td>
                       <div className="match-cell">
@@ -2150,7 +2480,7 @@ function OverviewSection({
 }) {
   return (
     <div className="dashboard-section">
-      <DashboardHero snapshot={snapshot} view={view} />
+      <OperationStatusPanel snapshot={snapshot} view={view} />
       <KpiStrip cards={view.kpiCards} />
       <MatchPhaseStrip view={view} />
       <section className="overview-layout" aria-label="概览工作区">
@@ -2170,9 +2500,8 @@ function OverviewSection({
           <BacktestCurvePanel view={view} />
         </div>
         <div className="overview-side">
+          <MetricGlossaryPanel />
           <ProductionReadinessPanel view={view} />
-          <PredictionAccountabilityPanel view={view} />
-          <StrategyPanel snapshot={snapshot} />
         </div>
       </section>
     </div>
@@ -2195,6 +2524,7 @@ function ProductionSection({ view }: { view: DashboardViewModel }) {
 function ModelSection({ view }: { view: DashboardViewModel }) {
   return (
     <div className="dashboard-section">
+      <MetricGlossaryPanel />
       <ModelGovernancePanel view={view} />
       <LearningEffectivenessPanel view={view} />
       <BacktestCurvePanel view={view} />
@@ -2417,8 +2747,8 @@ export function App() {
     <main className={`app-shell ${isMatchPage ? "detail-shell" : ""}`}>
       <header className="topbar">
         <div>
-          <span className="eyebrow">策略监控台</span>
-          <h1>{isMatchPage ? "比赛详情" : "足球策略监控台"}</h1>
+          <span className="eyebrow">策略控制台</span>
+          <h1>{isMatchPage ? "比赛详情" : "足球策略控制台"}</h1>
         </div>
         <div className="topbar-status">
           <span><Database size={15} /> {snapshot?.kpis.live_calibration_active ? "实时校准已启用" : "样本收集中"}</span>

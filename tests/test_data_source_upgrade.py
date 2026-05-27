@@ -594,8 +594,8 @@ def test_normalize_api_football_fixture_context_extracts_match_blocks():
                 },
                 "league": {"id": 39, "name": "Premier League", "country": "England", "season": 2026},
                 "teams": {
-                    "home": {"id": 42, "name": "Arsenal", "winner": None},
-                    "away": {"id": 49, "name": "Chelsea", "winner": None},
+                    "home": {"id": 42, "name": "Arsenal", "logo": "https://img.example.com/arsenal.png", "winner": None},
+                    "away": {"id": 49, "name": "Chelsea", "logo": "https://img.example.com/chelsea.png", "winner": None},
                 },
                 "goals": {"home": None, "away": None},
                 "score": {"fulltime": {"home": None, "away": None}},
@@ -609,6 +609,8 @@ def test_normalize_api_football_fixture_context_extracts_match_blocks():
     assert context["fixture"]["id"] == 9001
     assert context["fixture"]["home_team"] == "Arsenal"
     assert context["fixture"]["away_team"] == "Chelsea"
+    assert context["fixture"]["home_team_logo_url"] == "https://img.example.com/arsenal.png"
+    assert context["fixture"]["away_team_logo_url"] == "https://img.example.com/chelsea.png"
     assert context["fixture"]["starting_at"] == "2026-05-23T12:30:00+00:00"
     assert context["coverage"]["fixture"] is True
     assert context["coverage"]["score"] is False
@@ -716,8 +718,8 @@ def test_normalize_football_data_org_match_context_extracts_match_blocks():
                 "utcDate": "2026-05-23T12:30:00Z",
                 "status": "TIMED",
                 "competition": {"id": 2021, "name": "Premier League", "code": "PL"},
-                "homeTeam": {"id": 57, "name": "Arsenal FC", "shortName": "Arsenal"},
-                "awayTeam": {"id": 61, "name": "Chelsea FC", "shortName": "Chelsea"},
+                "homeTeam": {"id": 57, "name": "Arsenal FC", "shortName": "Arsenal", "crest": "https://img.example.com/arsenal-crest.svg"},
+                "awayTeam": {"id": 61, "name": "Chelsea FC", "shortName": "Chelsea", "crest": "https://img.example.com/chelsea-crest.svg"},
                 "score": {"fullTime": {"home": None, "away": None}, "winner": None},
             }
         ]
@@ -729,6 +731,8 @@ def test_normalize_football_data_org_match_context_extracts_match_blocks():
     assert context["fixture"]["id"] == 12345
     assert context["fixture"]["home_team"] == "Arsenal FC"
     assert context["fixture"]["away_team"] == "Chelsea FC"
+    assert context["fixture"]["home_team_logo_url"] == "https://img.example.com/arsenal-crest.svg"
+    assert context["fixture"]["away_team_logo_url"] == "https://img.example.com/chelsea-crest.svg"
     assert context["fixture"]["competition_code"] == "PL"
     assert context["coverage"]["fixture"] is True
     assert context["coverage"]["score"] is False
@@ -839,8 +843,8 @@ def test_normalize_sportmonks_fixture_context_extracts_core_blocks():
                 "name": "Arsenal vs Chelsea",
                 "starting_at": "2026-05-23 12:30:00",
                 "participants": [
-                    {"id": 1, "name": "Arsenal", "meta": {"location": "home"}},
-                    {"id": 2, "name": "Chelsea", "meta": {"location": "away"}},
+                    {"id": 1, "name": "Arsenal", "image_path": "https://img.example.com/arsenal-sportmonks.png", "meta": {"location": "home"}},
+                    {"id": 2, "name": "Chelsea", "image_path": "https://img.example.com/chelsea-sportmonks.png", "meta": {"location": "away"}},
                 ],
                 "league": {"id": 8, "name": "Premier League"},
                 "lineups": [{"player_name": "Player A"}],
@@ -858,6 +862,8 @@ def test_normalize_sportmonks_fixture_context_extracts_core_blocks():
     assert context["fixture"]["name"] == "Arsenal vs Chelsea"
     assert context["fixture"]["home_team"] == "Arsenal"
     assert context["fixture"]["away_team"] == "Chelsea"
+    assert context["fixture"]["home_team_logo_url"] == "https://img.example.com/arsenal-sportmonks.png"
+    assert context["fixture"]["away_team_logo_url"] == "https://img.example.com/chelsea-sportmonks.png"
     assert context["coverage"]["lineups"] is True
     assert context["coverage"]["sidelined"] is True
     assert context["coverage"]["weather"] is True

@@ -1947,6 +1947,75 @@ def test_shortlist_value_matches_can_analyze_sixty_candidates_and_reports_funnel
     assert result["funnel_report"]["rejection_reasons"]["no_positive_edge"] == 20
 
 
+def test_shortlist_scans_schedule_candidates_before_odds_gate(monkeypatch):
+    list_kwargs = {}
+
+    async def fake_list_matches(*args, **kwargs):
+        list_kwargs.update(kwargs)
+        return {
+            "status": "ok",
+            "time_window_policy": {"as_of": "2026-05-24T10:00:00+08:00", "window_hours": 1},
+            "matches": [
+                {
+                    "match_id": "no-schedule-odds",
+                    "home_team": "无赔率主队",
+                    "away_team": "无赔率客队",
+                    "league": "测试联赛",
+                    "kickoff_utc_plus_8": "2026-05-24T10:05:00+08:00",
+                    "analysis_readiness": {
+                        "can_run_single_match_analysis": False,
+                        "missing": ["odds_missing"],
+                    },
+                }
+            ],
+            "total_count": 1,
+        }
+
+    async def fake_analyze_single_match(query, **kwargs):
+        return {
+            "status": "ok",
+            "agent_brief": {
+                "match": {
+                    "match_id": "no-schedule-odds",
+                    "home_team": "无赔率主队",
+                    "away_team": "无赔率客队",
+                    "league": "测试联赛",
+                }
+            },
+            "best_candidate": {},
+            "betting_decision_support": {"blocking_flags": ["odds_missing"], "best_candidate": {}},
+            "analysis_pack": {
+                "data_coverage": {
+                    "blocks": {
+                        "moneyline_1x2": False,
+                        "asian_handicap": False,
+                        "over_under": False,
+                    }
+                }
+            },
+            "quality": {"is_bettable_input": False},
+        }
+
+    monkeypatch.setattr(sources_module, "list_matches", fake_list_matches)
+    monkeypatch.setattr(sources_module, "analyze_single_match", fake_analyze_single_match)
+
+    result = asyncio.run(
+        sources_module.shortlist_value_matches(
+            as_of="2026-05-24T10:00:00+08:00",
+            timezone_name="Asia/Shanghai",
+            window_minutes=10,
+            limit=5,
+            mode="balanced",
+            target_market="asian_handicap",
+        )
+    )
+
+    assert list_kwargs["analysis_ready_only"] is False
+    assert result["analyzed_count"] == 1
+    assert result["rejected"][0]["reason"] == "target_market_missing"
+    assert "Matches without calculable odds" in result["analysis_input_policy"]
+
+
 def test_shortlist_value_matches_preserves_source_match_and_context_for_dashboard(monkeypatch):
     async def fake_list_matches(*args, **kwargs):
         return {
@@ -3423,6 +3492,37 @@ def test_probe_leisu_odds_prefers_mobile_api_when_available(monkeypatch):
     assert result["fetch"]["method"] == "mobile_api"
     assert result["fetch"]["mobile_api"]["list_market_counts"]["eu"] == 1
     assert result["odds"]["source_detail"]["source"] == "leisu_mobile_api"
+
+
+def test_probe_leisu_odds_does_not_hit_direct_page_after_empty_mobile_api_without_access_config(monkeypatch):
+    async def fake_fetch_leisu_mobile_odds_payload(**kwargs):
+        return {
+            "status": "empty",
+            "method": "mobile_api",
+            "payload": None,
+            "access": {"status": "ok", "blocked": False, "requires_cookie_or_proxy": False, "reason": ""},
+            "source": {
+                "url": "https://api-gateway.leisu.com/v1/web/match/common/odds_list",
+                "source": "leisu.com",
+            },
+            "mobile_api": {"list_market_counts": {"eu": 0, "asia": 0, "bs": 0}},
+        }
+
+    async def fake_fetch_text(*args, **kwargs):
+        raise AssertionError("direct 3in1 page should not be fetched without cookie/proxy")
+
+    monkeypatch.delenv("LEISU_ODDS_PROXY_URL", raising=False)
+    monkeypatch.delenv("LEISU_COOKIE", raising=False)
+    monkeypatch.delenv("LEISU_ACW_SC_V2", raising=False)
+    monkeypatch.setattr(sources_module, "fetch_leisu_mobile_odds_payload", fake_fetch_leisu_mobile_odds_payload)
+    monkeypatch.setattr(sources_module, "fetch_text", fake_fetch_text)
+
+    result = asyncio.run(sources_module.probe_leisu_odds(match_id="4512998"))
+
+    assert result["status"] == "empty"
+    assert result["fetch"]["method"] == "mobile_api"
+    assert result["access"]["blocked"] is False
+    assert result["quality_gate"]["hard_flags"] == ["supported_market_missing", "leisu_numeric_odds_missing"]
 
 
 def test_probe_leisu_odds_tool_delegates(monkeypatch):

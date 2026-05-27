@@ -524,3 +524,98 @@ def test_update_strategy_state_tightens_balanced_policy_after_poor_settled_resul
     persisted = learning_store.get_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
     assert persisted["status"] == "live_calibration_active"
     assert persisted["min_calibrated_probability"] == state["min_calibrated_probability"]
+
+
+def test_update_strategy_state_ignores_no_value_observations_but_keeps_calibration(tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    records = []
+    results = []
+    for index in range(20):
+        records.append(
+            {
+                "run_id": f"no-value-observation-{index}",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "match_id": f"no-value-observation-{index}",
+                "league": "观察联赛",
+                "home_team": f"观察主队{index}",
+                "away_team": f"观察客队{index}",
+                "market": "asian_handicap",
+                "selection": f"观察主队{index} -0.5",
+                "selection_key": "home_cover",
+                "line": -0.5,
+                "decimal_odds": 1.8,
+                "model_probability": 0.44,
+                "calibrated_probability": 0.44,
+                "edge": -0.04,
+                "recommendation": "no_value",
+                "raw": {"kind": "learning_observation", "reason": "no_positive_edge"},
+            }
+        )
+        results.append(
+            {
+                "match_id": f"no-value-observation-{index}",
+                "home_team": f"观察主队{index}",
+                "away_team": f"观察客队{index}",
+                "home_score": 0,
+                "away_score": 1,
+            }
+        )
+    for index in range(20):
+        records.append(
+            {
+                "run_id": f"actionable-observation-{index}",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "match_id": f"actionable-observation-{index}",
+                "league": "观察联赛",
+                "home_team": f"候选主队{index}",
+                "away_team": f"候选客队{index}",
+                "market": "asian_handicap",
+                "selection": f"候选主队{index} -0.5",
+                "selection_key": "home_cover",
+                "line": -0.5,
+                "decimal_odds": 1.8,
+                "model_probability": 0.62,
+                "calibrated_probability": 0.62,
+                "edge": 0.06,
+                "recommendation": "immediate_bet",
+                "stake_level": "small",
+                "raw": {"kind": "learning_observation", "reason": "paper_track"},
+            }
+        )
+        results.append(
+            {
+                "match_id": f"actionable-observation-{index}",
+                "home_team": f"候选主队{index}",
+                "away_team": f"候选客队{index}",
+                "home_score": 2,
+                "away_score": 0,
+            }
+        )
+
+    learning_store.save_recommendation_records(records, db_path=db_path)
+    learning_store.settle_recommendations(results, db_path=db_path)
+
+    calibration = learning_store.recompute_calibration(db_path=db_path)
+    broad_market_bucket = next(
+        bucket
+        for bucket in calibration["buckets"]
+        if bucket["market"] == "asian_handicap"
+        and bucket["league_bucket"] == "ALL"
+        and bucket["line_bucket"] == "line:ALL"
+        and bucket["probability_bucket"] == "prob:ALL"
+    )
+    state = learning_store.update_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
+
+    assert broad_market_bucket["sample_count"] == 40
+    assert state["status"] == "live_calibration_active"
+    assert state["active"] is True
+    assert state["sample_count"] == 20
+    assert state["hit_rate"] == 1.0
+    assert state["roi"] == 0.8
+    assert state["min_calibrated_probability"] < 0.58
+    assert state["raw"]["source_bucket"]["raw"]["ignored_observation_count"] == 20
+    assert state["raw"]["source_bucket"]["raw"]["bucket_scope"] == "strategy_actionable_global"

@@ -567,7 +567,7 @@ def test_auto_learning_cycle_records_shadow_predictions_from_all_analyzed_items(
     assert result["shadow_prediction_metrics"]["record_counts"]["open"] == 2
 
 
-def test_auto_learning_cycle_can_sync_leisu_snapshots_before_shortlist(monkeypatch, tmp_path):
+def test_auto_learning_cycle_runs_shortlist_before_slow_leisu_snapshot_sync(monkeypatch, tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
     calls = []
 
@@ -621,14 +621,78 @@ def test_auto_learning_cycle_can_sync_leisu_snapshots_before_shortlist(monkeypat
         )
     )
 
-    assert [item[0] for item in calls[:2]] == ["snapshot_sync", "shortlist"]
-    assert calls[0][1]["window_minutes"] == 180
-    assert calls[0][1]["limit"] == 2
-    assert calls[0][1]["concurrency"] == 1
+    assert [item[0] for item in calls[:2]] == ["shortlist", "snapshot_sync"]
+    assert calls[1][1]["window_minutes"] == 180
+    assert calls[1][1]["limit"] == 2
+    assert calls[1][1]["concurrency"] == 1
     assert result["market_snapshot_sync"]["status"] == "ok"
     assert result["market_snapshot_sync"]["saved_snapshot_count"] == 9
     assert result["market_snapshot_sync"]["probed_match_count"] == 2
     assert sources_module.AUTO_LEARNING_STATE["last_market_snapshot_sync"]["saved_snapshot_count"] == 9
+
+
+def test_auto_learning_cycle_records_observation_when_candidate_is_not_publishable(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+
+    async def fake_shortlist_value_matches(**kwargs):
+        return {
+            "status": "ok",
+            "tool": "shortlist_value_matches",
+            "mode": kwargs["mode"],
+            "target_market": kwargs["target_market"],
+            "total_candidates": 1,
+            "analyzed_count": 1,
+            "not_analyzed_count": 0,
+            "eligible_count": 0,
+            "returned_count": 0,
+            "rejected_count": 1,
+            "funnel_report": {"rejection_reasons": {"multi_bookmaker_snapshot_missing": 1}},
+            "picks": [],
+            "rejected": [
+                {
+                    "reason": "multi_bookmaker_snapshot_missing",
+                    "match": {
+                        "match_id": "observe-1",
+                        "league": "观察联赛",
+                        "home_team": "观察主队",
+                        "away_team": "观察客队",
+                        "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
+                    },
+                    "best_candidate": {
+                        "market": "asian_handicap",
+                        "selection": "观察主队 +0.25",
+                        "selection_key": "home_cover",
+                        "line": 0.25,
+                        "decimal_odds": 1.88,
+                        "model_probability": 0.53,
+                        "market_probability": 0.51,
+                        "edge": 0.02,
+                        "recommendation": "condition_observe",
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
+
+    result = asyncio.run(
+        sources_module.run_auto_learning_cycle(
+            db_path=db_path,
+            auto_settle=False,
+            include_jingcai_parlay=False,
+            include_market_snapshot_sync=False,
+        )
+    )
+
+    assert result["asian_shortlist"]["record_count"] == 0
+    assert result["asian_shortlist"]["learning_observation_record_count"] == 1
+    assert result["asian_shortlist"]["shadow_prediction_record_count"] == 1
+    assert result["asian_shortlist"]["analyzed_count"] == 1
+    assert result["saved_record_count"] == 1
+    records = learning_store.list_recommendation_records(db_path=db_path)
+    assert len(records) == 1
+    assert records[0]["mode"] == "balanced_observation"
+    assert records[0]["recommendation"] == "condition_observe"
 
 
 def test_shortlist_balanced_mode_uses_learned_strategy_thresholds(monkeypatch, tmp_path):
@@ -774,6 +838,14 @@ def test_dashboard_snapshot_separates_picks_observations_settlements_and_strateg
                 "recommendation": "immediate_bet",
                 "stake_level": "small",
                 "risk_flags": ["lineup_unavailable"],
+                "raw": {
+                    "match_context": {
+                        "fixture": {
+                            "home_team_logo_url": "https://assets.example.com/shimizu.png",
+                            "away_team_logo_url": "https://assets.example.com/gamba.png",
+                        }
+                    }
+                },
             },
             {
                 "run_id": "cycle-dashboard",
@@ -843,7 +915,12 @@ def test_dashboard_snapshot_separates_picks_observations_settlements_and_strateg
     assert snapshot["kpis"]["observation_count"] == 1
     assert snapshot["strategy_state"]["market"] == "asian_handicap"
     assert snapshot["asian_picks"][0]["matchup"] == "清水鼓动 vs 大阪钢巴"
+    assert snapshot["asian_picks"][0]["home_team_logo_url"] == "https://assets.example.com/shimizu.png"
+    assert snapshot["asian_picks"][0]["away_team_logo_url"] == "https://assets.example.com/gamba.png"
     assert snapshot["asian_picks"][0]["learned_probability"] == 0.569
+    pick_ledger_row = next(row for row in snapshot["prediction_ledger"] if row["home_team"] == "清水鼓动")
+    assert pick_ledger_row["home_team_logo_url"] == "https://assets.example.com/shimizu.png"
+    assert pick_ledger_row["away_team_logo_url"] == "https://assets.example.com/gamba.png"
     assert snapshot["candidate_filters"][0]["reason"] == "value_edge_below_threshold"
     assert snapshot["recent_settlements"][0]["score"] == "8-0"
     assert snapshot["learning_events"][0]["kind"] in {"settlement", "strategy", "observation"}
@@ -1765,7 +1842,7 @@ def test_dashboard_snapshot_summarizes_open_match_phases(tmp_path):
                 "league": "阶段联赛",
                 "home_team": "未赛主队",
                 "away_team": "未赛客队",
-                "kickoff_utc_plus_8": "2026-05-26T20:00:00+08:00",
+                "kickoff_utc_plus_8": "2026-05-28T20:00:00+08:00",
                 "market": "asian_handicap",
                 "selection": "未赛主队 +0.5",
                 "selection_key": "home_cover",
@@ -1774,6 +1851,44 @@ def test_dashboard_snapshot_summarizes_open_match_phases(tmp_path):
                 "model_probability": 0.55,
                 "recommendation": "condition_observe",
                 "raw": {"match_state": {"phase": "scheduled", "label": "未开赛"}},
+            },
+            {
+                "run_id": "phase-stale-scheduled",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "match_id": "phase-stale-scheduled",
+                "league": "阶段联赛",
+                "home_team": "旧状态主队",
+                "away_team": "旧状态客队",
+                "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
+                "market": "asian_handicap",
+                "selection": "旧状态主队 +0.5",
+                "selection_key": "home_cover",
+                "line": 0.5,
+                "decimal_odds": 1.9,
+                "model_probability": 0.55,
+                "recommendation": "condition_observe",
+                "raw": {"match_state": {"phase": "scheduled", "label": "未开赛", "status": "Fixture"}},
+            },
+            {
+                "run_id": "phase-postponed",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "match_id": "phase-postponed",
+                "league": "阶段联赛",
+                "home_team": "延期主队",
+                "away_team": "延期客队",
+                "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
+                "market": "asian_handicap",
+                "selection": "延期主队 +0.5",
+                "selection_key": "home_cover",
+                "line": 0.5,
+                "decimal_odds": 1.9,
+                "model_probability": 0.55,
+                "recommendation": "condition_observe",
+                "raw": {"match_state": {"phase": "unknown", "label": "", "status": "Postponed"}},
             },
             {
                 "run_id": "phase-final-pending",
@@ -1803,12 +1918,18 @@ def test_dashboard_snapshot_summarizes_open_match_phases(tmp_path):
     assert snapshot["prediction_kpis"]["live_count"] == 1
     assert snapshot["prediction_kpis"]["scheduled_count"] == 1
     assert snapshot["prediction_kpis"]["final_pending_count"] == 1
-    assert snapshot["prediction_kpis"]["result_pending_count"] == 0
+    assert snapshot["prediction_kpis"]["result_pending_count"] == 1
+    assert snapshot["prediction_kpis"]["postponed_count"] == 1
     assert snapshot["prediction_kpis"]["match_phase_counts"] == {
         "final": 1,
         "live": 1,
+        "postponed": 1,
+        "result_pending": 1,
         "scheduled": 1,
     }
+    rows_by_match = {row["home_team"]: row for row in snapshot["prediction_ledger"]}
+    assert rows_by_match["旧状态主队"]["status_label"] == "赛果待确认"
+    assert rows_by_match["延期主队"]["status_label"] == "比赛延期"
     assert snapshot["learning_diagnostics"]["live_count"] == 1
     assert snapshot["learning_diagnostics"]["scheduled_count"] == 1
     assert snapshot["learning_diagnostics"]["final_pending_count"] == 1
@@ -1977,7 +2098,7 @@ def test_dashboard_prediction_ledger_keeps_formal_recommendations_when_observati
     formal = [row for row in ledger if row["matchup"] == "南墨尔本 vs 埃文代尔"]
     assert len(formal) == 1
     assert formal[0]["prediction_type_label"] == "正式推荐"
-    assert formal[0]["status_label"] == "等待赛果"
+    assert formal[0]["status_label"] == "赛果待确认"
     assert snapshot["prediction_kpis"]["recommended_count"] == 1
     assert snapshot["prediction_kpis"]["observation_count"] == 12
 
@@ -3007,6 +3128,103 @@ def test_dashboard_snapshot_exposes_contract_health_for_frontend_sections(tmp_pa
     assert sections["recommendation_gate"]["status"] == "warning"
     assert "继续预测" in sections["recommendation_gate"]["detail"]
     assert all(section["label"] for section in contract["sections"])
+
+
+def test_dashboard_model_governance_reads_legacy_candidate_model_evidence(tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    learning_store.save_recommendation_records(
+        [
+            {
+                "run_id": "cycle-legacy-model-evidence",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "match_id": "legacy-model-evidence-1",
+                "league": "旧样本联赛",
+                "home_team": "旧样本主队",
+                "away_team": "旧样本客队",
+                "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
+                "market": "asian_handicap",
+                "selection": "旧样本主队 +0.5",
+                "selection_key": "home_cover",
+                "line": 0.5,
+                "decimal_odds": 1.9,
+                "model_probability": 0.57,
+                "calibrated_probability": 0.55,
+                "market_probability": 0.526316,
+                "edge": 0.045,
+                "recommendation": "condition_observe",
+                "stake_level": "watch",
+                "raw": {
+                    "kind": "learning_observation",
+                    "best_candidate": {
+                        "market": "asian_handicap",
+                        "selection": "旧样本主队 +0.5",
+                        "selection_key": "home_cover",
+                        "line": 0.5,
+                        "decimal_odds": 1.9,
+                        "model_probability": 0.57,
+                        "market_probability": 0.526316,
+                        "edge": 0.045,
+                        "edge_source": "model_engine",
+                        "probability_source": "MCP Dixon-Coles adjusted scoreline distribution",
+                        "recommendation": "condition_observe",
+                    },
+                },
+            }
+        ],
+        db_path=db_path,
+    )
+
+    snapshot = sources_module.dashboard_snapshot(db_path=db_path, limit=20)
+    governance = snapshot["model_governance"]
+    checks = {item["key"]: item for item in governance["checks"]}
+
+    assert governance["summary"]["record_count"] == 1
+    assert governance["summary"]["model_engine_count"] == 1
+    assert governance["summary"]["model_available_count"] == 1
+    assert governance["summary"]["market_anchor_count"] == 1
+    assert governance["summary"]["historical_rho_count"] == 0
+    assert governance["method_counts"][sources_module.model_engine.MODEL_ENGINE_METHOD] == 1
+    assert governance["rho"]["source_counts"]["not_persisted_legacy_candidate"] == 1
+    assert checks["market_anchoring"]["status"] == "ok"
+    assert checks["dixon_coles_rho"]["status"] == "warning"
+
+
+def test_shortlist_pick_carries_compact_model_engine_evidence():
+    pick = sources_module._shortlist_pick_from_analysis(
+        {
+            "match": {"home_team": "模型主队", "away_team": "模型客队"},
+            "best_candidate": {
+                "market": "asian_handicap",
+                "selection": "模型主队 -0.5",
+                "selection_key": "home_cover",
+                "decimal_odds": 1.9,
+                "model_probability": 0.61,
+                "calibrated_probability": 0.61,
+                "edge": 0.08,
+                "recommendation": "immediate_bet",
+            },
+            "betting_decision_support": {
+                "confidence": 0.61,
+                "model_engine": {
+                    "available": True,
+                    "version": "scoreline-model-v1",
+                    "method": "dixon_coles_market_anchored_grid",
+                    "dixon_coles": {"rho": -0.04, "rho_source": "market_snapshot_grid_fit"},
+                    "fitted_market_targets": {"asian_handicap": True},
+                    "scoreline_distribution": [{"home_goals": 0, "away_goals": 0, "probability": 0.1}],
+                    "model_quality": {"fallback_used": False},
+                },
+            },
+        },
+        mode="balanced",
+    )
+
+    assert pick["model_engine"]["method"] == "dixon_coles_market_anchored_grid"
+    assert pick["model_engine"]["dixon_coles"]["rho"] == -0.04
+    assert pick["model_engine"]["fitted_market_targets"]["asian_handicap"] is True
+    assert "scoreline_distribution" not in pick["model_engine"]
 
 
 def test_dashboard_shadow_predictions_with_snapshots_are_not_marked_as_reanalysis_backlog(tmp_path):

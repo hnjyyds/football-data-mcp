@@ -349,7 +349,7 @@ function kpiCards(snapshot: DashboardSnapshot): KpiCard[] {
     { label: "预测样本", value: String(predictionKpis?.total_count ?? 0), tone: (predictionKpis?.total_count ?? 0) > 0 ? "good" : "caution" },
     { label: "推荐发布", value: String(predictionKpis?.recommended_count ?? kpis.asian_pick_count), tone: (predictionKpis?.recommended_count ?? kpis.asian_pick_count) > 0 ? "good" : "neutral" },
     { label: "观察样本", value: String(predictionKpis?.observation_count ?? kpis.observation_count), tone: "neutral" },
-    { label: "等待回测", value: String(predictionKpis?.open_count ?? kpis.open_records), tone: (predictionKpis?.open_count ?? kpis.open_records) > 0 ? "caution" : "neutral" },
+    { label: "未结算", value: String(predictionKpis?.open_count ?? kpis.open_records), tone: (predictionKpis?.open_count ?? kpis.open_records) > 0 ? "caution" : "neutral" },
     { label: "已回测", value: String(predictionKpis?.settled_count ?? kpis.settled_records), tone: (predictionKpis?.settled_count ?? kpis.settled_records) >= 20 ? "good" : "caution" },
     {
       label: "学习状态",
@@ -363,6 +363,7 @@ function matchPhaseCards(snapshot: DashboardSnapshot): DashboardView["matchPhase
   const kpis = snapshot.prediction_kpis;
   const total = Math.max(0, Number(kpis?.total_count ?? 0));
   const resultPending = Number(kpis?.result_pending_count ?? 0) + Number(kpis?.maybe_live_count ?? 0);
+  const postponed = Number(kpis?.postponed_count ?? 0);
   const phaseRows = [
     {
       key: "live",
@@ -385,6 +386,13 @@ function matchPhaseCards(snapshot: DashboardSnapshot): DashboardView["matchPhase
       caption: "下一轮写入回测",
       tone: Number(kpis?.final_pending_count ?? 0) > 0 ? "caution" as const : "neutral" as const
     },
+    ...(postponed > 0 ? [{
+      key: "postponed",
+      label: "延期/取消",
+      value: postponed,
+      caption: "不再按正常开赛等待",
+      tone: "caution" as const
+    }] : []),
     {
       key: "result_pending",
       label: "赛果待确认",
@@ -596,7 +604,7 @@ function lineText(value: number | null | undefined): string {
 export function predictionStatusLabel(row: PredictionLedgerRow): string {
   if (row.status_label) return row.status_label;
   if (row.settlement_status === "settled") return row.hit ? "命中" : "未命中";
-  if (row.settlement_status === "open") return "等待赛果";
+  if (row.settlement_status === "open") return "赛果待确认";
   if (row.settlement_status === "tracked_only") return "仅跟踪";
   if (row.settlement_status === "unsupported_market") return "不支持结算";
   return row.settlement_status || "未知";
@@ -611,7 +619,7 @@ function predictionRowView(row: PredictionLedgerRow): PredictionLedgerViewRow {
       ? `实时 ${row.score}`
       : row.score_type === "final_pending" && row.score
       ? `待结算 ${row.score}`
-      : row.score || "等待赛果";
+      : row.score || predictionStatusLabel(row);
   return {
     ...row,
     matchup: matchupLabel(row.matchup),
@@ -634,7 +642,7 @@ function predictionScoreText(row: PredictionLedgerRow): string {
   if (row.score_type === "final_pending" && row.score) return `待结算 ${row.score}`;
   if (row.true_result?.score) return row.true_result.score;
   if (row.score) return row.score;
-  return row.status_label || "等待赛果";
+  return row.status_label || "赛果待确认";
 }
 
 function predictionSummary(snapshot: DashboardSnapshot): string {
@@ -656,7 +664,16 @@ function predictionSummary(snapshot: DashboardSnapshot): string {
       `观察 ${kpis.observation_count} 场`,
       `已结算 ${kpis.settled_count} 场`
     ];
-    if (kpis.open_count > 0) parts.push(`等待赛果 ${kpis.open_count} 场`);
+    if (kpis.open_count > 0) {
+      const breakdown = [
+        kpis.scheduled_count ? `未开赛 ${kpis.scheduled_count}` : "",
+        kpis.maybe_live_count ? `可能进行中 ${kpis.maybe_live_count}` : "",
+        kpis.result_pending_count ? `赛果待确认 ${kpis.result_pending_count}` : "",
+        kpis.final_pending_count ? `完场待结算 ${kpis.final_pending_count}` : "",
+        kpis.postponed_count ? `延期/取消 ${kpis.postponed_count}` : ""
+      ].filter(Boolean).join(" / ");
+      parts.push(`未结算 ${kpis.open_count} 场${breakdown ? `（${breakdown}）` : ""}`);
+    }
     if (formalSettled > 0) parts.push(`发布命中 ${formalHit}/${formalSettled}`);
     if (observationSettled > 0) parts.push(`观察命中 ${observationHit}/${observationSettled}`);
     if (formalSettled === 0 && observationSettled === 0) parts.push("暂无可计算命中率");
@@ -808,8 +825,8 @@ function fallbackDecisionAudit(snapshot: DashboardSnapshot): DashboardDecisionAu
       status: settledCount > 0 ? "info" : (kpis?.open_count ?? 0) > 0 ? "warning" : "info",
       title: settledCount > 0 ? "部分样本已结算" : "等待首批赛果",
       detail: settledCount > 0
-        ? `已结算 ${settledCount} 场，等待赛果 ${kpis?.open_count ?? 0} 场。`
-        : `${kpis?.open_count ?? 0} 场仍在等待赛果。`,
+        ? `已结算 ${settledCount} 场，未结算 ${kpis?.open_count ?? 0} 场。`
+        : `${kpis?.open_count ?? 0} 场仍未结算。`,
       open_count: kpis?.open_count ?? 0,
       settled_count: settledCount,
       hit_count: kpis?.hit_count ?? 0,
@@ -1023,7 +1040,7 @@ function learningDiagnosticsView(snapshot: DashboardSnapshot): DashboardView["le
         tone: diagnostics.live_calibration_active ? "good" : diagnostics.backtested_count > 0 ? "neutral" : "caution"
       },
       {
-        label: "等待赛果",
+        label: "未结算",
         value: String(diagnostics.waiting_result_count),
         caption: "赛果写入后自动结算命中和收益",
         tone: diagnostics.waiting_result_count > 0 ? "neutral" : "good"
@@ -1620,7 +1637,7 @@ function predictionQualityView(snapshot: DashboardSnapshot): DashboardView["pred
       detail: "后端尚未返回按原因分组的回测质量，暂时只能查看总命中率和总收益率。",
       metricRows: [
         { label: "预测样本", value: "0", caption: "等待台账", tone: "neutral" },
-        { label: "已回测", value: "0", caption: "等待赛果", tone: "neutral" },
+        { label: "已回测", value: "0", caption: "等待结算", tone: "neutral" },
         { label: "分组数量", value: "0", caption: "等待原因归类", tone: "neutral" },
         { label: "负收益分组", value: "0", caption: "等待回测", tone: "neutral" }
       ],
@@ -1679,7 +1696,7 @@ function predictionQualityView(snapshot: DashboardSnapshot): DashboardView["pred
       {
         label: "已回测",
         value: String(summary.settled_count ?? 0),
-        caption: `${summary.open_count ?? 0} 场等待赛果`,
+        caption: `${summary.open_count ?? 0} 场未结算`,
         tone: (summary.settled_count ?? 0) >= 20 ? "good" : (summary.settled_count ?? 0) > 0 ? "neutral" : "caution"
       },
       {
@@ -1879,6 +1896,8 @@ export function customerCopy(value: string): string {
     .replaceAll("纸面回测", "样本回测")
     .replaceAll("纸面收益", "验证收益")
     .replaceAll("纸面", "观察")
+    .replaceAll("等待赛果", "未结算")
+    .replaceAll("继续观察样本、回测和观察", "继续观察样本和回测")
     .replaceAll("重训", "优化")
     .replaceAll("不推荐也必须落台账", "所有分析样本均会进入台账")
     .replaceAll("不推荐也会回测", "观察样本会回测");
@@ -1936,7 +1955,7 @@ function fallbackProductionReadiness(snapshot: DashboardSnapshot): NonNullable<D
         label: "回测样本",
         status: settled >= 20 ? "ok" : settled > 0 ? "warning" : "blocked",
         title: settled >= 20 ? "回测样本可用" : settled > 0 ? "样本不足" : "尚未回测",
-        detail: `已结算 ${settled} 场，等待赛果 ${open} 场。`,
+        detail: `已结算 ${settled} 场，未结算 ${open} 场。`,
         current: settled,
         target: 20,
         ratio: settled >= 20 ? 1 : settled / 20
@@ -1988,7 +2007,7 @@ function productionReadinessView(snapshot: DashboardSnapshot): DashboardView["pr
       {
         label: "已回测",
         value: String(summary.settled_count ?? 0),
-        caption: `${summary.open_count ?? 0} 场等待赛果`,
+        caption: `${summary.open_count ?? 0} 场未结算`,
         tone: (summary.settled_count ?? 0) >= 20 ? "good" : (summary.settled_count ?? 0) > 0 ? "neutral" : "caution"
       },
       {
@@ -2476,7 +2495,7 @@ function fallbackPredictionAccountability(snapshot: DashboardSnapshot): NonNulla
     headline: total > 0 ? "推荐发布受风控保护" : "等待预测闭环",
     title: total > 0 ? "推荐发布受风控保护" : "等待预测闭环",
     detail: total > 0
-      ? `当前推荐发布 ${formal} 条、观察样本 ${paper} 条；${settled} 条已回测，${open} 条等待赛果。`
+      ? `当前推荐发布 ${formal} 条、观察样本 ${paper} 条；${settled} 条已回测，${open} 条未结算。`
       : "当前尚未形成预测样本，无法回测验证。",
     summary: {
       total_predictions: total,
@@ -2561,7 +2580,7 @@ function predictionAccountabilityView(snapshot: DashboardSnapshot): DashboardVie
         tone: (summary.paper_predictions ?? 0) > 0 ? "caution" : "neutral"
       },
       {
-        label: "等待赛果",
+        label: "未结算",
         value: String(summary.open_predictions ?? 0),
         caption: `${summary.settled_predictions ?? 0} 条已回测`,
         tone: (summary.open_predictions ?? 0) > 0 ? "caution" : "neutral"
@@ -2708,6 +2727,10 @@ function counterSignalView(
     ledgerId: candidate.ledger_id,
     matchup: matchupLabel(candidate.matchup),
     league: candidate.league,
+    homeTeam: candidate.home_team,
+    awayTeam: candidate.away_team,
+    homeTeamLogoUrl: candidate.home_team_logo_url,
+    awayTeamLogoUrl: candidate.away_team_logo_url,
     selection: selectionLabel(candidate.selection, "asian_handicap"),
     signalLabel: candidate.meta_signal_label || "反向校准观察",
     signalReason: candidate.meta_signal_reason || opportunity.counter_signal_rule?.detail || "该候选只用于校准观察。",
@@ -2799,6 +2822,10 @@ function recommendationOpportunityView(snapshot: DashboardSnapshot): DashboardVi
       ledgerId: candidate.ledger_id,
       matchup: matchupLabel(candidate.matchup),
       league: candidate.league,
+      homeTeam: candidate.home_team,
+      awayTeam: candidate.away_team,
+      homeTeamLogoUrl: candidate.home_team_logo_url,
+      awayTeamLogoUrl: candidate.away_team_logo_url,
       selection: selectionLabel(candidate.selection, "asian_handicap"),
       actionLabel: actionLabel(candidate.recommendation),
       blockerLabel: reasonLabel(candidate.primary_blocker),
@@ -3186,35 +3213,35 @@ function dashboardSections(snapshot: DashboardSnapshot): DashboardView["dashboar
     {
       key: "overview",
       label: "概览",
-      description: "发布标准、预测闭环和最近状态",
+      description: "是否在跑、为何未发布、最新结算",
       badge: `${predictionKpis.total_count ?? 0} 预测`,
       tone: productionTone
     },
     {
       key: "production",
       label: "生产",
-      description: "上线门禁、自动学习和阻断项",
+      description: "上一轮扫描、上线门禁和阻断项",
       badge: snapshot.production_readiness?.production_ready ? "可发布" : "未发布",
       tone: productionTone
     },
     {
       key: "model",
       label: "模型",
-      description: "学习质量、回测走势和分桶校准",
+      description: "Brier、rho、回测走势和分桶校准",
       badge: `${effectiveness?.sample_count ?? predictionKpis.settled_count ?? 0} 样本`,
       tone: modelTone
     },
     {
       key: "signals",
       label: "信号",
-      description: "推荐发布、观察信号和候选阻断",
+      description: "推荐、观察台账和候选阻断",
       badge: `${predictionKpis.recommended_count ?? 0} 发布`,
       tone: signalTone
     },
     {
       key: "data",
       label: "数据",
-      description: "赔率快照、赛事情报和学习流水",
+      description: "赔率、赛果、情报和采集健康",
       badge: `${snapshotSummary?.total_snapshot_count ?? 0} 快照`,
       tone: dataTone
     }
