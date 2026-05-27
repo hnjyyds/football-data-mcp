@@ -100,6 +100,26 @@ async def fdo_matches_api(request: Request) -> Response:
     return JSONResponse(result, headers=headers)
 
 
+@mcp.custom_route("/api/db/janitor", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
+async def db_janitor_api(request: Request) -> Response:
+    """
+    DB janitor endpoint.
+    - GET: dry-run preview (always)
+    - POST with ?execute=true: actually execute cleanup
+    """
+    headers = _dashboard_cors_headers()
+    headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+    from football_data_mcp import db_janitor
+    execute = request.method == "POST" and request.query_params.get("execute", "").lower() in {"1", "true", "yes"}
+    dry_run = not execute
+    report = await asyncio.to_thread(db_janitor.run_janitor, dry_run=dry_run)
+    logger.info("db_janitor_api: dry_run=%s deleted=%d marked=%d",
+                dry_run, report["totals"]["deleted"], report["totals"]["marked"])
+    return JSONResponse(report, headers=headers)
+
+
 @mcp.custom_route("/api/profitability/forecast", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def profitability_forecast_api(request: Request) -> Response:
     """Return sample-size / cycle / day estimates for proving model profitability."""
@@ -268,6 +288,27 @@ async def run_and_persist_validation(
         validation_seasons=val,
     )
     return {"validation_result": result, "persisted": persisted}
+
+
+@mcp.tool()
+async def run_db_janitor(dry_run: bool = True) -> dict[str, Any]:
+    """
+    Inspect and (optionally) clean bad data from the learning DB.
+
+    Categories handled:
+    - ORPHANED (no match_id + no kickoff): hard delete
+    - STALE_OPENS (kickoff >48h ago, still 'open'): mark unsettleable
+    - ARCHIVED_UNSETTLEABLE (>30d old): hard delete
+    - ARCHIVED_DUPLICATES (>7d old): hard delete
+    - STALE_SHADOW (>90d old shadow predictions): hard delete
+    - EMPTY_CALIBRATION_BUCKETS (sample_count<=0): hard delete
+
+    Default is dry_run=True so you can preview safely. Set dry_run=False
+    to commit deletions/updates. VACUUM is triggered automatically when
+    >=50 rows are deleted in one run.
+    """
+    from football_data_mcp import db_janitor
+    return await asyncio.to_thread(db_janitor.run_janitor, dry_run=dry_run)
 
 
 @mcp.tool()
