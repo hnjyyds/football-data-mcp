@@ -13162,6 +13162,138 @@ def _dashboard_production_readiness(
     }
 
 
+def _dashboard_profitability_forecast(
+    *,
+    prediction_kpis: dict[str, Any],
+    strategy_state: dict[str, Any],
+    clv_tracking: dict[str, Any],
+) -> dict[str, Any]:
+    """Project how many more bets/days are needed to statistically prove profitability."""
+    from football_data_mcp.profitability_calculator import (
+        EdgeAssumptions,
+        required_bets_bayesian,
+        implied_roi,
+    )
+
+    settled_count = int(prediction_kpis.get("settled_count") or 0)
+    hit_rate = parse_float(prediction_kpis.get("hit_rate")) or 0.55
+    avg_odds = 1.85  # default working assumption
+    if (strategy_state or {}).get("min_decimal_odds") and (strategy_state or {}).get("max_decimal_odds"):
+        avg_odds = (
+            float(strategy_state["min_decimal_odds"]) + float(strategy_state["max_decimal_odds"])
+        ) / 2
+
+    # Estimate settled bets per day based on recent rate
+    settled_per_day = max(1, min(20, int(settled_count / max(7, 1))))  # rough fallback
+
+    # If we have CLV samples, use that as proxy for settlement velocity
+    clv_summary = (clv_tracking or {}).get("summary") or {}
+    if clv_summary.get("sample_count"):
+        # CLV samples roughly track settled count - normalize to per-day rate
+        sample_count = int(clv_summary.get("sample_count") or 0)
+        if sample_count >= 5:
+            # If we have N samples over (recent history), assume span is ~30 days
+            settled_per_day = max(1, min(20, int(sample_count / 30)))
+
+    if settled_count >= 5 and hit_rate > 0:
+        # Use observed rate if we have enough data
+        edge = EdgeAssumptions(
+            true_win_rate=max(0.51, min(0.70, hit_rate)),
+            average_decimal_odds=avg_odds,
+            bets_per_cycle=1,
+            cycles_per_day=settled_per_day,
+        )
+        forecast = required_bets_bayesian(edge)
+        roi_per_bet = implied_roi(edge.true_win_rate, edge.average_decimal_odds)
+        remaining_bets = max(0, forecast.required_bets - settled_count)
+        remaining_days = (
+            round(remaining_bets / settled_per_day, 1) if settled_per_day else None
+        )
+        return {
+            "available": True,
+            "method": "bayesian_beta_binomial_v1",
+            "observed_hit_rate": round(hit_rate, 4),
+            "assumed_avg_odds": round(avg_odds, 3),
+            "implied_roi_per_bet": round(roi_per_bet, 4),
+            "settled_per_day_estimate": settled_per_day,
+            "required_bets_total": forecast.required_bets,
+            "settled_bets_so_far": settled_count,
+            "remaining_bets": remaining_bets,
+            "remaining_days": remaining_days,
+            "confidence_level": forecast.confidence_level,
+            "notes": forecast.notes,
+            "interpretation": (
+                "Already at statistical confidence — pause and validate."
+                if remaining_bets == 0
+                else f"At current rate, ~{int(remaining_days)} days to {int(forecast.confidence_level*100)}% confidence."
+                if remaining_days is not None
+                else "Need more data to estimate timeline."
+            ),
+        }
+    return {
+        "available": False,
+        "reason": "insufficient_settled_samples",
+        "settled_count": settled_count,
+        "min_required": 5,
+        "interpretation": "Need ≥5 settled samples before forecasting timeline.",
+    }
+
+
+def _dashboard_market_breakdown(prediction_ledger: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-market hit rate / ROI / sample-size for the HeatMap visualization."""
+    by_market: dict[str, dict[str, Any]] = {}
+    by_league_market: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for row in prediction_ledger or []:
+        if row.get("settlement_status") != "settled":
+            continue
+        market = str(row.get("market") or "unknown")
+        league = str(row.get("league") or "unknown")
+        hit = 1 if int(row.get("hit") or 0) == 1 else 0
+        profit = parse_float(row.get("profit_units")) or 0.0
+
+        # Per-market
+        m = by_market.setdefault(market, {"hits": 0, "samples": 0, "profit": 0.0})
+        m["hits"] += hit
+        m["samples"] += 1
+        m["profit"] += profit
+
+        # Per league × market
+        key = (league, market)
+        lm = by_league_market.setdefault(key, {"hits": 0, "samples": 0, "profit": 0.0})
+        lm["hits"] += hit
+        lm["samples"] += 1
+        lm["profit"] += profit
+
+    market_rows = [
+        {
+            "market": market,
+            "sample_count": data["samples"],
+            "hit_count": data["hits"],
+            "hit_rate": round(data["hits"] / data["samples"], 4) if data["samples"] else None,
+            "roi": round(data["profit"] / data["samples"], 4) if data["samples"] else None,
+        }
+        for market, data in sorted(by_market.items())
+    ]
+    cell_rows = [
+        {
+            "league": league,
+            "market": market,
+            "sample_count": data["samples"],
+            "hit_rate": round(data["hits"] / data["samples"], 4) if data["samples"] else None,
+            "roi": round(data["profit"] / data["samples"], 4) if data["samples"] else None,
+        }
+        for (league, market), data in sorted(by_league_market.items())
+    ]
+    return {
+        "by_market": market_rows,
+        "heatmap_cells": cell_rows,
+        "total_settled": sum(d["samples"] for d in by_market.values()),
+        "markets": sorted(by_market.keys()),
+        "leagues": sorted(set(league for league, _ in by_league_market.keys())),
+    }
+
+
 def _dashboard_prediction_accountability(
     *,
     prediction_kpis: dict[str, Any],
@@ -15180,6 +15312,12 @@ def dashboard_snapshot(
         recommendation_opportunity=recommendation_opportunity,
         candidate_filters=candidate_filters,
     )
+    profitability_forecast = _dashboard_profitability_forecast(
+        prediction_kpis=prediction_kpis,
+        strategy_state=strategy_state,
+        clv_tracking=clv_tracking,
+    )
+    market_breakdown = _dashboard_market_breakdown(full_prediction_ledger)
     return {
         "status": "ok",
         "tool": "dashboard_snapshot",
@@ -15212,6 +15350,8 @@ def dashboard_snapshot(
         "dashboard_contract": dashboard_contract,
         "production_readiness": production_readiness,
         "prediction_accountability": prediction_accountability,
+        "profitability_forecast": profitability_forecast,
+        "market_breakdown": market_breakdown,
         "buckets": calibration.get("buckets") or [],
         "policy": {
             "read_only": True,
