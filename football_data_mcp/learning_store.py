@@ -733,6 +733,75 @@ def _find_matching_result(record: dict[str, Any], results: list[dict[str, Any]])
     return None
 
 
+def mark_postponed_records(*, db_path: str | None = None) -> dict[str, Any]:
+    """
+    Mark records whose match_state shows postponed/cancelled as 'cancelled_postponed'.
+
+    These matches will never settle (game never happened) — they must be excluded
+    from KPIs and calibration but kept for audit. Unlike 'unsettleable' (data
+    source missing), 'cancelled_postponed' is a positive signal that the event
+    itself didn't happen.
+
+    Detection: match_state.status contains 'postpone'/'cancel'/'suspend'/'abandon'
+    or label contains '延期'/'取消'.
+    """
+    affected = 0
+    shadow_affected = 0
+    leagues_affected: dict[str, int] = {}
+    with _connect(db_path) as conn:
+        ensure_schema(conn)
+        for table in ("recommendation_records", "shadow_prediction_records"):
+            rows = conn.execute(
+                f"SELECT id, league, raw_json FROM {table} WHERE settlement_status = 'open'"
+            ).fetchall()
+            for row in rows:
+                try:
+                    raw = json.loads(row["raw_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                state = (raw or {}).get("match_state") or {}
+                if not isinstance(state, dict):
+                    continue
+                status = str(state.get("status") or "").lower()
+                phase = str(state.get("phase") or "").lower()
+                label = str(state.get("label") or "")
+                is_dead = (
+                    "postpone" in status or "postpone" in phase
+                    or "cancel" in status or "cancel" in phase
+                    or "suspend" in status or "suspend" in phase
+                    or "abandon" in status or "abandon" in phase
+                    or "延期" in label or "取消" in label
+                )
+                if not is_dead:
+                    continue
+                if table == "recommendation_records":
+                    league = str(row["league"] or "unknown")
+                    leagues_affected[league] = leagues_affected.get(league, 0) + 1
+                    affected += 1
+                else:
+                    shadow_affected += 1
+                conn.execute(
+                    f"""
+                    UPDATE {table}
+                    SET settlement_status = 'cancelled_postponed',
+                        settled_at_utc = ?
+                    WHERE id = ?
+                    """,
+                    (now_utc_iso(), row["id"]),
+                )
+        conn.commit()
+    return {
+        "status": "ok",
+        "affected_count": affected,
+        "shadow_affected_count": shadow_affected,
+        "leagues_affected": dict(sorted(leagues_affected.items(), key=lambda kv: -kv[1])),
+        "rule": (
+            "Records whose match_state indicates postponed/cancelled/suspended/abandoned "
+            "are tagged 'cancelled_postponed' — excluded from KPIs and calibration."
+        ),
+    }
+
+
 def mark_unsettleable_stale_records(
     *,
     hours_after_kickoff: int = 48,

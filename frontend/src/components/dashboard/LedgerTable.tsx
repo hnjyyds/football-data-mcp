@@ -186,6 +186,8 @@ export function LedgerTable({
                             </Badge>
                           ) : row.settlement_status === "open" ? (
                             <Badge variant="warning">待结算</Badge>
+                          ) : row.settlement_status === "cancelled_postponed" ? (
+                            <Badge variant="neutral">延期</Badge>
                           ) : row.settlement_status === "unsettleable" ? (
                             <Badge variant="neutral">无源</Badge>
                           ) : (
