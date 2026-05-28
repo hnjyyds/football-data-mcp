@@ -544,8 +544,10 @@ def leisu_odds_access_status(text: str) -> dict[str, Any]:
 # Circuit breaker for Leisu mobile API — stop hammering when token is dead
 _LEISU_CB_CONSECUTIVE_403: int = 0
 _LEISU_CB_OPEN_UNTIL: float = 0.0
+_LEISU_CB_TRIP_COUNT: int = 0  # how many times the breaker has tripped this session
 _LEISU_CB_THRESHOLD: int = 10        # 10 consecutive 403s → trip the breaker
-_LEISU_CB_COOLDOWN_SECONDS: float = 1800.0  # stay disabled for 30 min
+_LEISU_CB_COOLDOWN_BASE_SECONDS: float = 1800.0  # 30 min initial cooldown
+_LEISU_CB_COOLDOWN_MAX_SECONDS: float = 21600.0  # cap at 6 hours
 
 
 def _leisu_mobile_api_enabled() -> bool:
@@ -558,25 +560,36 @@ def _leisu_mobile_api_enabled() -> bool:
 
 
 def _leisu_cb_record_failure() -> None:
-    """Record a 403/auth failure; trip the breaker if threshold exceeded."""
-    global _LEISU_CB_CONSECUTIVE_403, _LEISU_CB_OPEN_UNTIL
+    """Record a 403/auth failure; trip the breaker if threshold exceeded.
+
+    Cooldown doubles each consecutive trip (exponential backoff) capped at 6h,
+    so a persistently dead token doesn't waste resources every 30 min.
+    """
+    global _LEISU_CB_CONSECUTIVE_403, _LEISU_CB_OPEN_UNTIL, _LEISU_CB_TRIP_COUNT
     _LEISU_CB_CONSECUTIVE_403 += 1
-    if _LEISU_CB_CONSECUTIVE_403 >= _LEISU_CB_THRESHOLD:
-        _LEISU_CB_OPEN_UNTIL = time.time() + _LEISU_CB_COOLDOWN_SECONDS
-        # Log once per trip
-        if _LEISU_CB_CONSECUTIVE_403 == _LEISU_CB_THRESHOLD:
-            print(
-                f"[leisu_circuit_breaker] tripped: {_LEISU_CB_CONSECUTIVE_403} 403s; "
-                f"disabling Leisu mobile API for {int(_LEISU_CB_COOLDOWN_SECONDS)}s",
-                flush=True,
-            )
+    if _LEISU_CB_CONSECUTIVE_403 == _LEISU_CB_THRESHOLD:
+        _LEISU_CB_TRIP_COUNT += 1
+        cooldown = min(
+            _LEISU_CB_COOLDOWN_BASE_SECONDS * (2 ** (_LEISU_CB_TRIP_COUNT - 1)),
+            _LEISU_CB_COOLDOWN_MAX_SECONDS,
+        )
+        _LEISU_CB_OPEN_UNTIL = time.time() + cooldown
+        print(
+            f"[leisu_circuit_breaker] trip #{_LEISU_CB_TRIP_COUNT}: "
+            f"{_LEISU_CB_CONSECUTIVE_403} 403s; "
+            f"disabling Leisu mobile API for {int(cooldown)}s "
+            f"({int(cooldown/60)}min)",
+            flush=True,
+        )
 
 
 def _leisu_cb_record_success() -> None:
-    """Reset failure counter on successful call."""
-    global _LEISU_CB_CONSECUTIVE_403, _LEISU_CB_OPEN_UNTIL
+    """Reset failure counter on successful call. Trip count also resets so a
+    recovered token gets fresh credit (no permanent penalty)."""
+    global _LEISU_CB_CONSECUTIVE_403, _LEISU_CB_OPEN_UNTIL, _LEISU_CB_TRIP_COUNT
     _LEISU_CB_CONSECUTIVE_403 = 0
     _LEISU_CB_OPEN_UNTIL = 0.0
+    _LEISU_CB_TRIP_COUNT = 0
 
 
 def _leisu_mobile_detail_company_limit() -> int:
