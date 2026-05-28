@@ -10686,12 +10686,16 @@ def _dashboard_prediction_ledger(
     limit: int = 120,
     strategy_state: dict[str, Any] | None = None,
     probability_governance: dict[str, Any] | None = None,
+    source_records: list[tuple[str, dict[str, Any]]] | None = None,
+    snapshot_coverage: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    source_records = _dashboard_prediction_source_records(db_path=db_path, limit=limit)
-    snapshot_coverage = snapshot_store.market_snapshot_coverage_for_records(
-        [record for _source, record in source_records],
-        db_path=market_db_path,
-    )
+    if source_records is None:
+        source_records = _dashboard_prediction_source_records(db_path=db_path, limit=limit)
+    if snapshot_coverage is None:
+        snapshot_coverage = snapshot_store.market_snapshot_coverage_for_records(
+            [record for _source, record in source_records],
+            db_path=market_db_path,
+        )
     rows = [
         _dashboard_prediction_row(
             record,
@@ -15500,25 +15504,34 @@ def dashboard_snapshot(
             asian_picks.append(record)
     record_counts = calibration.get("record_counts") or {}
     recent_settlements = [_dashboard_settlement_row(record) for record in settled_records[:12]]
+    _ledger_limit = max(bounded_limit, 2000)
+    full_prediction_source_records = _dashboard_prediction_source_records(
+        db_path=db_path,
+        limit=_ledger_limit,
+    )
+    _shared_snapshot_coverage = snapshot_store.market_snapshot_coverage_for_records(
+        [record for _source, record in full_prediction_source_records],
+        db_path=market_db_path,
+    )
     preliminary_prediction_ledger = _dashboard_prediction_ledger(
         db_path=db_path,
         market_db_path=market_db_path,
-        limit=max(bounded_limit, 2000),
+        limit=_ledger_limit,
         strategy_state=strategy_state,
+        source_records=full_prediction_source_records,
+        snapshot_coverage=_shared_snapshot_coverage,
     )
     learning_effectiveness = _dashboard_learning_effectiveness(preliminary_prediction_ledger)
     full_prediction_ledger = _dashboard_prediction_ledger(
         db_path=db_path,
         market_db_path=market_db_path,
-        limit=max(bounded_limit, 2000),
+        limit=_ledger_limit,
         strategy_state=strategy_state,
         probability_governance=learning_effectiveness.get("probability_governance")
         if isinstance(learning_effectiveness.get("probability_governance"), dict)
         else None,
-    )
-    full_prediction_source_records = _dashboard_prediction_source_records(
-        db_path=db_path,
-        limit=max(bounded_limit, 2000),
+        source_records=full_prediction_source_records,
+        snapshot_coverage=_shared_snapshot_coverage,
     )
     prediction_kpis = _dashboard_prediction_kpis(full_prediction_ledger)
     prediction_ledger = _dashboard_display_prediction_ledger(full_prediction_ledger, limit=bounded_limit)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -174,13 +175,21 @@ _TEXT_VARIANTS = str.maketrans(
 )
 
 
+_NORMALIZE_TEAM_TOKEN_RE = re.compile(r"\b(fc|cf|afc|sc|u23|u21)\b")
+_NORMALIZE_TEAM_UNDERSCORE_RE = re.compile(r"_+")
+_NORMALIZE_TEAM_NONWORD_RE = re.compile(r"[^\w]+", flags=re.UNICODE)
+_NORMALIZE_TEAM_WS_RE = re.compile(r"\s+")
+
+
+@functools.lru_cache(maxsize=8192)
 def _normalize_team(value: str) -> str:
-    value = (value or "").translate(_TEXT_VARIANTS)
-    value = (value or "").lower()
-    value = re.sub(r"\b(fc|cf|afc|sc|u23|u21)\b", " ", value)
-    value = re.sub(r"_+", " ", value)
-    value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", value).strip()
+    if not value:
+        return ""
+    value = value.translate(_TEXT_VARIANTS).lower()
+    value = _NORMALIZE_TEAM_TOKEN_RE.sub(" ", value)
+    value = _NORMALIZE_TEAM_UNDERSCORE_RE.sub(" ", value)
+    value = _NORMALIZE_TEAM_NONWORD_RE.sub(" ", value)
+    return _NORMALIZE_TEAM_WS_RE.sub(" ", value).strip()
 
 
 def _team_matches(needle: str, candidate: str) -> bool:
@@ -191,9 +200,9 @@ def _team_matches(needle: str, candidate: str) -> bool:
     return needle_norm == candidate_norm or needle_norm in candidate_norm or candidate_norm in needle_norm
 
 
-def _name_similarity(left: str, right: str) -> float:
-    left_norm = _normalize_team(left)
-    right_norm = _normalize_team(right)
+@functools.lru_cache(maxsize=16384)
+def _name_similarity_cached(left_norm: str, right_norm: str) -> float:
+    """Compute similarity from already-normalized strings. Cache the expensive part."""
     if not left_norm or not right_norm:
         return 0.0
     if left_norm == right_norm or left_norm in right_norm or right_norm in left_norm:
@@ -205,13 +214,32 @@ def _name_similarity(left: str, right: str) -> float:
     return max(sequence_score, overlap_score)
 
 
+def _name_similarity(left: str, right: str) -> float:
+    return _name_similarity_cached(_normalize_team(left), _normalize_team(right))
+
+
 def _snapshot_candidate_score(home_team: str, away_team: str, league: str, item: dict[str, Any]) -> float:
-    home_score = _name_similarity(home_team, str(item.get("home_team") or ""))
-    away_score = _name_similarity(away_team, str(item.get("away_team") or ""))
-    league_score = _name_similarity(league, str(item.get("league") or "")) if league else 0.0
+    # Use pre-normalized fields if present (set by market_snapshot_coverage_for_records hot path).
+    item_home_norm = item.get("_home_norm")
+    if item_home_norm is None:
+        item_home_norm = _normalize_team(str(item.get("home_team") or ""))
+    item_away_norm = item.get("_away_norm")
+    if item_away_norm is None:
+        item_away_norm = _normalize_team(str(item.get("away_team") or ""))
+    item_league_norm = item.get("_league_norm")
+    if item_league_norm is None:
+        item_league_norm = _normalize_team(str(item.get("league") or ""))
+
+    home_norm = _normalize_team(home_team)
+    away_norm = _normalize_team(away_team)
+    league_norm = _normalize_team(league) if league else ""
+
+    home_score = _name_similarity_cached(home_norm, item_home_norm)
+    away_score = _name_similarity_cached(away_norm, item_away_norm)
+    league_score = _name_similarity_cached(league_norm, item_league_norm) if league_norm else 0.0
     if home_score >= 1.0 and away_score >= 1.0:
         return 1.0
-    if not league or league_score < 0.6:
+    if not league_norm or league_score < 0.6:
         return 0.0
     if home_score >= 1.0 and away_score >= 0.45:
         return 0.86 + min(away_score, 0.99) * 0.05 + min(league_score, 0.99) * 0.04
@@ -311,6 +339,11 @@ def market_snapshot_coverage_for_records(
         ).fetchall()
 
     event_coverages = [dict(row) for row in rows]
+    # Pre-normalize fields once so the inner fuzzy loop doesn't re-normalize per record.
+    for _item in event_coverages:
+        _item["_home_norm"] = _normalize_team(str(_item.get("home_team") or ""))
+        _item["_away_norm"] = _normalize_team(str(_item.get("away_team") or ""))
+        _item["_league_norm"] = _normalize_team(str(_item.get("league") or ""))
     coverage: dict[str, dict[str, Any]] = {}
     exact_by_key: dict[str, dict[str, Any]] = {}
     for item in event_coverages:
@@ -346,29 +379,50 @@ def market_snapshot_coverage_for_records(
                 "away_team": item.get("away_team"),
             }
 
+    # Index event_coverages by first character of normalized home name and by token overlap
+    # so we can prune the fuzzy loop. Items with empty home_norm fall into a bucket of their own.
+    by_home_prefix: dict[str, list[dict[str, Any]]] = {}
+    for _item in event_coverages:
+        prefix = (_item.get("_home_norm") or "")[:1]
+        by_home_prefix.setdefault(prefix, []).append(_item)
+
     for record in records:
-        record_key = market_snapshot_match_key(
-            str(record.get("home_team") or ""),
-            str(record.get("away_team") or ""),
-        )
+        record_home = str(record.get("home_team") or "")
+        record_away = str(record.get("away_team") or "")
+        record_league = str(record.get("league") or "")
+        record_key = market_snapshot_match_key(record_home, record_away)
         if record_key == "|" or record_key in coverage:
             continue
         exact = exact_by_key.get(record_key)
         if exact:
             coverage[record_key] = exact
             continue
+        # Skip fuzzy scoring entirely if record has no league signal — _snapshot_candidate_score
+        # returns 0.0 for league_score < 0.6 unless exact home+away match, which exact_by_key already covered.
+        if not record_league:
+            continue
+        home_norm = _normalize_team(record_home)
+        # Search candidates whose home_norm starts with the same first char OR shares the prefix,
+        # plus the empty-prefix bucket (defensive). Falls back to full scan only if record_home empty.
+        if home_norm:
+            candidate_pool: list[dict[str, Any]] = []
+            seen_prefix = set()
+            for prefix_key in (home_norm[:1], ""):
+                if prefix_key in seen_prefix:
+                    continue
+                seen_prefix.add(prefix_key)
+                candidate_pool.extend(by_home_prefix.get(prefix_key, ()))
+        else:
+            candidate_pool = event_coverages
         best_score = 0.0
         best_item: dict[str, Any] | None = None
-        for item in event_coverages:
-            score = _snapshot_candidate_score(
-                str(record.get("home_team") or ""),
-                str(record.get("away_team") or ""),
-                str(record.get("league") or ""),
-                item,
-            )
+        for item in candidate_pool:
+            score = _snapshot_candidate_score(record_home, record_away, record_league, item)
             if score > best_score:
                 best_score = score
                 best_item = item
+                if best_score >= 1.0:
+                    break
         if best_item and best_score >= 0.72:
             coverage[record_key] = {
                 "snapshot_count": int(best_item.get("snapshot_count") or 0),
