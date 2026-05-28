@@ -17,7 +17,12 @@ try:
 except ImportError:
     _SKLEARN_AVAILABLE = False
 
-DEFAULT_LEARNING_DB = "/tmp/football_data_mcp_learning.sqlite3"
+# 默认学习数据库路径放在用户主目录下的 ~/.football_data_mcp/learning.sqlite3，
+# 避免容器/宿主清理 /tmp 时把样本与校准数据丢光。
+# 容器场景请显式设置 FOOTBALL_DATA_LEARNING_DB（docker-compose 已挂载 /data 卷并指向该卷）。
+DEFAULT_LEARNING_DB = os.path.join(
+    os.path.expanduser("~"), ".football_data_mcp", "learning.sqlite3"
+)
 MAX_LEARNING_SAMPLE_MINUTES_TO_KICKOFF = 240  # 4h window matches daemon's 180min scan, with 1h buffer
 ISOTONIC_CALIBRATION_MIN_SAMPLES = 50  # threshold to switch from Bayesian shrinkage to isotonic regression
 MIN_MODEL_CERTAINTY = 0.5  # below this, the xG confidence band is too wide → skip the bet

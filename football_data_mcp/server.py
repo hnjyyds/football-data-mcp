@@ -23,8 +23,26 @@ logging.basicConfig(
 logger = logging.getLogger("football_data_mcp.server")
 
 _server_start_time = time.time()
+# 学习守护线程会写 _last_learning_cycle_time / _error，而 /api/health 在主事件循环里读，
+# 不加锁会导致两者读到一对错位的（时间是新的、错误是旧的，或者反过来）状态。
+_learning_cycle_status_lock = threading.Lock()
 _last_learning_cycle_time: float | None = None
 _last_learning_cycle_error: str | None = None
+
+
+def learning_cycle_status() -> tuple[float | None, str | None]:
+    """以一致快照读取守护循环的最近一次时间与错误，避免读写竞态。"""
+    with _learning_cycle_status_lock:
+        return _last_learning_cycle_time, _last_learning_cycle_error
+
+
+def _record_learning_cycle_status(*, finished_at: float | None, error: str | None) -> None:
+    """统一入口由守护线程写入状态。"""
+    global _last_learning_cycle_time, _last_learning_cycle_error
+    with _learning_cycle_status_lock:
+        if finished_at is not None:
+            _last_learning_cycle_time = finished_at
+        _last_learning_cycle_error = error
 
 
 mcp = FastMCP(
@@ -69,17 +87,19 @@ async def health_api(request: Request) -> Response:
     db_path = learning_db_path()
     db_accessible = os.path.exists(db_path) if db_path else False
     uptime_seconds = int(time.time() - _server_start_time)
+    # 加锁读取，保证时间与错误来自同一次写入。
+    last_cycle_time, last_cycle_error = learning_cycle_status()
     payload = {
         "status": "ok",
         "uptime_seconds": uptime_seconds,
         "db_path": db_path,
         "db_accessible": db_accessible,
         "last_learning_cycle_at": (
-            datetime.fromtimestamp(_last_learning_cycle_time, tz=timezone.utc).isoformat()
-            if _last_learning_cycle_time
+            datetime.fromtimestamp(last_cycle_time, tz=timezone.utc).isoformat()
+            if last_cycle_time
             else None
         ),
-        "last_learning_cycle_error": _last_learning_cycle_error,
+        "last_learning_cycle_error": last_cycle_error,
         "auto_learning_enabled": os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ENABLED", "").strip().lower()
         in {"1", "true", "yes", "on"},
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -965,8 +985,26 @@ async def analyze_single_match(
     )
 
 
+def _shutdown_http_client() -> None:
+    """进程退出时优雅关闭全局 httpx 客户端，避免 Unclosed client 告警和连接泄漏。"""
+    try:
+        asyncio.run(sources.close_client())
+    except RuntimeError:
+        # 已有事件循环在跑（少见），改用直接调度。
+        try:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(sources.close_client())
+            loop.close()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def main() -> None:
     _start_auto_learning_daemon_if_enabled()
+    import atexit
+    atexit.register(_shutdown_http_client)
     transport = os.getenv("FOOTBALL_DATA_MCP_TRANSPORT", "streamable-http")
     if transport not in {"stdio", "sse", "streamable-http"}:
         raise ValueError(f"Unsupported transport: {transport}")
@@ -980,7 +1018,7 @@ def _start_auto_learning_daemon_if_enabled() -> None:
     config = _auto_learning_config_from_env()
 
     def runner() -> None:
-        global _last_learning_cycle_time, _last_learning_cycle_error
+        cycle_error: str | None = None
         try:
             asyncio.run(
                 sources.auto_learning_daemon(
@@ -988,10 +1026,11 @@ def _start_auto_learning_daemon_if_enabled() -> None:
                 )
             )
         except Exception as exc:
-            _last_learning_cycle_error = str(exc)
+            cycle_error = str(exc)
             logger.error("auto_learning_daemon crashed: %s", exc)
         finally:
-            _last_learning_cycle_time = time.time()
+            # 通过统一入口写入，避免与 /api/health 的读取竞态。
+            _record_learning_cycle_status(finished_at=time.time(), error=cycle_error)
 
     thread = threading.Thread(target=runner, name="football-data-auto-learning", daemon=True)
     thread.start()

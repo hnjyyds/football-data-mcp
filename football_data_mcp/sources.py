@@ -72,7 +72,11 @@ LEISU_ODDS_HEADERS = {
 }
 LEISU_MOBILE_API_BASE_URL = "https://api-gateway.leisu.com"
 LEISU_MOBILE_WEBSITE_URL = "https://m.leisu.com"
-LEISU_MOBILE_API_SECRET = "NcFebvke4S9vZJ8sR4QvrVKGAxkmqIo4"
+# Leisu 移动端 API 签名密钥：默认值是公开抓包逆向得到的 Web 端共享 secret，
+# 出于配置集中与可灰度禁用的考虑，统一改成环境变量驱动，便于按需轮换或暂停。
+LEISU_MOBILE_API_SECRET = os.getenv(
+    "LEISU_MOBILE_API_SECRET", "NcFebvke4S9vZJ8sR4QvrVKGAxkmqIo4"
+)
 LEISU_MOBILE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
@@ -302,6 +306,24 @@ async def get_client() -> httpx.AsyncClient:
             },
         )
     return _CLIENT
+
+
+async def close_client() -> None:
+    """关闭模块级 httpx 客户端，释放连接池与底层 socket。
+
+    服务进程长时间运行时如果不显式关闭，socket / TLS 连接会一直挂在事件循环里，
+    Python 退出时会打印 `Unclosed client` 告警，且偶发会出现连接泄漏。
+    """
+    global _CLIENT
+    if _CLIENT is None:
+        return
+    client = _CLIENT
+    _CLIENT = None
+    try:
+        await client.aclose()
+    except Exception:
+        # 关闭异常不应阻塞进程退出，但仍记录便于排查。
+        pass
 
 
 _HTTP_RETRY_ATTEMPTS = 3

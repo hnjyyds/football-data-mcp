@@ -1373,7 +1373,21 @@ function backtestCurveView(snapshot: DashboardSnapshot): DashboardView["backtest
       zeroLineY: 50
     };
   }
-  const summary = curve.summary;
+  // 后端历史版本可能只返回 points 而没有 summary，这里给一个保底空 summary
+  // 防止访问 summary.profit_units 时整个面板因为 undefined 而白屏。
+  const summary = curve.summary ?? {
+    settled_count: 0,
+    hit_count: 0,
+    miss_count: 0,
+    hit_rate: null,
+    profit_units: null,
+    roi: null,
+    max_drawdown_units: null,
+    longest_loss_streak: 0,
+    current_streak_type: "",
+    current_streak_count: 0,
+    rolling_window: 10
+  };
   const points = curve.points || [];
   const cumulativeValues = points
     .map((point) => numeric(point.cumulative_profit))

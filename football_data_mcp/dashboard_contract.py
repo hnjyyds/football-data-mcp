@@ -368,14 +368,39 @@ def normalize_odds_trend_points(raw: Any) -> list[OddsTrendPoint]:
     return out
 
 
+def _empty_backtest_curve_summary() -> dict[str, Any]:
+    # 给前端一个稳定的 summary 结构，避免下游消费者直接读 summary.profit_units 时崩。
+    return {
+        "settled_count": 0,
+        "hit_count": 0,
+        "miss_count": 0,
+        "hit_rate": None,
+        "profit_units": None,
+        "roi": None,
+        "max_drawdown_units": None,
+        "longest_loss_streak": 0,
+        "current_streak_type": "",
+        "current_streak_count": 0,
+        "rolling_window": 10,
+    }
+
+
 def normalize_backtest_curve(raw: Any) -> dict[str, Any]:
-    """Preserve the existing backtest_curve shape, and append canonical
-    ``label``/``roi`` fields onto each point so the chart code can rely on them
-    without falling back to ``x`` / ``index`` / ``y`` aliases.
+    """规范化回测走势对象：
+
+    - 始终返回包含 ``summary`` 与 ``points`` 的 dict，避免前端访问 ``summary.profit_units`` 时白屏；
+    - 每个 point 补齐 ``label`` / ``roi`` 别名字段，方便图表代码直接使用。
     """
     if not isinstance(raw, dict):
-        return {"points": []}
+        return {"summary": _empty_backtest_curve_summary(), "points": []}
     out: dict[str, Any] = dict(raw)
+    raw_summary = raw.get("summary")
+    if isinstance(raw_summary, dict):
+        merged_summary = _empty_backtest_curve_summary()
+        merged_summary.update(raw_summary)
+        out["summary"] = merged_summary
+    else:
+        out["summary"] = _empty_backtest_curve_summary()
     points_raw = raw.get("points")
     if not isinstance(points_raw, list):
         out["points"] = []

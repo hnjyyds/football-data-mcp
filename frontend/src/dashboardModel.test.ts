@@ -3232,4 +3232,25 @@ describe("dashboard model", () => {
     expect(groups[0].rows[0].selectionText).toBe("平局");
     expect(groups[1].rows[0].selectionText).toBe("大球");
   });
+
+  it("renders backtest curve view even when summary is missing", () => {
+    // 历史上线版本可能只返回 backtest_curve.points 而没有 summary，
+    // 此时前端必须给一个空 summary，避免 summary.profit_units 触发白屏。
+    const snapshotWithoutSummary = {
+      ...snapshot,
+      backtest_curve: {
+        // 故意省略 summary，模拟旧后端返回。
+        points: [
+          { label: "1", roi: -0.05 }
+        ]
+      }
+    } as unknown as DashboardSnapshot;
+
+    const view = buildDashboardView(snapshotWithoutSummary);
+
+    const profitMetric = view.backtestCurve.metrics.find((item) => item.label === "累计收益");
+    expect(profitMetric).toBeDefined();
+    expect(profitMetric!.value).toBe("—");
+    expect(profitMetric!.caption).toBe("0 场已结算");
+  });
 });

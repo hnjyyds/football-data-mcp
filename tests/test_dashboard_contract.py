@@ -288,6 +288,48 @@ class TestBacktestCurve:
         assert bc["title"] == "ROI curve"
         assert bc["summary"]["max_drawdown"] == pytest.approx(-0.12)
 
+    def test_missing_summary_is_filled_with_safe_defaults(self):
+        # 历史/旧版本可能只返回 points 而没有 summary，
+        # 此时前端会因为读 summary.profit_units 直接白屏。
+        # 规范化层必须补一个完整 summary，让前端契约稳定。
+        snap = {
+            **_minimal_snapshot(),
+            "backtest_curve": {
+                "points": [{"label": "1", "roi": 0.01}],
+            },
+        }
+        out = normalize_dashboard_snapshot(snap)
+        bc = out["backtest_curve"]
+        assert "summary" in bc, "summary must be present even if upstream omitted it"
+        summary = bc["summary"]
+        assert summary["profit_units"] is None
+        assert summary["settled_count"] == 0
+        assert summary["rolling_window"] == 10
+
+    def test_invalid_backtest_curve_returns_empty_summary_and_points(self):
+        snap = {**_minimal_snapshot(), "backtest_curve": "not-a-dict"}
+        out = normalize_dashboard_snapshot(snap)
+        bc = out["backtest_curve"]
+        assert bc["points"] == []
+        assert bc["summary"]["profit_units"] is None
+
+    def test_partial_summary_merges_with_defaults(self):
+        # 上游可能返回部分字段（如只填了 profit_units），其它键也应被默认值兜底。
+        snap = {
+            **_minimal_snapshot(),
+            "backtest_curve": {
+                "summary": {"profit_units": 1.5, "settled_count": 3},
+                "points": [],
+            },
+        }
+        out = normalize_dashboard_snapshot(snap)
+        summary = out["backtest_curve"]["summary"]
+        assert summary["profit_units"] == pytest.approx(1.5)
+        assert summary["settled_count"] == 3
+        # Defaulted keys remain present
+        assert summary["rolling_window"] == 10
+        assert summary["roi"] is None
+
 
 class TestLineupNormalization:
     def test_record_lineup_provides_named_sides(self):
