@@ -8861,7 +8861,9 @@ async def settle_learning_recommendations(
         )
         match_state_refresh = await _refresh_open_match_states_from_dongqiudi(db_path=db_path)
     all_results = supplied_results + list(fetched.get("results") or []) + list(match_state_refresh.get("results") or [])
-    # Mark stale open records as unsettleable so KPIs reflect reality
+    # 1) Tag postponed/cancelled events first (excludes them from KPIs cleanly)
+    postponed_cleanup = learning_store.mark_postponed_records(db_path=db_path)
+    # 2) Then mark records past kickoff with no score available as unsettleable
     unsettleable = learning_store.mark_unsettleable_stale_records(db_path=db_path)
     settlement = learning_store.settle_recommendations(all_results, db_path=db_path)
     shadow_settlement = learning_store.settle_shadow_predictions(all_results, db_path=db_path)
@@ -8875,6 +8877,7 @@ async def settle_learning_recommendations(
         "supplied_result_count": len(supplied_results),
         "auto_fetch": fetched,
         "match_state_refresh": match_state_refresh,
+        "postponed_cleanup": postponed_cleanup,
         "unsettleable_cleanup": unsettleable,
         "settlement": settlement,
         "shadow_settlement": shadow_settlement,
@@ -9707,8 +9710,14 @@ def _ensure_fdo_index_warm() -> None:
             # Already in async context: schedule and forget
             loop.create_task(build_fdo_team_index())
         except RuntimeError:
-            # No loop running: run sync
-            _aio.run(build_fdo_team_index())
+            # No loop running: spawn a background thread instead of blocking
+            import threading
+            def _run_in_thread():
+                try:
+                    _aio.run(build_fdo_team_index())
+                except Exception:
+                    pass
+            threading.Thread(target=_run_in_thread, daemon=True).start()
     except Exception:
         pass  # silent — enrichment is best-effort
 
@@ -9754,16 +9763,29 @@ async def _refresh_dongqiudi_team_logo_cache() -> dict[str, Any]:
 
 
 def _ensure_dongqiudi_logo_cache_warm() -> None:
-    """Refresh dongqiudi team-logo cache when stale (best-effort, non-blocking)."""
+    """Refresh dongqiudi team-logo cache when stale (best-effort, non-blocking).
+
+    Never blocks the caller — if no event loop is running, schedule a thread
+    so dashboard_snapshot can return immediately. Cache miss is harmless
+    (logo fallback chain has other layers).
+    """
     if time.time() - _DONGQIUDI_LOGO_CACHE_BUILT_AT < _DONGQIUDI_LOGO_CACHE_TTL:
         return
     import asyncio as _aio
+    import threading
     try:
         try:
             loop = _aio.get_running_loop()
             loop.create_task(_refresh_dongqiudi_team_logo_cache())
         except RuntimeError:
-            _aio.run(_refresh_dongqiudi_team_logo_cache())
+            # No running loop: spawn a thread that owns its own loop.
+            # Avoid blocking the synchronous caller (dashboard_snapshot).
+            def _run_in_thread():
+                try:
+                    _aio.run(_refresh_dongqiudi_team_logo_cache())
+                except Exception:
+                    pass
+            threading.Thread(target=_run_in_thread, daemon=True).start()
     except Exception:
         pass
 

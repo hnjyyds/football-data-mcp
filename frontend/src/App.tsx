@@ -992,7 +992,11 @@ export function App() {
     async function load(isInitial = false) {
       if (!isInitial) setRefreshing(true);
       try {
-        const response = await fetch(API_URL, { cache: "no-store" });
+        // Snapshot can take ~10s when DB is hot; allow 30s before giving up.
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        const response = await fetch(API_URL, { cache: "no-store", signal: controller.signal });
+        clearTimeout(timeout);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json() as DashboardSnapshot;
         if (!cancelled) {
