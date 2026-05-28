@@ -15,9 +15,59 @@ dependencies = [
     "uvicorn>=0.30.0",
 ]
 
+[dependency-groups]
+dev = [
+    "mypy>=1.10.0",
+    "pyright>=1.1.390",
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+]
+
 [project.scripts]
 football-data-mcp = "football_data_mcp.server:main"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "frontend/test_server.py"]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [
+    "frontend/dist",
+    "frontend/node_modules",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+follow_imports = "skip"
+files = [
+    "football_data_mcp/api_contracts.py",
+    "football_data_mcp/api_http.py",
+    "football_data_mcp/config.py",
+    "football_data_mcp/dashboard_service.py",
+    "football_data_mcp/server.py",
+    "football_data_mcp/learning_store.py",
+    "football_data_mcp/snapshot_store.py",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+include = [
+    "football_data_mcp/api_contracts.py",
+    "football_data_mcp/api_http.py",
+    "football_data_mcp/config.py",
+    "football_data_mcp/dashboard_service.py",
+    "football_data_mcp/server.py",
+    "football_data_mcp/learning_store.py",
+    "football_data_mcp/snapshot_store.py",
+]
+exclude = [
+    "frontend/dist",
+    "frontend/node_modules",
+]
+typeCheckingMode = "basic"

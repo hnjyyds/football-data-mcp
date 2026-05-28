@@ -324,8 +324,10 @@ async def fetch_football_data_org_fixtures(
         return {**cached, "from_cache": True}
 
     params: dict[str, Any] = {}
-    if date_from: params["dateFrom"] = date_from
-    if date_to: params["dateTo"] = date_to
+    if date_from:
+        params["dateFrom"] = date_from
+    if date_to:
+        params["dateTo"] = date_to
     url = f"{FOOTBALL_DATA_ORG_BASE}/competitions/{competition_code}/matches"
 
     owns_client = client is None
@@ -397,8 +399,10 @@ async def fetch_all_upcoming_matches(
         return {**cached, "from_cache": True}
 
     params: dict[str, Any] = {}
-    if date_from: params["dateFrom"] = date_from
-    if date_to: params["dateTo"] = date_to
+    if date_from:
+        params["dateFrom"] = date_from
+    if date_to:
+        params["dateTo"] = date_to
     url = f"{FOOTBALL_DATA_ORG_BASE}/matches"
 
     owns_client = client is None

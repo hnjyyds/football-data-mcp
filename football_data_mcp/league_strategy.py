@@ -14,7 +14,6 @@ This module:
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
 import sqlite3
@@ -127,9 +126,9 @@ def compute_league_breakdown(*, db_path: str | None = None) -> dict[str, Any]:
 
     return {
         "by_league": league_summaries,
-        "winning_leagues": sorted(l for l, c in classifications.items() if c == "winning"),
-        "losing_leagues": sorted(l for l, c in classifications.items() if c == "losing"),
-        "uncertain_leagues": sorted(l for l, c in classifications.items() if c == "uncertain"),
+        "winning_leagues": sorted(league for league, classification in classifications.items() if classification == "winning"),
+        "losing_leagues": sorted(league for league, classification in classifications.items() if classification == "losing"),
+        "uncertain_leagues": sorted(league for league, classification in classifications.items() if classification == "uncertain"),
         "min_samples_required": MIN_LEAGUE_SAMPLES,
         "classification_method": "log_loss_diff_lt_-0.005_and_roi_positive",
     }

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
@@ -14,6 +14,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from football_data_mcp import backtest, sources
+from football_data_mcp.api_contracts import DashboardSummaryResponse, HealthResponse, success_json
+from football_data_mcp.api_http import (
+    admin_token_error as _admin_token_error,
+    dashboard_cors_headers as _dashboard_cors_headers,
+    json_error as _json_error,
+)
+from football_data_mcp.config import env_bool, env_csv, load_auto_learning_settings, load_server_settings
+from football_data_mcp.dashboard_service import build_dashboard_summary as _build_dashboard_summary
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,6 +29,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )
 logger = logging.getLogger("football_data_mcp.server")
+_settings = load_server_settings()
 
 _server_start_time = time.time()
 # 学习守护线程会写 _last_learning_cycle_time / _error，而 /api/health 在主事件循环里读，
@@ -60,32 +69,22 @@ mcp = FastMCP(
         "When lineup data is present, use match_context.lineup.lineup_analysis only; do not infer from raw formation codes. "
         "Leisu schedule is supplemental Chinese fixture corroboration; Leisu odds become usable only after explicit odds parsing and quality-gated snapshot sync."
     ),
-    host=os.getenv("FOOTBALL_DATA_MCP_HOST", "127.0.0.1"),
-    port=int(os.getenv("FOOTBALL_DATA_MCP_PORT", "8910")),
+    host=_settings.host,
+    port=_settings.port,
     stateless_http=True,
 )
-
-
-def _dashboard_cors_headers() -> dict[str, str]:
-    return {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Cache-Control": "no-store",
-    }
 
 
 @mcp.custom_route("/api/health", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def health_api(request: Request) -> Response:
     """Lightweight health check endpoint for monitoring and Docker HEALTHCHECK."""
-    headers = _dashboard_cors_headers()
+    headers = _dashboard_cors_headers(request)
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
     from football_data_mcp.learning_store import learning_db_path
-    import os
 
     db_path = learning_db_path()
-    db_accessible = os.path.exists(db_path) if db_path else False
+    db_accessible = Path(db_path).exists() if db_path else False
     uptime_seconds = int(time.time() - _server_start_time)
     # 加锁读取，保证时间与错误来自同一次写入。
     last_cycle_time, last_cycle_error = learning_cycle_status()
@@ -100,17 +99,16 @@ async def health_api(request: Request) -> Response:
             else None
         ),
         "last_learning_cycle_error": last_cycle_error,
-        "auto_learning_enabled": os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ENABLED", "").strip().lower()
-        in {"1", "true", "yes", "on"},
+        "auto_learning_enabled": env_bool("FOOTBALL_DATA_AUTO_LEARNING_ENABLED", False),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
     }
-    return JSONResponse(payload, headers=headers)
+    return success_json(HealthResponse(**payload), headers=headers)
 
 
 @mcp.custom_route("/api/fdo/matches", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def fdo_matches_api(request: Request) -> Response:
     """Direct read-only endpoint for football-data.org upcoming matches."""
-    headers = _dashboard_cors_headers()
+    headers = _dashboard_cors_headers(request)
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
     from football_data_mcp.data_sources_registry import fetch_all_upcoming_matches
@@ -127,12 +125,15 @@ async def db_janitor_api(request: Request) -> Response:
     - GET: dry-run preview (always)
     - POST with ?execute=true: actually execute cleanup
     """
-    headers = _dashboard_cors_headers()
-    headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    headers = _dashboard_cors_headers(request, allow_methods="GET, POST, OPTIONS")
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
     from football_data_mcp import db_janitor
     execute = request.method == "POST" and request.query_params.get("execute", "").lower() in {"1", "true", "yes"}
+    if execute:
+        token_error = _admin_token_error(request, headers)
+        if token_error:
+            return token_error
     dry_run = not execute
     report = await asyncio.to_thread(db_janitor.run_janitor, dry_run=dry_run)
     logger.info("db_janitor_api: dry_run=%s deleted=%d marked=%d",
@@ -143,7 +144,7 @@ async def db_janitor_api(request: Request) -> Response:
 @mcp.custom_route("/api/profitability/forecast", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def profitability_forecast_api(request: Request) -> Response:
     """Return sample-size / cycle / day estimates for proving model profitability."""
-    headers = _dashboard_cors_headers()
+    headers = _dashboard_cors_headers(request)
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
     from football_data_mcp import profitability_calculator
@@ -154,7 +155,7 @@ async def profitability_forecast_api(request: Request) -> Response:
 @mcp.custom_route("/api/sources/probe", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def sources_probe_api(request: Request) -> Response:
     """Probe all registered data sources concurrently and return their health."""
-    headers = _dashboard_cors_headers()
+    headers = _dashboard_cors_headers(request)
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
     from football_data_mcp import data_sources_registry
@@ -168,46 +169,28 @@ async def sources_probe_api(request: Request) -> Response:
 @mcp.custom_route("/api/dashboard/summary", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def dashboard_summary_api(request: Request) -> Response:
     """Lightweight KPI summary for fast initial page load (< 1KB)."""
-    headers = _dashboard_cors_headers()
+    headers = _dashboard_cors_headers(request)
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
 
-    def _build_summary() -> dict[str, Any]:
-        try:
-            snapshot = sources.dashboard_snapshot()
-            kpis = snapshot.get("kpis") or {}
-            prediction_kpis = snapshot.get("prediction_kpis") or {}
-            strategy_state = snapshot.get("strategy_state") or {}
-            return {
-                "status": "ok",
-                "generated_at_utc": snapshot.get("generated_at_utc"),
-                "kpis": {
-                    "open_records": kpis.get("open_records"),
-                    "settled_records": kpis.get("settled_records"),
-                    "asian_pick_count": kpis.get("asian_pick_count"),
-                    "live_calibration_active": kpis.get("live_calibration_active"),
-                },
-                "prediction_kpis": {
-                    "hit_rate": prediction_kpis.get("hit_rate"),
-                    "roi": prediction_kpis.get("roi"),
-                    "settled_count": prediction_kpis.get("settled_count"),
-                    "recommended_count": prediction_kpis.get("recommended_count"),
-                },
-                "strategy_status": strategy_state.get("status"),
-                "strategy_sample_count": strategy_state.get("sample_count"),
-            }
-        except Exception as exc:
-            logger.error("dashboard_summary error: %s", exc)
-            return {"status": "error", "error": str(exc)}
-
-    summary = await asyncio.to_thread(_build_summary)
-    return JSONResponse(summary, headers=headers)
+    try:
+        summary = await asyncio.to_thread(_build_dashboard_summary)
+    except Exception as exc:
+        logger.error("dashboard_summary error: %s", exc)
+        return _json_error(
+            code="dashboard_summary_failed",
+            message="Dashboard summary could not be generated.",
+            status_code=500,
+            headers=headers,
+            details={"reason": str(exc)},
+        )
+    return success_json(DashboardSummaryResponse(**summary), headers=headers)
 
 
 @mcp.custom_route("/api/dashboard", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def dashboard_api(request: Request) -> Response:
     """Read-only JSON snapshot for the local dashboard frontend."""
-    headers = _dashboard_cors_headers()
+    headers = _dashboard_cors_headers(request)
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
     t0 = time.time()
@@ -219,25 +202,39 @@ async def dashboard_api(request: Request) -> Response:
 @mcp.custom_route("/api/dashboard/record/{record_id}", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def dashboard_record_api(request: Request) -> Response:
     """Read-only JSON detail for one persisted dashboard recommendation."""
-    headers = _dashboard_cors_headers()
+    headers = _dashboard_cors_headers(request)
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
     record_id = unquote(request.path_params.get("record_id", ""))
     detail = await asyncio.to_thread(sources.dashboard_record_detail, record_id)
-    status_code = 404 if detail.get("status") == "not_found" else 200
-    return JSONResponse(detail, status_code=status_code, headers=headers)
+    if detail.get("status") == "not_found":
+        return _json_error(
+            code="dashboard_record_not_found",
+            message="Dashboard recommendation record was not found.",
+            status_code=404,
+            headers=headers,
+            details={"record_id": record_id},
+        )
+    return JSONResponse(detail, headers=headers)
 
 
 @mcp.custom_route("/api/dashboard/match/{ledger_id}", methods=["GET", "OPTIONS"], include_in_schema=False)
 async def dashboard_match_api(request: Request) -> Response:
     """Read-only JSON detail for one persisted dashboard prediction sample."""
-    headers = _dashboard_cors_headers()
+    headers = _dashboard_cors_headers(request)
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=headers)
     ledger_id = unquote(request.path_params.get("ledger_id", ""))
     detail = await asyncio.to_thread(sources.dashboard_match_detail, ledger_id)
-    status_code = 404 if detail.get("status") == "not_found" else 200
-    return JSONResponse(detail, status_code=status_code, headers=headers)
+    if detail.get("status") == "not_found":
+        return _json_error(
+            code="dashboard_match_not_found",
+            message="Dashboard prediction sample was not found.",
+            status_code=404,
+            headers=headers,
+            details={"ledger_id": ledger_id},
+        )
+    return JSONResponse(detail, headers=headers)
 
 
 @mcp.tool()
@@ -289,8 +286,7 @@ async def run_and_persist_validation(
     val = validation_seasons or ["2425"]
 
     try:
-        result = await asyncio.to_thread(
-            backtest.run_holdout_validation,
+        result = await backtest.run_holdout_validation(
             divisions=divs,
             training_seasons=train,
             validation_seasons=val,
@@ -1005,15 +1001,11 @@ def main() -> None:
     _start_auto_learning_daemon_if_enabled()
     import atexit
     atexit.register(_shutdown_http_client)
-    transport = os.getenv("FOOTBALL_DATA_MCP_TRANSPORT", "streamable-http")
-    if transport not in {"stdio", "sse", "streamable-http"}:
-        raise ValueError(f"Unsupported transport: {transport}")
-    mcp.run(transport=transport)
+    mcp.run(transport=load_server_settings().transport)
 
 
 def _start_auto_learning_daemon_if_enabled() -> None:
-    enabled = os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ENABLED", "").strip().lower()
-    if enabled not in {"1", "true", "yes", "on"}:
+    if not env_bool("FOOTBALL_DATA_AUTO_LEARNING_ENABLED", False):
         return
     config = _auto_learning_config_from_env()
 
@@ -1037,49 +1029,15 @@ def _start_auto_learning_daemon_if_enabled() -> None:
 
 
 def _auto_learning_config_from_env() -> dict[str, Any]:
-    def env_bool(name: str, default: bool) -> bool:
-        raw = os.getenv(name, "true" if default else "false").strip().lower()
-        return raw in {"1", "true", "yes", "on"}
-
-    return {
-        "interval_seconds": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_INTERVAL_SECONDS", "120") or "120"),
-        "top_n": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_TOP_N", "12") or "12"),
-        "limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_LIMIT", "80") or "80"),
-        "timezone_name": os.getenv("FOOTBALL_DATA_AUTO_LEARNING_TIMEZONE", "Asia/Shanghai"),
-        # 180-min window: wider scan = more matches captured per cycle = faster
-        # sample accumulation. Each cycle still dedups by record_key so we
-        # won't double-write the same match.
-        "asian_window_minutes": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES", "180") or "180"),
-        "parlay_window_minutes": int(
-            os.getenv("FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES", "180") or "180"
-        ),
-        "learning_observation_limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_OBSERVATION_LIMIT", "30") or "30"),
-        "analysis_candidate_limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CANDIDATE_LIMIT", "80") or "80"),
-        "analysis_concurrency": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY", "10") or "10"),
-        "shadow_prediction_limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_SHADOW_PREDICTION_LIMIT", "100") or "100"),
-        "include_market_snapshot_sync": env_bool("FOOTBALL_DATA_AUTO_SYNC_LEISU_ODDS", True),
-        "market_snapshot_window_minutes": int(
-            os.getenv("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES", "1440") or "1440"
-        ),
-        "market_snapshot_limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_LIMIT", "80") or "80"),
-        "market_snapshot_concurrency": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_CONCURRENCY", "4") or "4"),
-        "market_snapshot_require_quality_gate": env_bool("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRE_QUALITY_GATE", True),
-        "include_snapshot_reanalysis": env_bool("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REANALYSIS", True),
-        "snapshot_reanalysis_limit": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_REANALYSIS_LIMIT", "20") or "20"),
-        "snapshot_reanalysis_concurrency": int(os.getenv("FOOTBALL_DATA_AUTO_LEARNING_REANALYSIS_CONCURRENCY", "4") or "4"),
-        # Settlement-coverage allowlist (default ON to prevent unsettleable accumulation)
-        "enforce_settlement_coverage": env_bool("FOOTBALL_DATA_AUTO_ENFORCE_SETTLEMENT_COVERAGE", True),
-        "league_allowlist": _parse_league_allowlist_env(),
-    }
+    return load_auto_learning_settings().as_dict(league_allowlist=_parse_league_allowlist_env())
 
 
 def _parse_league_allowlist_env() -> list[str] | None:
     """Custom allowlist via FOOTBALL_DATA_LEAGUE_ALLOWLIST env (comma-separated)."""
-    raw = os.getenv("FOOTBALL_DATA_LEAGUE_ALLOWLIST", "").strip()
-    if not raw:
+    leagues = env_csv("FOOTBALL_DATA_LEAGUE_ALLOWLIST")
+    if not leagues:
         return None
-    leagues = [item.strip() for item in raw.split(",") if item.strip()]
-    return leagues if leagues else None
+    return leagues
 
 
 if __name__ == "__main__":

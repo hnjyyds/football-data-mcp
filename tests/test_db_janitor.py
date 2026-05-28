@@ -1,11 +1,8 @@
 """Unit tests for db_janitor: bad data detection + cleanup."""
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 from football_data_mcp import db_janitor, learning_store
 
@@ -215,6 +212,7 @@ def test_janitor_idempotent(tmp_path):
     first = db_janitor.run_janitor(db_path=db_path, dry_run=False)
     second = db_janitor.run_janitor(db_path=db_path, dry_run=False)
 
+    assert first["totals"]["deleted"] > 0
     assert second["totals"]["deleted"] == 0
     assert second["totals"]["marked"] == 0
 

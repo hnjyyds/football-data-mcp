@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from hashlib import sha256
 from statistics import median
-from typing import Any
+from typing import Any, Iterable
 
 
 DEFAULT_SNAPSHOT_DB = "/tmp/football_data_mcp_snapshots.sqlite3"
@@ -245,6 +245,8 @@ def _snapshot_candidate_score(home_team: str, away_team: str, league: str, item:
         return 0.86 + min(away_score, 0.99) * 0.05 + min(league_score, 0.99) * 0.04
     if away_score >= 1.0 and home_score >= 0.45:
         return 0.86 + min(home_score, 0.99) * 0.05 + min(league_score, 0.99) * 0.04
+    if league_score >= 1.0 and home_score >= 0.45 and away_score >= 0.45:
+        return 0.72 + min(home_score + away_score + league_score, 2.97) * 0.05
     if home_score >= 0.65 and away_score >= 0.65:
         return 0.72 + min(home_score + away_score + league_score, 2.97) * 0.05
     return 0.0
@@ -379,12 +381,15 @@ def market_snapshot_coverage_for_records(
                 "away_team": item.get("away_team"),
             }
 
-    # Index event_coverages by first character of normalized home name and by token overlap
-    # so we can prune the fuzzy loop. Items with empty home_norm fall into a bucket of their own.
+    # Index event_coverages by normalized team signals so the fuzzy loop stays bounded while
+    # still catching common data-source aliases where the home team spelling starts differently.
     by_home_prefix: dict[str, list[dict[str, Any]]] = {}
+    by_away_norm: dict[str, list[dict[str, Any]]] = {}
     for _item in event_coverages:
         prefix = (_item.get("_home_norm") or "")[:1]
         by_home_prefix.setdefault(prefix, []).append(_item)
+        away_norm = str(_item.get("_away_norm") or "")
+        by_away_norm.setdefault(away_norm, []).append(_item)
 
     for record in records:
         record_home = str(record.get("home_team") or "")
@@ -407,11 +412,30 @@ def market_snapshot_coverage_for_records(
         if home_norm:
             candidate_pool: list[dict[str, Any]] = []
             seen_prefix = set()
+            seen_candidate_keys = set()
+
+            def _add_candidates(items: Iterable[dict[str, Any]]) -> None:
+                for candidate in items:
+                    candidate_key = (
+                        candidate.get("provider"),
+                        candidate.get("source_key"),
+                        candidate.get("event_id"),
+                        candidate.get("home_team"),
+                        candidate.get("away_team"),
+                    )
+                    if candidate_key in seen_candidate_keys:
+                        continue
+                    seen_candidate_keys.add(candidate_key)
+                    candidate_pool.append(candidate)
+
             for prefix_key in (home_norm[:1], ""):
                 if prefix_key in seen_prefix:
                     continue
                 seen_prefix.add(prefix_key)
-                candidate_pool.extend(by_home_prefix.get(prefix_key, ()))
+                _add_candidates(by_home_prefix.get(prefix_key, ()))
+            away_norm = _normalize_team(record_away)
+            if away_norm:
+                _add_candidates(by_away_norm.get(away_norm, ()))
         else:
             candidate_pool = event_coverages
         best_score = 0.0
@@ -1110,8 +1134,12 @@ def closing_line_value_for_records(
             }
         )
 
-    available = [item["clv"] for item in tracked if (item.get("clv") or {}).get("status") == "available"]
-    returns = [float(item["clv_return"]) for item in available if item.get("clv_return") is not None]
+    available: list[dict[str, Any]] = []
+    for item in tracked:
+        item_clv = item.get("clv")
+        if isinstance(item_clv, dict) and item_clv.get("status") == "available":
+            available.append(item_clv)
+    returns = [float(item_clv["clv_return"]) for item_clv in available if item_clv.get("clv_return") is not None]
     positive_count = sum(1 for value in returns if value > 0)
     return {
         "status": "ok" if tracked else "empty",

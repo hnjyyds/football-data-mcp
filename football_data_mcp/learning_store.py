@@ -8,13 +8,19 @@ import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
+    from sklearn.isotonic import IsotonicRegression
 
 try:
     import numpy as np
     from sklearn.isotonic import IsotonicRegression
     _SKLEARN_AVAILABLE = True
 except ImportError:
+    np = None  # type: ignore[assignment]
+    IsotonicRegression = None  # type: ignore[assignment]
     _SKLEARN_AVAILABLE = False
 
 # 默认学习数据库路径放在用户主目录下的 ~/.football_data_mcp/learning.sqlite3，
@@ -23,16 +29,13 @@ except ImportError:
 DEFAULT_LEARNING_DB = os.path.join(
     os.path.expanduser("~"), ".football_data_mcp", "learning.sqlite3"
 )
-MAX_LEARNING_SAMPLE_MINUTES_TO_KICKOFF = 240  # 4h window matches daemon's 180min scan, with 1h buffer
+MAX_LEARNING_SAMPLE_MINUTES_TO_KICKOFF = 10
 ISOTONIC_CALIBRATION_MIN_SAMPLES = 50  # threshold to switch from Bayesian shrinkage to isotonic regression
 MIN_MODEL_CERTAINTY = 0.5  # below this, the xG confidence band is too wide → skip the bet
 DEFAULT_BALANCED_STRATEGY = {
     "min_live_sample_count": 20,
     "prior_strength": 20.0,
-    # Tightened defaults: pursue low-variance bets to compress required sample size
-    # See profitability_calculator: a 60% win rate at 1.7-1.85 odds reaches statistical
-    # significance ~3× faster than a 52% rate at 2.0 odds.
-    "min_calibrated_probability": 0.60,   # was 0.58 → lift to 0.60 for tighter variance
+    "min_calibrated_probability": 0.58,
     "min_decimal_odds": 1.55,             # was 1.65 → allow slightly tighter favorites
     "max_decimal_odds": 2.00,             # was 2.05 → cap at break-even+5%
     "min_value_edge": 0.02,
@@ -682,8 +685,10 @@ def _kickoff_close_enough(record: dict[str, Any], result: dict[str, Any]) -> boo
 
 
 def _learning_minutes_to_kickoff(item: dict[str, Any], *, default_as_of: Any = None) -> float | None:
-    match = item.get("match") if isinstance(item.get("match"), dict) else {}
-    time_window = match.get("time_window") if isinstance(match.get("time_window"), dict) else {}
+    raw_match = item.get("match")
+    match: dict[str, Any] = raw_match if isinstance(raw_match, dict) else {}
+    raw_time_window = match.get("time_window")
+    time_window: dict[str, Any] = raw_time_window if isinstance(raw_time_window, dict) else {}
     if not time_window and isinstance(item.get("time_window"), dict):
         time_window = item.get("time_window") or {}
     as_of = _parse_iso_datetime(time_window.get("as_of") or item.get("created_at_utc") or default_as_of)
@@ -1232,8 +1237,7 @@ def settle_shadow_predictions(results: list[dict[str, Any]], *, db_path: str | N
 def _shadow_metric_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     total_count = len(records)
     settled = [record for record in records if record.get("settlement_status") == "settled"]
-    profits = [parse_float(record.get("profit_units")) for record in settled]
-    profits = [profit for profit in profits if profit is not None]
+    profits: list[float] = [profit for profit in (parse_float(record.get("profit_units")) for record in settled) if profit is not None]
     hit_count = sum(int(record.get("hit") or 0) for record in settled)
     return {
         "total_count": total_count,
@@ -1330,7 +1334,12 @@ def _isotonic_calibrated_probability(
     query_probability: float,
 ) -> float | None:
     """Fit isotonic regression on (model_prob → hit) pairs and evaluate at query_probability."""
-    if not _SKLEARN_AVAILABLE or len(model_probabilities) < ISOTONIC_CALIBRATION_MIN_SAMPLES:
+    if (
+        not _SKLEARN_AVAILABLE
+        or np is None
+        or IsotonicRegression is None
+        or len(model_probabilities) < ISOTONIC_CALIBRATION_MIN_SAMPLES
+    ):
         return None
     try:
         X = np.array(model_probabilities, dtype=np.float64)
@@ -1383,10 +1392,16 @@ def recompute_calibration(*, db_path: str | None = None) -> dict[str, Any]:
         for key, records in sorted(grouped.items()):
             market, league_bucket, line_bucket, odds_bucket, probability_bucket = key
             sample_count = len(records)
-            # Skip noisy small buckets unless they're the broad "ALL" market-wide bucket
-            # (we always want the market-global fallback even with few samples)
-            is_broad = (league_bucket == "ALL" and line_bucket == "line:ALL"
-                        and odds_bucket == "odds:ALL" and probability_bucket == "prob:ALL")
+            # 小样本精确桶噪音很大，但宽回退桶要保留：dashboard 和策略层需要知道
+            # “同盘口/全市场”兜底样本是否存在，哪怕样本暂时不足以作为精确校准。
+            is_broad = (
+                league_bucket == "ALL"
+                and (
+                    line_bucket == "line:ALL"
+                    or odds_bucket == "odds:ALL"
+                    or probability_bucket == "prob:ALL"
+                )
+            )
             if sample_count < CALIBRATION_BUCKET_MIN_SAMPLES and not is_broad:
                 skipped_small += 1
                 continue

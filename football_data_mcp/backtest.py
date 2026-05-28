@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from datetime import datetime
 from typing import Any
 
 from football_data_mcp import model_engine, rating, sources

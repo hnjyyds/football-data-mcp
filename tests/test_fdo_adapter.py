@@ -1,8 +1,6 @@
 """Unit tests for football-data.org adapter — covers normalization and caching."""
 from __future__ import annotations
 
-import time
-
 from football_data_mcp import data_sources_registry as fdo
 
 

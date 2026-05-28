@@ -4164,7 +4164,6 @@ def _apply_home_delta(probabilities: dict[str, float], delta: float) -> dict[str
 def _asian_model_cover_probabilities(line: float, model_1x2: dict[str, float]) -> dict[str, float]:
     home = model_1x2.get("home") or 0
     draw = model_1x2.get("draw") or 0
-    away = model_1x2.get("away") or 0
     if line <= -0.75:
         home_cover = home * 0.9
     elif line == -0.5:
@@ -7847,13 +7846,16 @@ def _parlay_leg_from_pick(pick: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         "edge": parse_float(best.get("edge")),
         "action": "bet_now" if action in {"bet_now", "immediate_bet"} else "observe",
         "confidence": parse_float(pick.get("confidence")),
-        "parlay_mode": pick.get("parlay_mode") or best.get("parlay_mode"),
+        "parlay_mode": (
+            pick.get("parlay_mode")
+            or best.get("parlay_mode")
+            or (pick.get("selection_confidence") or {}).get("parlay_mode")
+        ),
         "caution_flags": caution_flags,
         "source_value_score": pick.get("value_score"),
         "official_pool": advice.get("official_pool") or best.get("official_pool"),
         "match_num_str": match.get("match_num_str") or "",
         "odds_source": advice.get("odds_source") or best.get("odds_source") or "",
-        "parlay_mode": best.get("parlay_mode") or (pick.get("selection_confidence") or {}).get("parlay_mode"),
         "negative_ev_allowed": bool(best.get("negative_ev_allowed")),
         "expected_multiplier": best.get("expected_multiplier"),
         "required_probability_for_1pct_ev": best.get("required_probability_for_1pct_ev"),
@@ -13315,6 +13317,9 @@ def _dashboard_production_readiness(
         if clv_ready:
             clv_status = "ok"
             clv_title = "CLV 验证通过 — 强信号"
+        elif avg_clv_return is not None and avg_clv_return < 0:
+            clv_status = "blocked"
+            clv_title = "平均 CLV 为负"
         elif clv_available_count < 30:
             clv_status = "warning"
             clv_title = "CLV 样本积累中"
@@ -13334,7 +13339,8 @@ def _dashboard_production_readiness(
                     f"已对齐 {clv_available_count}/{clv_tracked_count} 条收盘价；"
                     f"平均 CLV {_percent_text(avg_clv_return) or '暂无'}，"
                     f"正 CLV 比例 {_percent_text(positive_clv_rate) or '暂无'}。"
-                    "CLV 是统计上最早出现的模型质量信号 — 生产发布要求 ≥30 条样本、"
+                    "CLV 是统计上最早出现的模型质量信号；生产发布至少需要 20 条可计算 CLV，"
+                    "当前强信号闸门要求 ≥30 条样本、"
                     "平均 CLV ≥ +0.5%、正 CLV 比例 ≥ 55%。"
                 ),
                 current=clv_available_count,
@@ -13985,11 +13991,6 @@ def _dashboard_decision_audit(
     observation_count = int(prediction_kpis.get("observation_count") or 0)
     total_count = int(prediction_kpis.get("total_count") or 0)
     open_count = int(prediction_kpis.get("open_count") or 0)
-    live_count = int(prediction_kpis.get("live_count") or 0)
-    scheduled_count = int(prediction_kpis.get("scheduled_count") or 0)
-    final_pending_count = int(prediction_kpis.get("final_pending_count") or 0)
-    result_pending_count = int(prediction_kpis.get("result_pending_count") or 0)
-    maybe_live_count = int(prediction_kpis.get("maybe_live_count") or 0)
     settled_count = int(prediction_kpis.get("settled_count") or 0)
     sample_count = int(strategy_state.get("sample_count") or 0)
     min_sample_count = int(strategy_state.get("min_live_sample_count") or 20)

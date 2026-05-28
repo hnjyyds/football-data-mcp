@@ -234,16 +234,22 @@ def compute_h2h_record(
             # current home was also home in this h2h
             goals_for_current_home += hg
             goals_for_current_away += ag
-            if hg > ag: wins_for_current_home += 1
-            elif hg < ag: wins_for_current_away += 1
-            else: draws += 1
+            if hg > ag:
+                wins_for_current_home += 1
+            elif hg < ag:
+                wins_for_current_away += 1
+            else:
+                draws += 1
         else:
             # current home was away in this h2h
             goals_for_current_home += ag
             goals_for_current_away += hg
-            if ag > hg: wins_for_current_home += 1
-            elif ag < hg: wins_for_current_away += 1
-            else: draws += 1
+            if ag > hg:
+                wins_for_current_home += 1
+            elif ag < hg:
+                wins_for_current_away += 1
+            else:
+                draws += 1
 
     total = wins_for_current_home + draws + wins_for_current_away
     if total == 0:

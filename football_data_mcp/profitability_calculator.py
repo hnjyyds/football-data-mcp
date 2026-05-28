@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from typing import Any
 
 try:
-    import numpy as np
     from scipy import stats
     _SCIPY_AVAILABLE = True
 except ImportError:
@@ -275,9 +274,12 @@ def _z_score_for_two_tail_significance(alpha: float) -> float:
     """Return z for given confidence level (e.g., 0.95 → 1.96)."""
     if not _SCIPY_AVAILABLE:
         # Manual lookup
-        if alpha >= 0.99: return 2.576
-        if alpha >= 0.95: return 1.96
-        if alpha >= 0.90: return 1.645
+        if alpha >= 0.99:
+            return 2.576
+        if alpha >= 0.95:
+            return 1.96
+        if alpha >= 0.90:
+            return 1.645
         return 1.282
     return float(stats.norm.ppf(1 - (1 - alpha) / 2))
 

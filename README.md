@@ -20,6 +20,14 @@ Run with Docker:
 docker compose up -d --build
 ```
 
+Quality gate:
+
+```bash
+scripts/check.sh
+```
+
+The local gate runs Python lint/type checks, the full backend test suite, frontend unit tests, and the production frontend build. CI runs the same checks on pull requests and pushes to `main`.
+
 MCP endpoint:
 
 ```text
@@ -85,6 +93,7 @@ Paper learning loop:
 - Settlement also refreshes a machine-readable `strategy_state` for balanced Asian handicap selection. Probability calibration still uses all settled recommendation and observation rows, but strategy threshold tuning only uses formal balanced rows plus actionable observations (`immediate_bet` / `condition_observe`); `no_value` observations remain calibration evidence rather than strategy ROI. Once enough actionable samples exist, `shortlist_value_matches(mode="balanced", target_market="asian_handicap")` reads this state by default to tighten or relax probability/value/odds thresholds and use live-calibrated probabilities in the next shortlist cycle.
 - Docker Compose enables the background paper-learning loop by default with `FOOTBALL_DATA_AUTO_LEARNING_ENABLED=true`. It stores data in `/data/football_data_mcp_learning.sqlite3`, runs every 120 seconds, and only analyzes/persists predictions for matches kicking off in the next 10 minutes (`FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES=10`, `FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES=10`, `FOOTBALL_DATA_AUTO_LEARNING_TOP_N=12`, `FOOTBALL_DATA_AUTO_LEARNING_LIMIT=80`, `FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CANDIDATE_LIMIT=80`, `FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY=10`, `FOOTBALL_DATA_AUTO_LEARNING_SHADOW_PREDICTION_LIMIT=100`, `FOOTBALL_DATA_AUTO_LEARNING_OBSERVATION_LIMIT=30`). Odds snapshot collection stays wider by default (`FOOTBALL_DATA_AUTO_SYNC_LEISU_ODDS=true`, `FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES=1440`, `FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_LIMIT=80`) so the model can use the accumulated odds timeline from first successful fetch through the latest pre-kickoff refresh. User-facing shortlist requests still keep their explicit/default time window and conservative `top_n`.
 - Docker Compose passes through optional Leisu access variables: `LEISU_ODDS_PROXY_URL`, `LEISU_COOKIE`, and `LEISU_ACW_SC_V2`. The default path no longer requires a personal login cookie when the mobile API challenge can be solved locally; `LEISU_MOBILE_DETAIL_COMPANY_LIMIT` controls how many bookmakers per market get full historical timelines (`0` means all, default `3` to reduce rate-limit pressure). If Leisu changes WAF behavior, rate-limits the host, or local Node.js is unavailable, the sync tool degrades without inventing prices.
+- Dashboard API CORS is allowlist-based through `FOOTBALL_DATA_DASHBOARD_CORS_ORIGINS` and defaults to local dashboard origins only. `/api/db/janitor?execute=true` requires `FOOTBALL_DATA_ADMIN_TOKEN` plus the matching `X-Admin-Token` header; without it, the endpoint remains dry-run/read-only.
 
 Dashboard:
 

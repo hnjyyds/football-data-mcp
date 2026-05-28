@@ -77,15 +77,15 @@ def test_default_allowlist_covers_top_5_european():
     """Top 5 European leagues must always be in the default allowlist."""
     top5_zh = ["英超", "西甲", "意甲", "德甲", "法甲"]
     top5_en = ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1"]
-    for l in top5_zh + top5_en:
-        assert _league_in_allowlist(l, SETTLEMENT_COVERED_LEAGUES_DEFAULT), f"missing: {l}"
+    for league in top5_zh + top5_en:
+        assert _league_in_allowlist(league, SETTLEMENT_COVERED_LEAGUES_DEFAULT), f"missing: {league}"
 
 
 def test_default_allowlist_covers_uefa_competitions():
-    for l in ["欧冠", "欧联", "Champions League", "Europa League"]:
-        assert _league_in_allowlist(l, SETTLEMENT_COVERED_LEAGUES_DEFAULT), f"missing: {l}"
+    for league in ["欧冠", "欧联", "Champions League", "Europa League"]:
+        assert _league_in_allowlist(league, SETTLEMENT_COVERED_LEAGUES_DEFAULT), f"missing: {league}"
 
 
 def test_default_allowlist_covers_brazilian_top_tier():
-    for l in ["巴甲", "Brasileirão", "Série A"]:
-        assert _league_in_allowlist(l, SETTLEMENT_COVERED_LEAGUES_DEFAULT), f"missing: {l}"
+    for league in ["巴甲", "Brasileirão", "Série A"]:
+        assert _league_in_allowlist(league, SETTLEMENT_COVERED_LEAGUES_DEFAULT), f"missing: {league}"

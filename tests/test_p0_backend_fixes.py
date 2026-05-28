@@ -12,11 +12,8 @@ import asyncio
 import importlib
 import os
 import threading
-import time
-from pathlib import Path
 
 import httpx
-import pytest
 
 
 class TestLearningDBDefaultPath:

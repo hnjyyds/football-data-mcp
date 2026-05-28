@@ -95,7 +95,7 @@ def run_auto_tune(
 
     Returns a summary of what was found and (if not dry_run) what was written.
     """
-    from football_data_mcp.backtest import run_backtest_sweep, run_holdout_validation
+    from football_data_mcp.backtest import run_holdout_validation
     from football_data_mcp.learning_store import update_strategy_state, get_strategy_state
 
     resolved_divisions = divisions or DEFAULT_DIVISIONS
