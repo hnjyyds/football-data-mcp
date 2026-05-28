@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, type KeyboardEvent } from "react";
 import { Icon } from "../shared/Icon";
 import type { PredictionLedgerRow } from "../../types";
 import { TeamLogo } from "../shared/TeamLogo";
 import { Badge } from "../shared/Badge";
 import { formatOdds, formatPercent } from "../../dashboardModel";
+import { formatBeijingShort } from "../../formatTime";
 
 type Filter = "all" | "recommendation" | "observation" | "settled" | "open" | "hit" | "miss";
 
@@ -17,12 +18,7 @@ const FILTERS: Array<{ key: Filter; label: string }> = [
   { key: "miss", label: "未命中" },
 ];
 
-function localTime(v: string | null | undefined): string {
-  if (!v) return "—";
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) return "—";
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
-}
+const localTime = formatBeijingShort;
 
 function applyFilter(rows: PredictionLedgerRow[], filter: Filter): PredictionLedgerRow[] {
   switch (filter) {
@@ -36,15 +32,26 @@ function applyFilter(rows: PredictionLedgerRow[], filter: Filter): PredictionLed
   }
 }
 
+function statusLabel(row: PredictionLedgerRow): string {
+  if (row.settlement_status === "settled") return row.hit === 1 ? "命中" : "未中";
+  if (row.settlement_status === "open") return "待结算";
+  if (row.settlement_status === "cancelled_postponed") return "延期";
+  if (row.settlement_status === "unsettleable") return "无源";
+  return "跟踪";
+}
+
 function StatusIcon({ row }: { row: PredictionLedgerRow }) {
+  const label = statusLabel(row);
   if (row.settlement_status === "settled") {
-    return row.hit === 1
-      ? <Icon name="success" size={14} className="text-success-500" />
-      : <Icon name="error" size={14} className="text-danger-500" />;
+    return (
+      <span aria-label={label} role="img">
+        <Icon name={row.hit === 1 ? "success" : "error"} size={14} className={row.hit === 1 ? "text-success-500" : "text-danger-500"} />
+      </span>
+    );
   }
-  if (row.settlement_status === "open") return <Icon name="pending" size={14} className="text-warning-500" />;
-  if (row.settlement_status === "unsettleable") return <Icon name="warn" size={14} className="text-ink-400" />;
-  return <Icon name="eye" size={14} className="text-ink-400" />;
+  if (row.settlement_status === "open") return <span aria-label={label} role="img"><Icon name="pending" size={14} className="text-warning-500" /></span>;
+  if (row.settlement_status === "unsettleable") return <span aria-label={label} role="img"><Icon name="warn" size={14} className="text-ink-400" /></span>;
+  return <span aria-label={label} role="img"><Icon name="eye" size={14} className="text-ink-400" /></span>;
 }
 
 export function LedgerTable({
@@ -128,10 +135,22 @@ export function LedgerTable({
                 )}
                 {pageRows.map((row) => {
                   const isSelected = selectedId === row.ledger_id;
+                  const onKey = (e: KeyboardEvent<HTMLTableRowElement>) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelect?.(row.ledger_id);
+                    }
+                  };
+                  const a11yLabel = `${row.home_team ?? ""} 对 ${row.away_team ?? ""} ${row.selection ?? ""} ${statusLabel(row)}`;
                   return (
                     <tr
                       key={row.ledger_id}
-                      className={`border-b border-slate-50 dark:border-slate-700/30 cursor-pointer transition-colors ${
+                      role="button"
+                      tabIndex={0}
+                      aria-label={a11yLabel}
+                      aria-pressed={isSelected}
+                      onKeyDown={onKey}
+                      className={`border-b border-slate-50 dark:border-slate-700/30 cursor-pointer transition-colors outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
                         isSelected
                           ? "bg-blue-50 dark:bg-blue-900/20"
                           : "hover:bg-slate-50 dark:hover:bg-slate-700/30"

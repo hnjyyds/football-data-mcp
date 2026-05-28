@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
 
 export type ToastItem = {
@@ -13,18 +13,45 @@ const TYPE_STYLES = {
   error:   "bg-red-50 dark:bg-red-900/40 border-red-200 dark:border-red-700 text-red-800 dark:text-red-200",
 };
 
+const DISMISS_MS = 5000;
+
 function ToastEntry({ item, onDismiss }: { item: ToastItem; onDismiss: (id: string) => void }) {
+  const [paused, setPaused] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
-    const t = setTimeout(() => onDismiss(item.id), 5000);
-    return () => clearTimeout(t);
-  }, [item.id, onDismiss]);
+    if (paused) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      return;
+    }
+    timerRef.current = setTimeout(() => onDismiss(item.id), DISMISS_MS);
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = null;
+    };
+  }, [item.id, onDismiss, paused]);
 
   const iconName = item.type === "success" ? "success" : "warn";
   return (
-    <div className={`flex items-start gap-2 px-4 py-3 rounded-xl border shadow-md text-sm max-w-sm ${TYPE_STYLES[item.type]}`}>
+    <div
+      role="status"
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onFocus={() => setPaused(true)}
+      onBlur={() => setPaused(false)}
+      className={`flex items-start gap-2 px-4 py-3 rounded-xl border shadow-md text-sm max-w-sm ${TYPE_STYLES[item.type]}`}
+    >
       <Icon name={iconName} size={16} className="flex-shrink-0 mt-0.5" />
       <span className="flex-1">{item.message}</span>
-      <button type="button" onClick={() => onDismiss(item.id)} className="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity" aria-label="关闭">
+      <button
+        type="button"
+        onClick={() => onDismiss(item.id)}
+        className="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity"
+        aria-label="关闭"
+      >
         <Icon name="close" size={14} />
       </button>
     </div>
@@ -33,8 +60,9 @@ function ToastEntry({ item, onDismiss }: { item: ToastItem; onDismiss: (id: stri
 
 export function ToastContainer({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss: (id: string) => void }) {
   if (!toasts.length) return null;
+  const hasError = toasts.some((t) => t.type === "error");
   return (
-    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2" aria-live="polite">
+    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2" aria-live={hasError ? "assertive" : "polite"} aria-atomic="true">
       {toasts.map((t) => <ToastEntry key={t.id} item={t} onDismiss={onDismiss} />)}
     </div>
   );

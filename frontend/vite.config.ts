@@ -15,7 +15,19 @@ export default defineConfig({
       }
     }
   },
+  build: {
+    sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          recharts: ["recharts"]
+        }
+      }
+    }
+  },
   test: {
-    environment: "node"
+    environment: "jsdom",
+    setupFiles: ["./src/testSetup.ts"],
+    globals: false
   }
 });

@@ -8,6 +8,11 @@ import {
   formatSignedPercent, marketLabel, reasonLabel, statusFlagLabel, strategyStatusLabel
 } from "./dashboardModel";
 import { dashboardPath, matchDetailPath, parseDashboardRoute, type DashboardRoute } from "./appRouting";
+import { fetchDashboardSnapshot, fetchMatchDetail, HttpError } from "./api/dashboardClient";
+import { createPoller, withRetry } from "./api/poller";
+import { reportError } from "./errorReporter";
+import { useDarkMode } from "./useDarkMode";
+import { formatBeijingShort, formatBeijingFull } from "./formatTime";
 import type {
   DashboardMatchDetail, DashboardRecord, DashboardSectionKey, DashboardSnapshot,
   KpiCard, LearningEvent, PredictionLedgerRow, ProbabilityRow
@@ -36,9 +41,11 @@ import { ProfitabilityPanel } from "./components/dashboard/ProfitabilityPanel";
 import { HeatMap } from "./components/charts/HeatMap";
 import { ReliabilityDiagram } from "./components/charts/ReliabilityDiagram";
 
-const API_URL = "/api/dashboard";
 type DashboardViewModel = ReturnType<typeof buildDashboardView>;
 type MatchDetailViewModel = ReturnType<typeof buildMatchDetailView>;
+
+type LineupPlayer = { number?: number | string | null; name?: string; position?: string };
+type LineupSide = { formation?: string; starterCountText?: string; players?: LineupPlayer[] };
 
 // ─── Utility helpers ─────────────────────────────────────────────────────────
 
@@ -46,19 +53,8 @@ function currentDashboardRoute(): DashboardRoute {
   return parseDashboardRoute(`${window.location.pathname}${window.location.search}`);
 }
 
-function localTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "—";
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
-}
-
-function fullLocalTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "—";
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(d);
-}
+const localTime = formatBeijingShort;
+const fullLocalTime = formatBeijingFull;
 
 function numericValue(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -712,8 +708,12 @@ function MatchDetailPage({
                 {view.lineup.basis} · {view.lineup.statusText}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {["home", "away"].map((side) => {
-                  const team = (view.lineup as any)[side];
+                {(["home", "away"] as const).map((side) => {
+                  const lineup = view.lineup as unknown as {
+                    home: LineupSide;
+                    away: LineupSide;
+                  };
+                  const team = lineup[side];
                   const teamName = side === "home" ? detail.record.home_team : detail.record.away_team;
                   return (
                     <div key={side}>
@@ -723,7 +723,7 @@ function MatchDetailPage({
                         <span className="text-2xs text-ink-500 dark:text-ink-400">{team.starterCountText}</span>
                       </div>
                       <div className="space-y-1">
-                        {(team.players ?? []).slice(0, 11).map((p: any, i: number) => (
+                        {(team.players ?? []).slice(0, 11).map((p, i) => (
                           <div key={i} className="flex items-center gap-2 text-xs">
                             <span className="w-6 text-right text-ink-400 dark:text-ink-500 tabular-nums">{p.number ?? "—"}</span>
                             <span className="text-ink-700 dark:text-ink-300 truncate flex-1">{p.name || "—"}</span>
@@ -957,14 +957,9 @@ export function App() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<DashboardSectionKey>("overview");
-  const [darkMode, setDarkMode] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const [darkMode, setDarkMode] = useDarkMode();
   const { toasts, dismiss, push } = useToasts();
   const prevPickCount = useRef<number | null>(null);
-
-  // Dark mode effect
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", darkMode);
-  }, [darkMode]);
 
   // Route sync
   useEffect(() => {
@@ -986,22 +981,26 @@ export function App() {
 
   const detailLedgerId = route.page === "match" ? route.ledgerId : null;
 
-  // Main data polling
+  // Main data polling — retry/backoff, AbortController mutex, visibility-aware
   useEffect(() => {
-    let cancelled = false;
-    async function load(isInitial = false) {
-      if (!isInitial) setRefreshing(true);
-      try {
-        // Snapshot can take ~10s when DB is hot; allow 30s before giving up.
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 30000);
-        const response = await fetch(API_URL, { cache: "no-store", signal: controller.signal });
-        clearTimeout(timeout);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json() as DashboardSnapshot;
-        if (!cancelled) {
-          setSnapshot((prev) => {
-            // Toast on new picks
+    const poller = createPoller<DashboardSnapshot>(
+      async ({ signal }) => {
+        setRefreshing(true);
+        try {
+          return await withRetry(() => fetchDashboardSnapshot({ signal }), {
+            retries: 2,
+            baseDelayMs: 1000,
+            maxDelayMs: 8000,
+            signal,
+          });
+        } finally {
+          setRefreshing(false);
+        }
+      },
+      {
+        intervalMs: 30000,
+        onResult: (data) => {
+          setSnapshot(() => {
             const newCount = data.asian_picks?.length ?? 0;
             if (prevPickCount.current !== null && newCount > (prevPickCount.current ?? 0)) {
               push(`新增 ${newCount - prevPickCount.current!} 个推荐信号`, "success");
@@ -1010,39 +1009,59 @@ export function App() {
             return data;
           });
           setError(null);
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        if (!cancelled) { setLoading(false); setRefreshing(false); }
+          setLoading(false);
+        },
+        onError: (err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          setError(message);
+          setLoading(false);
+          reportError(err, { kind: "dashboard-fetch" });
+        },
       }
-    }
-    void load(true);
-    const timer = window.setInterval(() => load(false), 30000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, []);
+    );
+    poller.start();
+    return () => poller.stop();
+  }, [push]);
 
-  // Detail loader
+  // Detail loader — AbortController on dependency change
   useEffect(() => {
-    let cancelled = false;
-    async function loadDetail(ledgerId: string) {
-      setDetailLoading(true); setDetailError(null);
-      setDetail((cur) => cur?.record.ledger_id === ledgerId ? cur : null);
-      try {
-        const resp = await fetch(`${API_URL}/match/${encodeURIComponent(ledgerId)}`, { cache: "no-store" });
-        const data = await resp.json() as DashboardMatchDetail;
-        if (!resp.ok) throw new Error(resp.status === 404 ? "当前台账中不存在这场预测" : `HTTP ${resp.status}`);
-        if (data.status !== "ok") throw new Error(data.status);
-        if (!cancelled) { setDetail(data); setDetailError(null); }
-      } catch (err) {
-        if (!cancelled) { setDetail(null); setDetailError(err instanceof Error ? err.message : String(err)); }
-      } finally {
-        if (!cancelled) setDetailLoading(false);
-      }
+    if (!detailLedgerId) {
+      setDetail(null);
+      setDetailError(null);
+      setDetailLoading(false);
+      return;
     }
-    if (!detailLedgerId) { setDetail(null); setDetailError(null); setDetailLoading(false); return () => { cancelled = true; }; }
-    void loadDetail(detailLedgerId);
-    return () => { cancelled = true; };
+    const controller = new AbortController();
+    let cancelled = false;
+    setDetailLoading(true);
+    setDetailError(null);
+    setDetail((cur) => (cur?.record.ledger_id === detailLedgerId ? cur : null));
+    fetchMatchDetail(detailLedgerId, { signal: controller.signal })
+      .then((data) => {
+        if (cancelled) return;
+        if (data.status !== "ok") {
+          setDetail(null);
+          setDetailError(data.status);
+          return;
+        }
+        setDetail(data);
+        setDetailError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setDetail(null);
+        if (err instanceof HttpError) setDetailError(err.message);
+        else setDetailError(err instanceof Error ? err.message : String(err));
+        reportError(err, { kind: "match-detail-fetch", ledgerId: detailLedgerId });
+      })
+      .finally(() => {
+        if (!cancelled) setDetailLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [detailLedgerId]);
 
   const view = useMemo(() => snapshot ? buildDashboardView(snapshot) : null, [snapshot]);

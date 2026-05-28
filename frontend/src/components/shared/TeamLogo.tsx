@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 type Size = "xs" | "sm" | "md" | "lg";
 
 const SIZE_CLASSES: Record<Size, string> = {
@@ -37,6 +39,13 @@ export function TeamLogo({
 }) {
   const accent = teamAccent(name);
   const initials = teamInitials(name);
+  const [broken, setBroken] = useState(false);
+
+  useEffect(() => {
+    setBroken(false);
+  }, [logoUrl]);
+
+  const showImage = !!logoUrl && !broken;
   return (
     <span
       className={`inline-flex items-center justify-center rounded-full font-bold text-white flex-shrink-0 ${SIZE_CLASSES[size]}`}
@@ -44,8 +53,15 @@ export function TeamLogo({
       title={name}
       aria-label={`${name} 队徽`}
     >
-      {logoUrl ? (
-        <img src={logoUrl} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full rounded-full object-cover" />
+      {showImage ? (
+        <img
+          src={logoUrl ?? ""}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={() => setBroken(true)}
+          className="w-full h-full rounded-full object-cover"
+        />
       ) : (
         <span>{initials}</span>
       )}

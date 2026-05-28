@@ -22,5 +22,5 @@ ENV DASHBOARD_BACKEND_URL=http://football-data-mcp:8910
 
 EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:80/', timeout=3).read()" || exit 1
+  CMD python -c "import sys, urllib.request; r = urllib.request.urlopen('http://localhost:80/healthz', timeout=3); sys.exit(0 if r.status == 200 else 1)" || exit 1
 CMD ["python", "server.py"]
