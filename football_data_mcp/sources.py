@@ -10776,8 +10776,29 @@ def _dashboard_display_prediction_ledger(rows: list[dict[str, Any]], *, limit: i
     return selected[:bounded_limit]
 
 
-def _dashboard_prediction_kpis(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    settled_rows = [row for row in rows if row.get("settlement_status") == "settled"]
+def _dashboard_prediction_kpis(
+    rows: list[dict[str, Any]],
+    *,
+    rolling_window: int = 200,
+) -> dict[str, Any]:
+    """
+    Compute prediction KPIs.
+
+    hit_rate / roi are computed on the most-recent N settled bets (rolling window).
+    Cumulative totals (total_count, settled_count) still reflect all-time.
+
+    Reason: the model has been improving over time. All-time KPIs are dragged
+    down by early-batch noise (2 days ago hit_rate 36%, now 47%). The rolling
+    window reflects current real capability so the dashboard tracks improvement.
+    """
+    all_settled_rows = [row for row in rows if row.get("settlement_status") == "settled"]
+    # Sort by settled_at_utc DESC, take most recent N
+    all_settled_rows_sorted = sorted(
+        all_settled_rows,
+        key=lambda r: str(r.get("settled_at_utc") or r.get("created_at_utc") or ""),
+        reverse=True,
+    )
+    settled_rows = all_settled_rows_sorted[:rolling_window]
     profits = [parse_float(row.get("profit_units")) for row in settled_rows]
     profits = [profit for profit in profits if profit is not None]
     hit_count = sum(1 for row in settled_rows if int(row.get("hit") or 0) == 1)
@@ -10824,6 +10845,12 @@ def _dashboard_prediction_kpis(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     recommended_segment = segment_kpis(recommended_settled_rows)
     observation_segment = segment_kpis(observation_settled_rows)
+    # All-time totals (still useful for "总样本"/audit)
+    all_time_hit = sum(1 for row in all_settled_rows if int(row.get("hit") or 0) == 1)
+    all_time_miss = sum(1 for row in all_settled_rows if int(row.get("hit") or 0) == 0)
+    all_time_profits = [parse_float(row.get("profit_units")) for row in all_settled_rows]
+    all_time_profits = [p for p in all_time_profits if p is not None]
+
     return {
         "total_count": len(rows),
         "recommended_count": sum(1 for row in rows if row.get("prediction_type") == "recommendation"),
@@ -10836,7 +10863,15 @@ def _dashboard_prediction_kpis(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "result_pending_count": result_pending_count,
         "postponed_count": postponed_count,
         "match_phase_counts": dict(sorted(phase_counts.items())),
-        "settled_count": len(settled_rows),
+        # Cumulative all-time totals (for audit / sample size context)
+        "settled_count": len(all_settled_rows),
+        "all_time_hit_count": all_time_hit,
+        "all_time_miss_count": all_time_miss,
+        "all_time_hit_rate": round_metric(all_time_hit / len(all_settled_rows)) if all_settled_rows else None,
+        "all_time_roi": round_metric(sum(all_time_profits) / len(all_time_profits), 4) if all_time_profits else None,
+        # Rolling-window KPIs (what the dashboard headline should use)
+        "rolling_window_size": rolling_window,
+        "rolling_settled_count": len(settled_rows),
         "hit_count": hit_count,
         "miss_count": miss_count,
         "hit_rate": round_metric(hit_count / len(settled_rows)) if settled_rows else None,
