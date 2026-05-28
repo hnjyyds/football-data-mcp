@@ -1707,8 +1707,10 @@ def test_docker_compose_auto_learning_defaults_keep_snapshot_history_wide():
     compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
 
     assert "FOOTBALL_DATA_AUTO_LEARNING_INTERVAL_SECONDS:-120" in compose_text
-    assert "FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES:-10" in compose_text
-    assert "FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES:-10" in compose_text
+    # 2026-05-28: 闭环监控发现 10 分钟基础窗口在赛事稀疏期会连续 50+ cycle 拿不到候选，
+    # 默认调整为 180 分钟；daemon 内部 adaptive widening 仍可继续推到 360 分钟上限。
+    assert "FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES:-180" in compose_text
+    assert "FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES:-180" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES:-1440" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_LIMIT:-80" in compose_text
 

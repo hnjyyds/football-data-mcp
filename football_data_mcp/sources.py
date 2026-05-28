@@ -15714,6 +15714,33 @@ def dashboard_snapshot(
     return normalize_dashboard_snapshot(raw_snapshot)
 
 
+def adaptive_asian_window_minutes(
+    *,
+    base_minutes: int,
+    consecutive_empty_cycles: int,
+) -> int:
+    """根据连续空 cycle 数计算 daemon 实际使用的窗口分钟数。
+
+    阶梯（避免上游赛事稀疏期长时间卡在最小窗口）：
+    - streak < 3 → 用基础窗口
+    - streak 3-5 → max(base, base*2 但不超过 360)
+    - streak 6-8 → max(base, base*4 但不超过 360)
+    - streak ≥ 9 → max(base, 360)
+
+    设计原则：adaptive 只用来"放大"窗口；如果用户显式配置的基础窗口本来就 ≥360，
+    不应被压回 360。上限 360 仅作用于自动放大的部分。
+    """
+    streak = max(0, int(consecutive_empty_cycles or 0))
+    base = max(1, int(base_minutes or 0))
+    if streak >= 9:
+        return max(base, 360)
+    if streak >= 6:
+        return max(base, min(base * 4, 360))
+    if streak >= 3:
+        return max(base, min(base * 2, 360))
+    return base
+
+
 async def auto_learning_daemon(
     *,
     interval_seconds: int = 600,
@@ -15783,10 +15810,11 @@ async def auto_learning_daemon(
     consecutive_empty_cycles = 0  # for adaptive window
     while True:
         AUTO_LEARNING_STATE["last_started_at_utc"] = now_utc().isoformat()
-        # Adaptive window: if we got nothing the last 3 cycles, widen up to 6h
-        effective_window = bounded_asian_window_minutes
-        if consecutive_empty_cycles >= 3:
-            effective_window = min(bounded_asian_window_minutes * 2, 360)
+        # Adaptive widening 抽到纯函数，便于单测覆盖。
+        effective_window = adaptive_asian_window_minutes(
+            base_minutes=bounded_asian_window_minutes,
+            consecutive_empty_cycles=consecutive_empty_cycles,
+        )
         AUTO_LEARNING_STATE["effective_window_minutes"] = effective_window
         AUTO_LEARNING_STATE["consecutive_empty_cycles"] = consecutive_empty_cycles
         # Periodic DB janitor (every 6h by default) — runs before the learning
