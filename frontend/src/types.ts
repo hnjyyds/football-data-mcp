@@ -117,6 +117,7 @@ export interface DashboardRecord {
   learned_probability: number | null;
   market_probability?: number | null;
   edge: number | null;
+  expected_multiplier?: number | null;
   recommendation: string;
   stake_level: string;
   risk_flags: string[];
@@ -216,6 +217,7 @@ export interface PredictionLedgerRow {
   probability_source?: string;
   probability_source_label?: string;
   edge: number | null;
+  expected_multiplier?: number | null;
   recommendation: string;
   rejection_reason: string;
   settlement_status: string;
@@ -1089,6 +1091,7 @@ export interface DashboardModelGovernance {
 
 export interface DashboardBacktestCurvePoint {
   index: number;
+  label: string;
   ledger_id: string;
   matchup: string;
   prediction_type_label: string;
@@ -1122,6 +1125,80 @@ export interface DashboardBacktestCurve {
   points: DashboardBacktestCurvePoint[];
 }
 
+export interface AutoLearningLastResultSummary {
+  run_id?: string | null;
+  saved_record_count?: number | null;
+  saved_shadow_prediction_count?: number | null;
+  asian_record_count?: number | null;
+  asian_shadow_prediction_record_count?: number | null;
+  asian_total_candidates?: number | null;
+  asian_analyzed_count?: number | null;
+  asian_eligible_count?: number | null;
+  asian_returned_count?: number | null;
+  asian_rejected_count?: number | null;
+  asian_rejection_reasons?: Record<string, number>;
+  parlay_record_count?: number | null;
+  market_snapshot_sync?: Record<string, unknown>;
+  snapshot_reanalysis?: Record<string, unknown>;
+  settled_count?: number | null;
+  shadow_settled_count?: number | null;
+}
+
+export interface AutoLearningState {
+  enabled: boolean;
+  run_count: number;
+  last_error: string | null;
+  last_started_at_utc?: string | null;
+  last_finished_at_utc?: string | null;
+  current_step?: string | null;
+  consecutive_empty_cycles: number;
+  interval_seconds?: number | null;
+  effective_window_minutes?: number | null;
+  last_result_summary?: AutoLearningLastResultSummary | null;
+}
+
+export interface LatestValidation {
+  method?: string | null;
+  automation_readiness?: string | null;
+  beats_market: boolean;
+  log_loss_model?: number | null;
+  log_loss_market?: number | null;
+  log_loss_diff?: number | null;
+  brier_model?: number | null;
+  brier_market?: number | null;
+  brier_diff?: number | null;
+  roi?: number | null;
+  bet_count?: number | null;
+  evaluated_count?: number | null;
+  created_at_utc?: string | null;
+  training_seasons?: string[];
+  validation_seasons?: string[];
+}
+
+export interface CalibrationBucketRow {
+  band: string;
+  market?: string | null;
+  sample_count: number;
+  hit_count: number;
+  hit_rate?: number | null;
+  roi?: number | null;
+  avg_model_probability?: number | null;
+}
+
+export interface NormalizedBacktestCurvePoint {
+  label: string;
+  roi: number;
+}
+
+export interface SourceHealthEntry {
+  status?: string | null;
+  error?: string | null;
+  checked_at_utc?: string | null;
+  [key: string]: unknown;
+}
+
+export type DashboardSourceHealth = Record<string, SourceHealthEntry>;
+
 export interface DashboardSnapshot {
   status: string;
   tool: string;
@@ -1137,7 +1214,7 @@ export interface DashboardSnapshot {
   recent_settlements: DashboardRecord[];
   prediction_ledger: PredictionLedgerRow[];
   learning_events: LearningEvent[];
-  auto_learning_state: Record<string, unknown>;
+  auto_learning_state: AutoLearningState;
   decision_audit?: DashboardDecisionAudit;
   learning_diagnostics?: DashboardLearningDiagnostics;
   learning_effectiveness?: DashboardLearningEffectiveness;
@@ -1152,7 +1229,9 @@ export interface DashboardSnapshot {
   prediction_accountability?: DashboardPredictionAccountability;
   profitability_forecast?: DashboardProfitabilityForecast;
   market_breakdown?: DashboardMarketBreakdown;
-  buckets: Array<Record<string, unknown>>;
+  latest_validation?: LatestValidation | null;
+  source_health?: DashboardSourceHealth;
+  buckets: CalibrationBucketRow[];
   policy: {
     read_only: boolean;
     no_search_inputs: boolean;

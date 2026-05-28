@@ -68,6 +68,55 @@ describe("fetchDashboardSnapshot", () => {
     await expect(fetchDashboardSnapshot()).rejects.toThrow(/schema|kpis/i);
   });
 
+  it("accepts the normalized contract sub-shapes from the backend", async () => {
+    const enriched = {
+      ...validSnapshot,
+      auto_learning_state: {
+        enabled: true,
+        run_count: 12,
+        last_error: null,
+        last_finished_at_utc: "2026-05-28T07:00:00+00:00",
+        consecutive_empty_cycles: 0,
+        last_result_summary: { asian_total_candidates: 6 },
+      },
+      latest_validation: {
+        method: "holdout_v2",
+        automation_readiness: "not_ready",
+        beats_market: false,
+        bet_count: 0,
+        evaluated_count: 84,
+      },
+      buckets: [
+        { band: "0.40-0.45", market: "asian_handicap", sample_count: 206, hit_count: 98, hit_rate: 0.476, roi: -0.0286 },
+      ],
+      learning_events: [
+        { kind: "strategy", severity: "ok", title: "策略状态刷新", detail: "live_calibration_active", at_utc: "2026-05-28T07:00:54+00:00" },
+      ],
+      backtest_curve: { points: [{ label: "0", roi: 0.0 }, { label: "5", roi: -0.03 }] },
+      source_health: { football_data: { status: "ok" } },
+    };
+    mockFetchOnce({ ok: true, status: 200, body: enriched });
+    const data = await fetchDashboardSnapshot();
+    expect(data.auto_learning_state?.run_count).toBe(12);
+    expect(data.latest_validation?.method).toBe("holdout_v2");
+    expect(data.buckets?.[0].band).toBe("0.40-0.45");
+    expect(data.learning_events?.[0].kind).toBe("strategy");
+    expect(data.backtest_curve?.points[0].roi).toBe(0);
+    expect(data.source_health?.football_data.status).toBe("ok");
+  });
+
+  it("rejects malformed auto_learning_state (must be object)", async () => {
+    const bad = { ...validSnapshot, auto_learning_state: "boom" };
+    mockFetchOnce({ ok: true, status: 200, body: bad });
+    await expect(fetchDashboardSnapshot()).rejects.toThrow(/auto_learning_state/);
+  });
+
+  it("rejects buckets where an entry is missing band", async () => {
+    const bad = { ...validSnapshot, buckets: [{ sample_count: 1 }] };
+    mockFetchOnce({ ok: true, status: 200, body: bad });
+    await expect(fetchDashboardSnapshot()).rejects.toThrow(/band/);
+  });
+
   it("respects AbortSignal", async () => {
     globalThis.fetch = vi.fn(async (_url, init?: RequestInit) => {
       return await new Promise((_, reject) => {

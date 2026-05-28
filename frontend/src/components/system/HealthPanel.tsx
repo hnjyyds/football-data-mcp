@@ -1,5 +1,5 @@
 import { Icon } from "../shared/Icon";
-import type { DashboardSnapshot } from "../../types";
+import type { DashboardSnapshot, SourceHealthEntry } from "../../types";
 
 function StatusIcon({ status }: { status: string | null | undefined }) {
   if (status === "ok" || status === "fresh" || status === "live") {
@@ -11,26 +11,47 @@ function StatusIcon({ status }: { status: string | null | undefined }) {
   return <Icon name="error" size={14} className="text-danger-500 flex-shrink-0" />;
 }
 
+type ProviderSpec = {
+  key: string;
+  label: string;
+  detail: (entry: SourceHealthEntry) => string | undefined;
+};
+
+const PROVIDERS: ProviderSpec[] = [
+  {
+    key: "football_data",
+    label: "Football-Data",
+    detail: (e) => (typeof e.fixture_count === "number" ? `${e.fixture_count} 赛事` : undefined),
+  },
+  {
+    key: "leisu",
+    label: "雷速",
+    detail: (e) => (typeof e.reason === "string" ? e.reason : (typeof e.error === "string" ? e.error : undefined)),
+  },
+  {
+    key: "dongqiudi",
+    label: "东球汇",
+    detail: (e) => (typeof e.match_count === "number" ? `${e.match_count} 场` : undefined),
+  },
+  {
+    key: "the_odds_api",
+    label: "The Odds API",
+    detail: () => undefined,
+  },
+];
+
 export function HealthPanel({ snapshot }: { snapshot: DashboardSnapshot }) {
-  const health = (snapshot as any).source_health ?? (snapshot as any).decision_audit?.source_audit ?? {};
+  const health = snapshot.source_health ?? {};
   const sources: Array<{ name: string; status: string | null; detail?: string }> = [];
 
-  // Build from known patterns
-  const footballData = (health.football_data ?? health.football_data_co_uk) as any;
-  if (footballData) {
-    sources.push({ name: "Football-Data", status: footballData.status, detail: footballData.fixture_count ? `${footballData.fixture_count} 赛事` : undefined });
-  }
-  const leisu = health.leisu as any;
-  if (leisu) {
-    sources.push({ name: "雷速", status: leisu.status, detail: leisu.reason });
-  }
-  const dongqiudi = (health.dongqiudi ?? health.dongqiudi_schedule) as any;
-  if (dongqiudi) {
-    sources.push({ name: "东球汇", status: dongqiudi.status, detail: dongqiudi.match_count ? `${dongqiudi.match_count} 场` : undefined });
-  }
-  const theOddsApi = (health.the_odds_api ?? health.odds_api) as any;
-  if (theOddsApi) {
-    sources.push({ name: "The Odds API", status: theOddsApi.status });
+  for (const spec of PROVIDERS) {
+    const entry = health[spec.key];
+    if (!entry) continue;
+    sources.push({
+      name: spec.label,
+      status: entry.status ?? null,
+      detail: spec.detail(entry),
+    });
   }
 
   if (!sources.length) return null;

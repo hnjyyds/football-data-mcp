@@ -611,6 +611,7 @@ const snapshot: DashboardSnapshot = {
     points: [
       {
         index: 1,
+        label: "1",
         ledger_id: "recommendation:1",
         matchup: "清水鼓动 vs 大阪钢巴",
         prediction_type_label: "推荐发布",
@@ -624,6 +625,7 @@ const snapshot: DashboardSnapshot = {
       },
       {
         index: 2,
+        label: "2",
         ledger_id: "recommendation:3",
         matchup: "水原三星蓝翼 vs 天安城",
         prediction_type_label: "观察样本",
@@ -650,6 +652,7 @@ const snapshot: DashboardSnapshot = {
     enabled: true,
     run_count: 3,
     last_error: null,
+    consecutive_empty_cycles: 0,
     last_result_summary: null
   },
   decision_audit: {

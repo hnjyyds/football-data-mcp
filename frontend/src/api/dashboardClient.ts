@@ -75,6 +75,30 @@ function validateSnapshot(value: unknown): asserts value is DashboardSnapshot {
     expectField(k, "roi", "number", "root.prediction_kpis", issues, { nullable: true });
   }
 
+  // Normalized sub-shapes (added by backend dashboard_contract.normalize_dashboard_snapshot)
+  if ("auto_learning_state" in root && root.auto_learning_state !== undefined) {
+    if (!expectObject(root.auto_learning_state, "root.auto_learning_state", issues)) {
+      // expectObject already pushed an issue
+    }
+  }
+
+  if ("buckets" in root && root.buckets !== undefined) {
+    if (!Array.isArray(root.buckets)) {
+      issues.push("root.buckets must be an array");
+    } else {
+      root.buckets.forEach((b, i) => {
+        if (!b || typeof b !== "object") {
+          issues.push(`root.buckets[${i}] must be an object`);
+          return;
+        }
+        const bucket = b as Record<string, unknown>;
+        if (typeof bucket.band !== "string" || !bucket.band) {
+          issues.push(`root.buckets[${i}].band must be a non-empty string`);
+        }
+      });
+    }
+  }
+
   if (issues.length) throw new SchemaError("root", issues.join("; "));
 }
 

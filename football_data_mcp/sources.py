@@ -15645,7 +15645,7 @@ def dashboard_snapshot(
         league_breakdown = league_strategy.compute_league_breakdown(db_path=db_path)
     except Exception:
         league_breakdown = None
-    return {
+    raw_snapshot = {
         "status": "ok",
         "tool": "dashboard_snapshot",
         "generated_at_utc": now_utc().isoformat(),
@@ -15688,6 +15688,8 @@ def dashboard_snapshot(
             "data_rule": "Dashboard reads persisted MCP paper-learning state; it does not place bets or trigger user-query analysis.",
         },
     }
+    from football_data_mcp.dashboard_contract import normalize_dashboard_snapshot
+    return normalize_dashboard_snapshot(raw_snapshot)
 
 
 async def auto_learning_daemon(
