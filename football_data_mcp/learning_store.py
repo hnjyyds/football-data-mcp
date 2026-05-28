@@ -1611,9 +1611,16 @@ def get_strategy_state(
     return _default_strategy_state(market=market, mode=mode)
 
 
+STRATEGY_ROLLING_WINDOW_SIZE = 100  # most recent settled rows that count toward strategy ROI
+
+
 def _strategy_global_bucket(conn: sqlite3.Connection, market: str, mode: str) -> dict[str, Any] | None:
     mode = str(mode or "").strip().lower()
     observation_mode = f"{mode}_observation" if mode else ""
+    # Rolling window: most recent N settled rows only.
+    # Reason: the model is improving, so 2-week-old data should not drag down
+    # the current strategy ROI calculation. The threshold-tightening logic in
+    # _derive_strategy_state needs to track current behavior, not legacy noise.
     rows = conn.execute(
         """
         SELECT *
@@ -1627,8 +1634,10 @@ def _strategy_global_bucket(conn: sqlite3.Connection, market: str, mode: str) ->
                     AND recommendation IN ('immediate_bet', 'condition_observe')
                 )
           )
+        ORDER BY settled_at_utc DESC
+        LIMIT ?
         """,
-        (market, mode, observation_mode),
+        (market, mode, observation_mode, STRATEGY_ROLLING_WINDOW_SIZE),
     ).fetchall()
     if not rows:
         return None
@@ -1676,9 +1685,13 @@ def _strategy_global_bucket(conn: sqlite3.Connection, market: str, mode: str) ->
             "included_modes": [item for item in [mode, observation_mode] if item],
             "included_observation_recommendations": ["immediate_bet", "condition_observe"],
             "ignored_observation_count": int(ignored_observation_count or 0),
+            "rolling_window_size": STRATEGY_ROLLING_WINDOW_SIZE,
             "sample_policy": (
-                "Strategy thresholds use settled formal strategy rows plus actionable observation rows. "
-                "No-value observations remain in calibration buckets but do not tune strategy ROI."
+                f"Strategy thresholds use the most recent {STRATEGY_ROLLING_WINDOW_SIZE} settled "
+                "actionable rows (formal strategy + condition_observe / immediate_bet observations). "
+                "Older samples are excluded so threshold tuning tracks current model behavior, not "
+                "early-batch noise. No-value observations remain in calibration buckets but do not "
+                "tune strategy ROI."
             ),
         },
     }
