@@ -286,6 +286,9 @@ class CachedText:
 
 _TEXT_CACHE: dict[str, CachedText] = {}
 _CLIENT: httpx.AsyncClient | None = None
+_CLIENT_LOOP_ID: int | None = None
+_CLIENTS_BY_LOOP: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = {}
+_CLIENTS_LOCK = threading.Lock()
 
 
 def now_utc() -> datetime:
@@ -293,19 +296,25 @@ def now_utc() -> datetime:
 
 
 async def get_client() -> httpx.AsyncClient:
-    global _CLIENT
-    if _CLIENT is None:
-        _CLIENT = httpx.AsyncClient(
-            timeout=HTTP_TIMEOUT_SECONDS,
-            follow_redirects=True,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; FootballDataMCP/0.1; "
-                    "+https://www.football-data.co.uk/)"
-                )
-            },
-        )
-    return _CLIENT
+    global _CLIENT, _CLIENT_LOOP_ID
+    loop = asyncio.get_running_loop()
+    with _CLIENTS_LOCK:
+        client = _CLIENTS_BY_LOOP.get(loop)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
+                timeout=HTTP_TIMEOUT_SECONDS,
+                follow_redirects=True,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (compatible; FootballDataMCP/0.1; "
+                        "+https://www.football-data.co.uk/)"
+                    )
+                },
+            )
+            _CLIENTS_BY_LOOP[loop] = client
+        _CLIENT = client
+        _CLIENT_LOOP_ID = id(loop)
+        return client
 
 
 async def close_client() -> None:
@@ -314,16 +323,20 @@ async def close_client() -> None:
     服务进程长时间运行时如果不显式关闭，socket / TLS 连接会一直挂在事件循环里，
     Python 退出时会打印 `Unclosed client` 告警，且偶发会出现连接泄漏。
     """
-    global _CLIENT
-    if _CLIENT is None:
+    global _CLIENT, _CLIENT_LOOP_ID
+    with _CLIENTS_LOCK:
+        clients = list(dict.fromkeys(_CLIENTS_BY_LOOP.values()))
+        _CLIENTS_BY_LOOP.clear()
+        _CLIENT = None
+        _CLIENT_LOOP_ID = None
+    if not clients:
         return
-    client = _CLIENT
-    _CLIENT = None
-    try:
-        await client.aclose()
-    except Exception:
-        # 关闭异常不应阻塞进程退出，但仍记录便于排查。
-        pass
+    for client in clients:
+        try:
+            await client.aclose()
+        except Exception:
+            # 关闭异常不应阻塞进程退出，但仍记录便于排查。
+            pass
 
 
 _HTTP_RETRY_ATTEMPTS = 3
@@ -9444,6 +9457,7 @@ async def run_auto_learning_cycle(
     shadow_prediction_limit: int = 100,
     analysis_candidate_limit: int = 80,
     analysis_concurrency: int = 10,
+    analysis_timeout_seconds: float = 45.0,
     auto_settle: bool = True,
     include_market_snapshot_sync: bool = False,
     market_snapshot_window_minutes: int | None = 24 * 60,
@@ -9466,6 +9480,7 @@ async def run_auto_learning_cycle(
     bounded_shadow_prediction_limit = max(0, min(int(shadow_prediction_limit or 0), 500))
     bounded_analysis_candidate_limit = max(1, min(int(analysis_candidate_limit or 80), 100))
     bounded_analysis_concurrency = max(1, min(int(analysis_concurrency or 10), 16))
+    bounded_analysis_timeout = max(5.0, min(float(analysis_timeout_seconds or 45.0), 300.0))
     bounded_market_snapshot_window = max(
         1,
         min(int(market_snapshot_window_minutes or 24 * 60), 48 * 60),
@@ -9503,6 +9518,7 @@ async def run_auto_learning_cycle(
             require_core_markets=True,
             analysis_candidate_limit=bounded_analysis_candidate_limit,
             analysis_concurrency=bounded_analysis_concurrency,
+            analysis_timeout_seconds=bounded_analysis_timeout,
             recommendation_log_path=None,
             enforce_settlement_coverage=enforce_settlement_coverage,
             league_allowlist=league_allowlist,
@@ -15745,6 +15761,7 @@ def adaptive_asian_window_minutes(
 async def auto_learning_daemon(
     *,
     interval_seconds: int = 600,
+    cycle_timeout_seconds: float = 300.0,
     timezone_name: str | None = None,
     top_n: int = 12,
     limit: int = 80,
@@ -15754,6 +15771,7 @@ async def auto_learning_daemon(
     shadow_prediction_limit: int = 100,
     analysis_candidate_limit: int = 80,
     analysis_concurrency: int = 10,
+    analysis_timeout_seconds: float = 45.0,
     include_market_snapshot_sync: bool = True,
     market_snapshot_window_minutes: int = 24 * 60,
     market_snapshot_limit: int = 80,
@@ -15771,15 +15789,18 @@ async def auto_learning_daemon(
     bounded_shadow_prediction_limit = max(0, min(int(shadow_prediction_limit or 0), 500))
     bounded_analysis_candidate_limit = max(1, min(int(analysis_candidate_limit or 80), 100))
     bounded_analysis_concurrency = max(1, min(int(analysis_concurrency or 10), 16))
+    bounded_analysis_timeout = max(5.0, min(float(analysis_timeout_seconds or 45.0), 300.0))
     bounded_market_snapshot_window = max(1, min(int(market_snapshot_window_minutes or 24 * 60), 48 * 60))
     bounded_market_snapshot_limit = max(1, min(int(market_snapshot_limit or 80), 100))
     bounded_market_snapshot_concurrency = max(1, min(int(market_snapshot_concurrency or 4), 10))
     bounded_snapshot_reanalysis_limit = max(1, min(int(snapshot_reanalysis_limit or 20), 100))
     bounded_snapshot_reanalysis_concurrency = max(1, min(int(snapshot_reanalysis_concurrency or 4), 10))
+    bounded_cycle_timeout_seconds = max(1.0, min(float(cycle_timeout_seconds or 300.0), 3600.0))
     AUTO_LEARNING_STATE.update(
         {
             "enabled": True,
             "interval_seconds": max(60, int(interval_seconds or 600)),
+            "cycle_timeout_seconds": bounded_cycle_timeout_seconds,
             "timezone_name": timezone_name or "Asia/Shanghai",
             "top_n": top_n,
             "limit": limit,
@@ -15789,6 +15810,7 @@ async def auto_learning_daemon(
             "shadow_prediction_limit": bounded_shadow_prediction_limit,
             "analysis_candidate_limit": bounded_analysis_candidate_limit,
             "analysis_concurrency": bounded_analysis_concurrency,
+            "analysis_timeout_seconds": bounded_analysis_timeout,
             "market_snapshot_sync_enabled": bool(include_market_snapshot_sync),
             "market_snapshot_window_minutes": bounded_market_snapshot_window,
             "market_snapshot_limit": bounded_market_snapshot_limit,
@@ -15836,27 +15858,31 @@ async def auto_learning_daemon(
                 AUTO_LEARNING_STATE["last_janitor_error"] = f"{type(exc).__name__}: {exc}"
 
         try:
-            result = await run_auto_learning_cycle(
-                timezone_name=timezone_name or "Asia/Shanghai",
-                asian_window_minutes=effective_window,
-                parlay_window_minutes=bounded_parlay_window_minutes,
-                learning_observation_limit=bounded_learning_observation_limit,
-                shadow_prediction_limit=bounded_shadow_prediction_limit,
-                analysis_candidate_limit=bounded_analysis_candidate_limit,
-                analysis_concurrency=bounded_analysis_concurrency,
-                include_market_snapshot_sync=include_market_snapshot_sync,
-                market_snapshot_window_minutes=bounded_market_snapshot_window,
-                market_snapshot_limit=bounded_market_snapshot_limit,
-                market_snapshot_concurrency=bounded_market_snapshot_concurrency,
-                market_snapshot_require_quality_gate=market_snapshot_require_quality_gate,
-                include_snapshot_reanalysis=include_snapshot_reanalysis,
-                snapshot_reanalysis_limit=bounded_snapshot_reanalysis_limit,
-                snapshot_reanalysis_concurrency=bounded_snapshot_reanalysis_concurrency,
-                top_n=top_n,
-                limit=limit,
-                auto_settle=True,
-                enforce_settlement_coverage=enforce_settlement_coverage,
-                league_allowlist=league_allowlist,
+            result = await asyncio.wait_for(
+                run_auto_learning_cycle(
+                    timezone_name=timezone_name or "Asia/Shanghai",
+                    asian_window_minutes=effective_window,
+                    parlay_window_minutes=bounded_parlay_window_minutes,
+                    learning_observation_limit=bounded_learning_observation_limit,
+                    shadow_prediction_limit=bounded_shadow_prediction_limit,
+                    analysis_candidate_limit=bounded_analysis_candidate_limit,
+                    analysis_concurrency=bounded_analysis_concurrency,
+                    analysis_timeout_seconds=bounded_analysis_timeout,
+                    include_market_snapshot_sync=include_market_snapshot_sync,
+                    market_snapshot_window_minutes=bounded_market_snapshot_window,
+                    market_snapshot_limit=bounded_market_snapshot_limit,
+                    market_snapshot_concurrency=bounded_market_snapshot_concurrency,
+                    market_snapshot_require_quality_gate=market_snapshot_require_quality_gate,
+                    include_snapshot_reanalysis=include_snapshot_reanalysis,
+                    snapshot_reanalysis_limit=bounded_snapshot_reanalysis_limit,
+                    snapshot_reanalysis_concurrency=bounded_snapshot_reanalysis_concurrency,
+                    top_n=top_n,
+                    limit=limit,
+                    auto_settle=True,
+                    enforce_settlement_coverage=enforce_settlement_coverage,
+                    league_allowlist=league_allowlist,
+                ),
+                timeout=bounded_cycle_timeout_seconds,
             )
             AUTO_LEARNING_STATE["run_count"] = int(AUTO_LEARNING_STATE.get("run_count") or 0) + 1
             AUTO_LEARNING_STATE["last_error"] = None
@@ -15907,6 +15933,13 @@ async def auto_learning_daemon(
                 f"empty_streak={consecutive_empty_cycles}",
                 flush=True,
             )
+        except asyncio.TimeoutError:
+            step = AUTO_LEARNING_STATE.get("current_step") or "unknown"
+            AUTO_LEARNING_STATE["last_error"] = (
+                f"TimeoutError: auto-learning cycle exceeded "
+                f"{bounded_cycle_timeout_seconds:.0f}s at step={step}"
+            )
+            print(f"football-data auto-learning error: {AUTO_LEARNING_STATE['last_error']}", flush=True)
         except Exception as exc:
             AUTO_LEARNING_STATE["last_error"] = f"{type(exc).__name__}: {exc}"
             print(f"football-data auto-learning error: {AUTO_LEARNING_STATE['last_error']}", flush=True)
@@ -16018,6 +16051,7 @@ async def shortlist_value_matches(
     require_core_markets: bool = True,
     analysis_candidate_limit: int = 30,
     analysis_concurrency: int = 6,
+    analysis_timeout_seconds: float | None = None,
     recommendation_log_path: str | None = None,
     use_learning_policy: bool = True,
     league_allowlist: list[str] | frozenset[str] | None = None,
@@ -16110,6 +16144,10 @@ async def shortlist_value_matches(
     bounded_limit = max(1, int(limit or 30))
     bounded_analysis_limit = max(1, min(bounded_limit, int(analysis_candidate_limit or 30), 100))
     bounded_concurrency = max(1, min(int(analysis_concurrency or 6), 16))
+    bounded_analysis_timeout = max(
+        5.0,
+        min(float(analysis_timeout_seconds or os.getenv("FOOTBALL_DATA_SHORTLIST_ANALYSIS_TIMEOUT_SECONDS", "45")), 300.0),
+    )
     analysis_matches = matches[:bounded_analysis_limit]
 
     async def analyze_for_shortlist(match: dict[str, Any]) -> dict[str, Any]:
@@ -16117,14 +16155,27 @@ async def shortlist_value_matches(
         if not match_query:
             return {"kind": "rejected", "payload": {"match": match, "reason": "match_query_missing"}}
         try:
-            analysis = await analyze_single_match(
-                match_query,
-                league=match.get("league") or league,
-                as_of=as_of,
-                timezone_name=timezone_name,
-                window_hours=window_hours,
-                include_source_probe=False,
+            analysis = await asyncio.wait_for(
+                analyze_single_match(
+                    match_query,
+                    league=match.get("league") or league,
+                    as_of=as_of,
+                    timezone_name=timezone_name,
+                    window_hours=window_hours,
+                    include_source_probe=False,
+                ),
+                timeout=bounded_analysis_timeout,
             )
+        except asyncio.TimeoutError:
+            return {
+                "kind": "rejected",
+                "payload": {
+                    "match": match,
+                    "query": match_query,
+                    "reason": "analysis_timeout",
+                    "error": f"TimeoutError: single-match analysis exceeded {bounded_analysis_timeout:.0f}s",
+                },
+            }
         except Exception as exc:
             return {
                 "kind": "rejected",
@@ -16272,6 +16323,7 @@ async def shortlist_value_matches(
         "analyzed_count": len(analysis_matches),
         "analysis_candidate_limit": bounded_analysis_limit,
         "analysis_concurrency": bounded_concurrency,
+        "analysis_timeout_seconds": bounded_analysis_timeout,
         "not_analyzed_count": max(0, len(matches) - len(analysis_matches)),
         "eligible_count": len(picks),
         "returned_count": len(returned),

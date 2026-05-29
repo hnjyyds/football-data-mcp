@@ -54,6 +54,17 @@ def _record_learning_cycle_status(*, finished_at: float | None, error: str | Non
         _last_learning_cycle_error = error
 
 
+def _auto_learning_state_cycle_status() -> tuple[str | None, str | None]:
+    """从 sources.AUTO_LEARNING_STATE 读取每轮学习自己的完成状态。"""
+    state = sources.AUTO_LEARNING_STATE
+    finished_at = state.get("last_finished_at_utc")
+    last_error = state.get("last_error")
+    return (
+        str(finished_at) if finished_at else None,
+        str(last_error) if last_error else None,
+    )
+
+
 mcp = FastMCP(
     "football-data-mcp",
     instructions=(
@@ -88,16 +99,22 @@ async def health_api(request: Request) -> Response:
     uptime_seconds = int(time.time() - _server_start_time)
     # 加锁读取，保证时间与错误来自同一次写入。
     last_cycle_time, last_cycle_error = learning_cycle_status()
+    last_learning_cycle_at = (
+        datetime.fromtimestamp(last_cycle_time, tz=timezone.utc).isoformat()
+        if last_cycle_time
+        else None
+    )
+    state_cycle_at, state_cycle_error = _auto_learning_state_cycle_status()
+    if last_learning_cycle_at is None:
+        last_learning_cycle_at = state_cycle_at
+    if last_cycle_error is None:
+        last_cycle_error = state_cycle_error
     payload = {
         "status": "ok",
         "uptime_seconds": uptime_seconds,
         "db_path": db_path,
         "db_accessible": db_accessible,
-        "last_learning_cycle_at": (
-            datetime.fromtimestamp(last_cycle_time, tz=timezone.utc).isoformat()
-            if last_cycle_time
-            else None
-        ),
+        "last_learning_cycle_at": last_learning_cycle_at,
         "last_learning_cycle_error": last_cycle_error,
         "auto_learning_enabled": env_bool("FOOTBALL_DATA_AUTO_LEARNING_ENABLED", False),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -414,6 +431,7 @@ async def run_auto_learning_cycle(
     shadow_prediction_limit: int = 100,
     analysis_candidate_limit: int = 80,
     analysis_concurrency: int = 10,
+    analysis_timeout_seconds: float = 45,
     include_market_snapshot_sync: bool = True,
     market_snapshot_limit: int = 80,
     market_snapshot_concurrency: int = 4,
@@ -446,6 +464,7 @@ async def run_auto_learning_cycle(
         shadow_prediction_limit=shadow_prediction_limit or 100,
         analysis_candidate_limit=analysis_candidate_limit or 80,
         analysis_concurrency=analysis_concurrency or 10,
+        analysis_timeout_seconds=analysis_timeout_seconds or 45,
         include_market_snapshot_sync=include_market_snapshot_sync,
         market_snapshot_limit=market_snapshot_limit or 80,
         market_snapshot_concurrency=market_snapshot_concurrency or 4,
@@ -655,6 +674,7 @@ async def shortlist_value_matches(
     require_core_markets: bool = True,
     analysis_candidate_limit: int = 30,
     analysis_concurrency: int = 6,
+    analysis_timeout_seconds: float = 45,
     use_learning_policy: bool = True,
     enforce_settlement_coverage: bool = False,
     league_allowlist: list[str] | None = None,
@@ -692,6 +712,7 @@ async def shortlist_value_matches(
         require_core_markets=require_core_markets,
         analysis_candidate_limit=analysis_candidate_limit or 30,
         analysis_concurrency=analysis_concurrency or 6,
+        analysis_timeout_seconds=analysis_timeout_seconds or 45,
         use_learning_policy=use_learning_policy,
         enforce_settlement_coverage=enforce_settlement_coverage,
         league_allowlist=league_allowlist,
