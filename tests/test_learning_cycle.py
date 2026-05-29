@@ -571,6 +571,7 @@ def test_auto_learning_cycle_records_shadow_predictions_from_all_analyzed_items(
 def test_auto_learning_cycle_runs_shortlist_before_slow_leisu_snapshot_sync(monkeypatch, tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
     calls = []
+    monkeypatch.setenv("LEISU_ODDS_PROXY_URL", "http://127.0.0.1:8918/leisu/odds/{match_id}")
 
     async def fake_sync_leisu_odds_snapshots(**kwargs):
         calls.append(("snapshot_sync", kwargs))
@@ -630,6 +631,42 @@ def test_auto_learning_cycle_runs_shortlist_before_slow_leisu_snapshot_sync(monk
     assert result["market_snapshot_sync"]["saved_snapshot_count"] == 9
     assert result["market_snapshot_sync"]["probed_match_count"] == 2
     assert sources_module.AUTO_LEARNING_STATE["last_market_snapshot_sync"]["saved_snapshot_count"] == 9
+
+
+def test_auto_learning_cycle_skips_background_leisu_sync_without_authorized_proxy(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    monkeypatch.delenv("LEISU_ODDS_PROXY_URL", raising=False)
+
+    async def fake_sync_leisu_odds_snapshots(**kwargs):
+        raise AssertionError("background Leisu sync must not run without an authorized proxy")
+
+    async def fake_shortlist_value_matches(**kwargs):
+        return {
+            "status": "ok",
+            "tool": "shortlist_value_matches",
+            "mode": kwargs["mode"],
+            "target_market": kwargs["target_market"],
+            "picks": [],
+            "rejected": [],
+        }
+
+    monkeypatch.setattr(sources_module, "sync_leisu_odds_snapshots", fake_sync_leisu_odds_snapshots)
+    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
+
+    result = asyncio.run(
+        sources_module.run_auto_learning_cycle(
+            db_path=db_path,
+            auto_settle=False,
+            include_market_snapshot_sync=True,
+            include_jingcai_parlay=False,
+            market_snapshot_requires_leisu_proxy=True,
+        )
+    )
+
+    assert result["market_snapshot_sync"]["status"] == "skipped_proxy_required"
+    assert result["market_snapshot_sync"]["leisu_proxy_configured"] is False
+    assert result["market_snapshot_sync"]["saved_snapshot_count"] == 0
+    assert sources_module.AUTO_LEARNING_STATE["last_market_snapshot_sync"]["status"] == "skipped_proxy_required"
 
 
 def test_auto_learning_cycle_records_observation_when_candidate_is_not_publishable(monkeypatch, tmp_path):
@@ -5865,11 +5902,13 @@ def test_auto_learning_daemon_passes_background_sampling_windows(monkeypatch):
     assert calls[0]["market_snapshot_window_minutes"] == 12 * 60
     assert calls[0]["market_snapshot_limit"] == 16
     assert calls[0]["market_snapshot_concurrency"] == 3
+    assert calls[0]["market_snapshot_requires_leisu_proxy"] is True
     assert sources_module.AUTO_LEARNING_STATE["asian_window_minutes"] == 24 * 60
     assert sources_module.AUTO_LEARNING_STATE["parlay_window_minutes"] == 24 * 60
     assert sources_module.AUTO_LEARNING_STATE["learning_observation_limit"] == 40
     assert sources_module.AUTO_LEARNING_STATE["market_snapshot_sync_enabled"] is True
     assert sources_module.AUTO_LEARNING_STATE["market_snapshot_limit"] == 16
+    assert sources_module.AUTO_LEARNING_STATE["market_snapshot_requires_leisu_proxy"] is True
 
 
 def test_auto_learning_daemon_defaults_to_near_kickoff_predictions_and_wide_snapshot_collection(monkeypatch):

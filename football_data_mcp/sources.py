@@ -706,6 +706,11 @@ def _leisu_proxy_sync_limit() -> int:
         return 12
 
 
+def _auto_leisu_snapshot_requires_proxy() -> bool:
+    raw = os.getenv("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRES_LEISU_PROXY", "true").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _leisu_mobile_auth_key(path: str, *, timestamp: int | None = None, nonce: str | None = None) -> str:
     ts = int(timestamp or (time.time() + 10))
     random_nonce = (nonce or uuid.uuid4().hex).replace("-", "")
@@ -9270,6 +9275,8 @@ def _market_snapshot_sync_summary(result: dict[str, Any]) -> dict[str, Any]:
         "accessible_match_count": int(leisu.get("accessible_match_count") or 0),
         "promotable_match_count": int(leisu.get("promotable_match_count") or 0),
         "require_quality_gate": bool(leisu.get("require_quality_gate")),
+        "requires_leisu_proxy": _auto_leisu_snapshot_requires_proxy(),
+        "leisu_proxy_configured": bool(os.getenv("LEISU_ODDS_PROXY_URL", "").strip()),
         "hard_flags": [flag for flag, _count in hard_flags.most_common(5)],
         "soft_flags": [flag for flag, _count in soft_flags.most_common(5)],
         "db_path": snapshot_store_info.get("db_path") or snapshot_store.snapshot_db_path(),
@@ -9588,6 +9595,7 @@ async def run_auto_learning_cycle(
     market_snapshot_limit: int = 80,
     market_snapshot_concurrency: int = 4,
     market_snapshot_require_quality_gate: bool = True,
+    market_snapshot_requires_leisu_proxy: bool | None = None,
     include_snapshot_reanalysis: bool = True,
     snapshot_reanalysis_limit: int = 20,
     snapshot_reanalysis_concurrency: int = 4,
@@ -9611,12 +9619,20 @@ async def run_auto_learning_cycle(
     )
     bounded_market_snapshot_limit = max(1, min(int(market_snapshot_limit or 80), 100))
     bounded_market_snapshot_concurrency = max(1, min(int(market_snapshot_concurrency or 4), 10))
+    require_proxy_for_auto_snapshot = (
+        _auto_leisu_snapshot_requires_proxy()
+        if market_snapshot_requires_leisu_proxy is None
+        else bool(market_snapshot_requires_leisu_proxy)
+    )
+    leisu_proxy_configured = bool(os.getenv("LEISU_ODDS_PROXY_URL", "").strip())
     market_snapshot_sync: dict[str, Any] = {
         "enabled": False,
         "provider": "leisu",
         "status": "disabled",
         "saved_snapshot_count": 0,
         "generated_snapshot_count": 0,
+        "requires_leisu_proxy": require_proxy_for_auto_snapshot,
+        "leisu_proxy_configured": leisu_proxy_configured,
     }
     snapshot_reanalysis: dict[str, Any] = {
         "enabled": bool(include_snapshot_reanalysis),
@@ -9722,7 +9738,21 @@ async def run_auto_learning_cycle(
             "recommended_tickets": parlay_result.get("recommended_tickets") or [],
         }
 
-    if include_market_snapshot_sync:
+    if include_market_snapshot_sync and require_proxy_for_auto_snapshot and not leisu_proxy_configured:
+        market_snapshot_sync = {
+            "enabled": True,
+            "provider": "leisu",
+            "status": "skipped_proxy_required",
+            "saved_snapshot_count": 0,
+            "generated_snapshot_count": 0,
+            "requires_leisu_proxy": True,
+            "leisu_proxy_configured": False,
+            "reason": "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRES_LEISU_PROXY=true and LEISU_ODDS_PROXY_URL is empty",
+            "db_path": snapshot_store.snapshot_db_path(),
+            "at_utc": now_utc().isoformat(),
+        }
+        AUTO_LEARNING_STATE["last_market_snapshot_sync"] = market_snapshot_sync
+    elif include_market_snapshot_sync:
         AUTO_LEARNING_STATE["current_step"] = "market_snapshot_sync"
         try:
             market_snapshot_sync = _market_snapshot_sync_summary(
@@ -9743,6 +9773,8 @@ async def run_auto_learning_cycle(
                 "status": "error",
                 "saved_snapshot_count": 0,
                 "generated_snapshot_count": 0,
+                "requires_leisu_proxy": require_proxy_for_auto_snapshot,
+                "leisu_proxy_configured": leisu_proxy_configured,
                 "error": f"{type(exc).__name__}: {exc}",
                 "db_path": snapshot_store.snapshot_db_path(),
                 "at_utc": now_utc().isoformat(),
@@ -15901,6 +15933,7 @@ async def auto_learning_daemon(
     market_snapshot_limit: int = 80,
     market_snapshot_concurrency: int = 4,
     market_snapshot_require_quality_gate: bool = True,
+    market_snapshot_requires_leisu_proxy: bool = True,
     include_snapshot_reanalysis: bool = True,
     snapshot_reanalysis_limit: int = 20,
     snapshot_reanalysis_concurrency: int = 4,
@@ -15940,6 +15973,7 @@ async def auto_learning_daemon(
             "market_snapshot_limit": bounded_market_snapshot_limit,
             "market_snapshot_concurrency": bounded_market_snapshot_concurrency,
             "market_snapshot_require_quality_gate": bool(market_snapshot_require_quality_gate),
+            "market_snapshot_requires_leisu_proxy": bool(market_snapshot_requires_leisu_proxy),
             "snapshot_reanalysis_enabled": bool(include_snapshot_reanalysis),
             "snapshot_reanalysis_limit": bounded_snapshot_reanalysis_limit,
             "snapshot_reanalysis_concurrency": bounded_snapshot_reanalysis_concurrency,
@@ -15997,6 +16031,7 @@ async def auto_learning_daemon(
                     market_snapshot_limit=bounded_market_snapshot_limit,
                     market_snapshot_concurrency=bounded_market_snapshot_concurrency,
                     market_snapshot_require_quality_gate=market_snapshot_require_quality_gate,
+                    market_snapshot_requires_leisu_proxy=market_snapshot_requires_leisu_proxy,
                     include_snapshot_reanalysis=include_snapshot_reanalysis,
                     snapshot_reanalysis_limit=bounded_snapshot_reanalysis_limit,
                     snapshot_reanalysis_concurrency=bounded_snapshot_reanalysis_concurrency,

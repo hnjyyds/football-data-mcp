@@ -1686,6 +1686,7 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
         "FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES",
         "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES",
         "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_LIMIT",
+        "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRES_LEISU_PROXY",
         "FOOTBALL_DATA_AUTO_LEARNING_OBSERVATION_LIMIT",
         "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CANDIDATE_LIMIT",
         "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY",
@@ -1704,6 +1705,7 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
     assert config["parlay_window_minutes"] == 10
     assert config["market_snapshot_window_minutes"] == 24 * 60
     assert config["market_snapshot_limit"] == 80
+    assert config["market_snapshot_requires_leisu_proxy"] is True
     assert config["learning_observation_limit"] == 30
     assert config["analysis_candidate_limit"] == 80
     assert config["analysis_concurrency"] == 10
@@ -1722,6 +1724,7 @@ def test_docker_compose_auto_learning_defaults_keep_snapshot_history_wide():
     assert "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS:-45" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES:-1440" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_LIMIT:-80" in compose_text
+    assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRES_LEISU_PROXY:-true" in compose_text
 
 
 def test_run_auto_learning_cycle_tool_keeps_snapshot_collection_wide_by_default(monkeypatch):
@@ -1739,6 +1742,7 @@ def test_run_auto_learning_cycle_tool_keeps_snapshot_collection_wide_by_default(
     assert calls[0]["asian_window_minutes"] == 10
     assert calls[0]["parlay_window_minutes"] == 10
     assert calls[0]["market_snapshot_window_minutes"] == 24 * 60
+    assert calls[0]["market_snapshot_requires_leisu_proxy"] is True
 
 
 def test_shortlist_value_matches_uses_concurrent_fast_analysis_without_repeated_source_probe(monkeypatch):

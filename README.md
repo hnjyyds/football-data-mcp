@@ -109,7 +109,7 @@ open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir="$H
 uv run --extra browser-proxy python -m scripts.leisu_browser_proxy --port 8918 --connect-cdp http://127.0.0.1:9222
 ```
 
-In that Chrome window, open `https://m.leisu.com/` first and manually browse a match page until verification passes. Keep `FOOTBALL_DATA_AUTO_SYNC_LEISU_ODDS=false` while authorizing so the backend does not generate a request burst during the slider challenge; re-enable it only after the proxy returns real `euro` / `asia` / `size` data. When `LEISU_ODDS_PROXY_URL` is configured, snapshot sync is forced to serial requests and capped by `LEISU_PROXY_SYNC_LIMIT` (default `12`) with `LEISU_PROXY_REQUEST_SPACING_SECONDS` (default `2.0`) between requests, because request bursts are a strong risk signal for Leisu/Alibaba WAF.
+In that Chrome window, open `https://m.leisu.com/` first and manually browse a match page until verification passes. Keep `FOOTBALL_DATA_AUTO_SYNC_LEISU_ODDS=false` while authorizing so the backend does not generate a request burst during the slider challenge; re-enable it only after the proxy returns real `euro` / `asia` / `size` data. Background Leisu snapshot sync also defaults to `FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRES_LEISU_PROXY=true`, so turning on `FOOTBALL_DATA_AUTO_SYNC_LEISU_ODDS=true` will skip Leisu odds collection unless `LEISU_ODDS_PROXY_URL` is configured. When `LEISU_ODDS_PROXY_URL` is configured, snapshot sync is forced to serial requests and capped by `LEISU_PROXY_SYNC_LIMIT` (default `12`) with `LEISU_PROXY_REQUEST_SPACING_SECONDS` (default `2.0`) between requests, because request bursts are a strong risk signal for Leisu/Alibaba WAF.
 
 Then configure Docker Compose to use the authorized local session:
 

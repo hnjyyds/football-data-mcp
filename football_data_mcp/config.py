@@ -88,6 +88,9 @@ class AutoLearningSettings:
     market_snapshot_require_quality_gate: bool = field(
         default_factory=lambda: env_bool("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRE_QUALITY_GATE", True)
     )
+    market_snapshot_requires_leisu_proxy: bool = field(
+        default_factory=lambda: env_bool("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRES_LEISU_PROXY", True)
+    )
     include_snapshot_reanalysis: bool = field(
         default_factory=lambda: env_bool("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REANALYSIS", True)
     )
@@ -120,6 +123,7 @@ class AutoLearningSettings:
             "market_snapshot_limit": self.market_snapshot_limit,
             "market_snapshot_concurrency": self.market_snapshot_concurrency,
             "market_snapshot_require_quality_gate": self.market_snapshot_require_quality_gate,
+            "market_snapshot_requires_leisu_proxy": self.market_snapshot_requires_leisu_proxy,
             "include_snapshot_reanalysis": self.include_snapshot_reanalysis,
             "snapshot_reanalysis_limit": self.snapshot_reanalysis_limit,
             "snapshot_reanalysis_concurrency": self.snapshot_reanalysis_concurrency,
