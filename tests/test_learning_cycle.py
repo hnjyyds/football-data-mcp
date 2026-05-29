@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -1810,8 +1811,13 @@ def test_dashboard_prediction_ledger_exposes_paper_prediction_diagnostic(tmp_pat
     assert "无正向边际" in detail["evidence"]["final_execution_advice"]["headline"]
 
 
-def test_dashboard_snapshot_summarizes_open_match_phases(tmp_path):
+def test_dashboard_snapshot_summarizes_open_match_phases(monkeypatch, tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
+    monkeypatch.setattr(
+        sources_module,
+        "now_utc",
+        lambda: datetime(2026, 5, 28, 4, 0, tzinfo=timezone.utc),
+    )
     learning_store.save_recommendation_records(
         [
             {
@@ -5845,6 +5851,7 @@ def test_auto_learning_daemon_passes_background_sampling_windows(monkeypatch):
                 market_snapshot_window_minutes=12 * 60,
                 market_snapshot_limit=16,
                 market_snapshot_concurrency=3,
+                analysis_timeout_seconds=30,
             )
         )
 
@@ -5853,6 +5860,7 @@ def test_auto_learning_daemon_passes_background_sampling_windows(monkeypatch):
     assert calls[0]["asian_window_minutes"] == 24 * 60
     assert calls[0]["parlay_window_minutes"] == 24 * 60
     assert calls[0]["learning_observation_limit"] == 40
+    assert calls[0]["analysis_timeout_seconds"] == 30
     assert calls[0]["include_market_snapshot_sync"] is True
     assert calls[0]["market_snapshot_window_minutes"] == 12 * 60
     assert calls[0]["market_snapshot_limit"] == 16
@@ -5891,3 +5899,33 @@ def test_auto_learning_daemon_defaults_to_near_kickoff_predictions_and_wide_snap
     assert calls[0]["parlay_window_minutes"] == 10
     assert calls[0]["market_snapshot_window_minutes"] == 24 * 60
     assert calls[0]["market_snapshot_limit"] == 80
+
+
+def test_auto_learning_daemon_times_out_stuck_cycle_and_resets_state(monkeypatch):
+    class StopLoop(Exception):
+        pass
+
+    async def fake_run_auto_learning_cycle(**kwargs):
+        sources_module.AUTO_LEARNING_STATE["current_step"] = "asian_shortlist"
+        await asyncio.sleep(3600)
+        return {"saved_record_count": 1}
+
+    async def fake_sleep(seconds):
+        if seconds >= 3600:
+            await asyncio.Future()
+        raise StopLoop()
+
+    monkeypatch.setattr(sources_module, "run_auto_learning_cycle", fake_run_auto_learning_cycle)
+    monkeypatch.setattr(sources_module.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(StopLoop):
+        asyncio.run(
+            sources_module.auto_learning_daemon(
+                interval_seconds=60,
+                cycle_timeout_seconds=1,
+            )
+        )
+
+    assert sources_module.AUTO_LEARNING_STATE["current_step"] == "idle"
+    assert sources_module.AUTO_LEARNING_STATE["last_finished_at_utc"] is not None
+    assert sources_module.AUTO_LEARNING_STATE["last_error"].startswith("TimeoutError:")

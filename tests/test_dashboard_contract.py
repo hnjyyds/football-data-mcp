@@ -65,6 +65,9 @@ class TestAutoLearningState:
                 "last_finished_at_utc": "2026-05-28T06:59:00+00:00",
                 "current_step": "asian_shortlist",
                 "consecutive_empty_cycles": 3,
+                "interval_seconds": 120,
+                "cycle_timeout_seconds": 300,
+                "analysis_timeout_seconds": 45,
                 "last_result_summary": {
                     "asian_total_candidates": 6,
                     "asian_record_count": 0,
@@ -80,6 +83,9 @@ class TestAutoLearningState:
         assert als["run_count"] == 42
         assert als["last_error"] == "boom"
         assert als["consecutive_empty_cycles"] == 3
+        assert als["interval_seconds"] == 120
+        assert als["cycle_timeout_seconds"] == 300
+        assert als["analysis_timeout_seconds"] == 45
         assert als["last_result_summary"]["asian_total_candidates"] == 6
 
     def test_missing_state_defaults_to_disabled(self):

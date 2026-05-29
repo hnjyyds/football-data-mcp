@@ -4,7 +4,7 @@
 - 学习数据库默认路径不再落在 /tmp（容器外重启不会丢失样本）；
 - LEISU_MOBILE_API_SECRET 可由环境变量覆盖；
 - server 守护线程状态读写经过同一把锁；
-- sources.close_client() 能优雅关闭模块级 httpx 客户端。
+- sources 的 httpx 客户端按事件循环隔离并能优雅关闭。
 """
 from __future__ import annotations
 
@@ -127,10 +127,28 @@ class TestSourcesCloseClient:
         assert cleared, "close_client must reset module-level _CLIENT"
         assert client.is_closed, "underlying httpx client must be closed"
 
+    def test_get_client_is_isolated_per_event_loop(self):
+        from football_data_mcp import sources
+        importlib.reload(sources)
+
+        async def scenario() -> httpx.AsyncClient:
+            return await sources.get_client()
+
+        first = asyncio.run(scenario())
+        second = asyncio.run(scenario())
+
+        try:
+            assert first is not second
+            assert len(sources._CLIENTS_BY_LOOP) == 2
+        finally:
+            asyncio.run(sources.close_client())
+
     def test_close_client_is_safe_when_never_initialized(self):
         from football_data_mcp import sources
         importlib.reload(sources)
         assert sources._CLIENT is None
+        assert sources._CLIENTS_BY_LOOP == {}
         # 不应抛异常
         asyncio.run(sources.close_client())
         assert sources._CLIENT is None
+        assert sources._CLIENTS_BY_LOOP == {}

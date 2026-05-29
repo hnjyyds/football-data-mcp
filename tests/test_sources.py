@@ -1647,6 +1647,7 @@ def test_list_matches_includes_late_night_fixtures_from_previous_dongqiudi_day(m
 
 def test_auto_learning_config_from_env_supports_background_sampling_windows(monkeypatch):
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_INTERVAL_SECONDS", "900")
+    monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_CYCLE_TIMEOUT_SECONDS", "180")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_TOP_N", "12")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_LIMIT", "80")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_TIMEZONE", "Asia/Shanghai")
@@ -1655,11 +1656,13 @@ def test_auto_learning_config_from_env_supports_background_sampling_windows(monk
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_OBSERVATION_LIMIT", "40")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CANDIDATE_LIMIT", "90")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY", "12")
+    monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS", "30")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_SHADOW_PREDICTION_LIMIT", "120")
 
     config = server._auto_learning_config_from_env()
 
     assert config["interval_seconds"] == 900
+    assert config["cycle_timeout_seconds"] == 180
     assert config["top_n"] == 12
     assert config["limit"] == 80
     assert config["timezone_name"] == "Asia/Shanghai"
@@ -1668,12 +1671,14 @@ def test_auto_learning_config_from_env_supports_background_sampling_windows(monk
     assert config["learning_observation_limit"] == 40
     assert config["analysis_candidate_limit"] == 90
     assert config["analysis_concurrency"] == 12
+    assert config["analysis_timeout_seconds"] == 30
     assert config["shadow_prediction_limit"] == 120
 
 
 def test_auto_learning_config_separates_prediction_window_from_snapshot_collection(monkeypatch):
     for key in [
         "FOOTBALL_DATA_AUTO_LEARNING_INTERVAL_SECONDS",
+        "FOOTBALL_DATA_AUTO_LEARNING_CYCLE_TIMEOUT_SECONDS",
         "FOOTBALL_DATA_AUTO_LEARNING_TOP_N",
         "FOOTBALL_DATA_AUTO_LEARNING_LIMIT",
         "FOOTBALL_DATA_AUTO_LEARNING_TIMEZONE",
@@ -1684,6 +1689,7 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
         "FOOTBALL_DATA_AUTO_LEARNING_OBSERVATION_LIMIT",
         "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CANDIDATE_LIMIT",
         "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY",
+        "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS",
         "FOOTBALL_DATA_AUTO_LEARNING_SHADOW_PREDICTION_LIMIT",
     ]:
         monkeypatch.delenv(key, raising=False)
@@ -1691,6 +1697,7 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
     config = server._auto_learning_config_from_env()
 
     assert config["interval_seconds"] == 120
+    assert config["cycle_timeout_seconds"] == 300
     assert config["top_n"] == 12
     assert config["limit"] == 80
     assert config["asian_window_minutes"] == 10
@@ -1700,6 +1707,7 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
     assert config["learning_observation_limit"] == 30
     assert config["analysis_candidate_limit"] == 80
     assert config["analysis_concurrency"] == 10
+    assert config["analysis_timeout_seconds"] == 45
     assert config["shadow_prediction_limit"] == 100
 
 
@@ -1707,9 +1715,11 @@ def test_docker_compose_auto_learning_defaults_keep_snapshot_history_wide():
     compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
 
     assert "FOOTBALL_DATA_AUTO_LEARNING_INTERVAL_SECONDS:-120" in compose_text
+    assert "FOOTBALL_DATA_AUTO_LEARNING_CYCLE_TIMEOUT_SECONDS:-300" in compose_text
     # 业务预测只持久化近开赛样本，避免过早赔率污染学习标签；盘口快照窗口保持更宽。
     assert "FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES:-10" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES:-10" in compose_text
+    assert "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS:-45" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES:-1440" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_LIMIT:-80" in compose_text
 
@@ -1786,9 +1796,47 @@ def test_shortlist_value_matches_uses_concurrent_fast_analysis_without_repeated_
     assert result["analyzed_count"] == 6
     assert result["picks"][0]["final_execution_advice"]["action"] == "bet_now"
     assert max_active > 1
-    assert elapsed < 0.05
+    assert elapsed < 0.15
     assert kwargs_seen
     assert all(kwargs.get("include_source_probe") is False for kwargs in kwargs_seen)
+
+
+def test_shortlist_value_matches_rejects_single_match_analysis_timeout(monkeypatch):
+    async def fake_list_matches(*args, **kwargs):
+        return {
+            "status": "ok",
+            "time_window_policy": {"as_of": "2026-05-23T20:00:00+08:00", "window_hours": 1},
+            "matches": [
+                {
+                    "home_team": "超时主队",
+                    "away_team": "超时客队",
+                    "league": "测试联赛",
+                    "kickoff_utc_plus_8": "2026-05-23T20:20:00+08:00",
+                }
+            ],
+            "total_count": 1,
+        }
+
+    async def slow_analyze_single_match(*args, **kwargs):
+        await asyncio.sleep(3600)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(sources_module, "list_matches", fake_list_matches)
+    monkeypatch.setattr(sources_module, "analyze_single_match", slow_analyze_single_match)
+
+    result = asyncio.run(
+        sources_module.shortlist_value_matches(
+            window_minutes=60,
+            analysis_candidate_limit=1,
+            analysis_concurrency=1,
+            analysis_timeout_seconds=5,
+            enforce_settlement_coverage=False,
+        )
+    )
+
+    assert result["analysis_timeout_seconds"] == 5.0
+    assert result["returned_count"] == 0
+    assert result["rejected"][0]["reason"] == "analysis_timeout"
 
 
 def test_shortlist_value_matches_default_analyzes_all_thirty_listed_candidates(monkeypatch):

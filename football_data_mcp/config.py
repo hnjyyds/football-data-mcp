@@ -46,6 +46,9 @@ class ServerSettings:
 @dataclass(frozen=True)
 class AutoLearningSettings:
     interval_seconds: int = field(default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_INTERVAL_SECONDS", 120))
+    cycle_timeout_seconds: int = field(
+        default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_CYCLE_TIMEOUT_SECONDS", 300)
+    )
     top_n: int = field(default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_TOP_N", 12))
     limit: int = field(default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_LIMIT", 80))
     timezone_name: str = field(default_factory=lambda: env_str("FOOTBALL_DATA_AUTO_LEARNING_TIMEZONE", "Asia/Shanghai"))
@@ -63,6 +66,9 @@ class AutoLearningSettings:
     )
     analysis_concurrency: int = field(
         default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY", 10)
+    )
+    analysis_timeout_seconds: int = field(
+        default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS", 45)
     )
     shadow_prediction_limit: int = field(
         default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_SHADOW_PREDICTION_LIMIT", 100)
@@ -98,6 +104,7 @@ class AutoLearningSettings:
     def as_dict(self, *, league_allowlist: list[str] | None = None) -> dict[str, Any]:
         return {
             "interval_seconds": self.interval_seconds,
+            "cycle_timeout_seconds": self.cycle_timeout_seconds,
             "top_n": self.top_n,
             "limit": self.limit,
             "timezone_name": self.timezone_name,
@@ -106,6 +113,7 @@ class AutoLearningSettings:
             "learning_observation_limit": self.learning_observation_limit,
             "analysis_candidate_limit": self.analysis_candidate_limit,
             "analysis_concurrency": self.analysis_concurrency,
+            "analysis_timeout_seconds": self.analysis_timeout_seconds,
             "shadow_prediction_limit": self.shadow_prediction_limit,
             "include_market_snapshot_sync": self.include_market_snapshot_sync,
             "market_snapshot_window_minutes": self.market_snapshot_window_minutes,

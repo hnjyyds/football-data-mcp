@@ -48,6 +48,8 @@ class AutoLearningState(TypedDict, total=False):
     current_step: str | None
     consecutive_empty_cycles: int
     interval_seconds: int | None
+    cycle_timeout_seconds: int | None
+    analysis_timeout_seconds: int | None
     effective_window_minutes: int | None
     last_result_summary: LastResultSummary | None
 
@@ -235,6 +237,8 @@ def normalize_auto_learning_state(raw: Any) -> AutoLearningState:
         "current_step": _as_str_or_none(state.get("current_step")),
         "consecutive_empty_cycles": _as_int(state.get("consecutive_empty_cycles")),
         "interval_seconds": _as_int_or_none(state.get("interval_seconds")),
+        "cycle_timeout_seconds": _as_int_or_none(state.get("cycle_timeout_seconds")),
+        "analysis_timeout_seconds": _as_int_or_none(state.get("analysis_timeout_seconds")),
         "effective_window_minutes": _as_int_or_none(state.get("effective_window_minutes")),
         "last_result_summary": summary if summary_raw else None,
     }

@@ -97,6 +97,20 @@ def test_dashboard_summary_errors_use_unified_response(monkeypatch):
     assert "generated_at_utc" in body
 
 
+def test_health_api_reports_auto_learning_state_cycle_status(monkeypatch):
+    monkeypatch.setattr(server, "learning_cycle_status", lambda: (None, None))
+    monkeypatch.setattr(server.sources, "AUTO_LEARNING_STATE", {
+        "last_finished_at_utc": "2026-05-29T00:24:24+00:00",
+        "last_error": "TimeoutError:",
+    })
+
+    response = asyncio.run(server.health_api(_request()))
+    body = json.loads(response.body)
+
+    assert body["last_learning_cycle_at"] == "2026-05-29T00:24:24+00:00"
+    assert body["last_learning_cycle_error"] == "TimeoutError:"
+
+
 def test_dashboard_match_not_found_uses_unified_error(monkeypatch):
     async def fake_to_thread(func, *args, **kwargs):
         return func(*args, **kwargs)
