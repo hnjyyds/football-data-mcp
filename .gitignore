@@ -26,6 +26,7 @@ yarn-error.log*
 *.log
 .env
 .env.*
+.leisu-browser-profile/
 
 # Editor / OS
 .idea/

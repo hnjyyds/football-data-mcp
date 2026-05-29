@@ -3222,6 +3222,82 @@ def test_leisu_access_status_detects_rate_limit_html():
     assert status["requires_cookie_or_proxy"] is True
 
 
+def test_leisu_access_status_detects_interactive_aliyun_captcha():
+    html = """
+    <meta name="aliyun_waf_aa" content="token">
+    <title>滑动验证页面</title>
+    <script src="//o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"></script>
+    <script>initAliyunCaptcha({success: function(token) { location.replace(token); }});</script>
+    """
+
+    status = sources_module.leisu_odds_access_status(html)
+
+    assert status == {
+        "status": "interactive_captcha",
+        "blocked": True,
+        "requires_cookie_or_proxy": True,
+        "reason": "aliyun_interactive_captcha",
+    }
+
+
+def test_leisu_access_status_reads_proxy_verification_json():
+    body = json.dumps(
+        {
+            "status": "interactive_captcha",
+            "access": {
+                "status": "interactive_captcha",
+                "blocked": True,
+                "requires_cookie_or_proxy": True,
+                "reason": "aliyun_interactive_captcha",
+            },
+            "verification_url": "https://m.leisu.com/live/odds-4523319",
+        },
+        ensure_ascii=False,
+    )
+
+    status = sources_module.leisu_odds_access_status(body)
+
+    assert status == {
+        "status": "interactive_captcha",
+        "blocked": True,
+        "requires_cookie_or_proxy": True,
+        "reason": "aliyun_interactive_captcha",
+    }
+
+
+def test_leisu_interactive_captcha_trips_long_cooldown(monkeypatch):
+    monkeypatch.setattr(sources_module, "_LEISU_CB_CONSECUTIVE_403", 0)
+    monkeypatch.setattr(sources_module, "_LEISU_CB_OPEN_UNTIL", 0.0)
+    monkeypatch.setattr(sources_module, "_LEISU_CB_TRIP_COUNT", 0)
+    monkeypatch.setattr(sources_module, "_LEISU_CB_INTERACTIVE_CAPTCHA_COOLDOWN_SECONDS", 600.0)
+
+    sources_module._leisu_cb_record_failure(interactive_captcha=True)
+
+    assert sources_module._LEISU_CB_CONSECUTIVE_403 == 1
+    assert sources_module._LEISU_CB_TRIP_COUNT == 1
+    assert sources_module._LEISU_CB_OPEN_UNTIL > sources_module.time.time() + 590
+    assert sources_module._leisu_mobile_api_enabled() is False
+
+
+def test_leisu_circuit_breaker_skips_direct_page_without_access_config(monkeypatch):
+    monkeypatch.setattr(sources_module, "_LEISU_CB_OPEN_UNTIL", sources_module.time.time() + 600)
+    monkeypatch.delenv("LEISU_ODDS_PROXY_URL", raising=False)
+    monkeypatch.delenv("LEISU_COOKIE", raising=False)
+    monkeypatch.delenv("LEISU_ACW_SC_V2", raising=False)
+
+    async def fake_fetch_text(*args, **kwargs):
+        raise AssertionError("direct Leisu page should be skipped while mobile circuit is open")
+
+    monkeypatch.setattr(sources_module, "fetch_text", fake_fetch_text)
+
+    result = asyncio.run(sources_module.fetch_leisu_odds_page(match_id="4512998"))
+
+    assert result["status"] == "interactive_captcha_cooldown"
+    assert result["method"] == "mobile_api"
+    assert result["access"]["retry_after_seconds"] > 590
+    assert result["mobile_api"]["circuit_open"] is True
+
+
 def test_decode_leisu_mobile_api_response_inflates_shifted_payload():
     payload = {"cids": [2], "coop": {"2": {"name": "36*", "type": 0}}, "asia": []}
     encoded = sources_module._encode_leisu_mobile_api_payload_for_test(payload, shift=14)
@@ -3279,6 +3355,53 @@ def test_odds_from_leisu_mobile_payload_preserves_multi_company_history():
     assert odds["asian_handicap_markets"][0]["history"][0]["score"] == "0-0"
     assert odds["moneyline_1x2"][0]["history"][0]["draw"] == 3.5
     assert odds["over_under_markets"][0]["history"][0]["line"] == 2.25
+
+
+def test_leisu_classic_payload_from_mobile_payload_round_trips_to_html_parser():
+    mobile_payload = {
+        "matchId": "4523319",
+        "coop": {"2": {"name": "36*", "type": 0}},
+        "asia": [
+            {
+                "cid": 2,
+                "f": ["0.90", "-0.5", "0.90", "0"],
+                "r": [["0.97", "-0.25", "0.82", "0"], [1, 0, -1]],
+            }
+        ],
+        "eu": [
+            {
+                "cid": 2,
+                "f": ["3.10", "3.30", "2.05", "0"],
+                "r": [["3.25", "3.50", "2.05", "0"], [1, 0, -1]],
+            }
+        ],
+        "bs": [
+            {
+                "cid": 2,
+                "f": ["0.88", "2.5", "0.92", "0"],
+                "r": [["0.92", "2.25", "0.88", "0"], [1, 0, -1]],
+            }
+        ],
+    }
+    detail_payloads = {
+        "asia": {2: [[1779707225, "8", "1.00", "-0.25", "0.80", 2, "0", "0-0"]]},
+        "eu": {2: [[1779707225, "8", "3.25", "3.50", "2.05", 2, "0", "0-0"]]},
+        "bs": {2: [[1779707225, "8", "0.90", "2.25", "0.90", 2, "0", "0-0"]]},
+    }
+
+    classic_payload = sources_module.leisu_classic_payload_from_mobile_payload(
+        mobile_payload,
+        match_id="4523319",
+        detail_payloads=detail_payloads,
+    )
+    parsed = parse_leisu_odds_html(json.dumps(classic_payload, ensure_ascii=False), match_id="4523319")
+
+    assert parsed["available"] is True
+    assert parsed["access"]["status"] == "ok"
+    assert parsed["odds"]["source_detail"]["source"] == "leisu_mobile_api"
+    assert parsed["odds"]["source_detail"]["raw_market_counts"] == {"euro": 1, "asia": 1, "size": 1}
+    assert parsed["odds"]["moneyline_1x2"][0]["history"][0]["draw"] == 3.5
+    assert parsed["odds"]["asian_handicap_markets"][0]["history"][0]["score"] == "0-0"
 
 
 def test_leisu_market_snapshots_from_odds_expands_mobile_history():

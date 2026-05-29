@@ -545,13 +545,42 @@ async def load_leisu_schedule_for_date(local_date: datetime) -> tuple[list[dict[
 
 
 def leisu_odds_access_status(text: str) -> dict[str, Any]:
-    lower = (text or "").lower()
     if not text:
         return {
             "status": "empty_response",
             "blocked": True,
             "requires_cookie_or_proxy": True,
             "reason": "empty_response",
+        }
+    raw = (text or "").strip()
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            access = parsed.get("access")
+            if isinstance(access, dict) and access.get("blocked"):
+                return {
+                    "status": str(access.get("status") or parsed.get("status") or "blocked"),
+                    "blocked": True,
+                    "requires_cookie_or_proxy": bool(access.get("requires_cookie_or_proxy", True)),
+                    "reason": str(access.get("reason") or parsed.get("reason") or parsed.get("message") or ""),
+                }
+            if parsed.get("status") in {"interactive_captcha", "forbidden"}:
+                return {
+                    "status": str(parsed.get("status")),
+                    "blocked": True,
+                    "requires_cookie_or_proxy": True,
+                    "reason": str(parsed.get("reason") or parsed.get("message") or parsed.get("status")),
+                }
+    lower = raw.lower()
+    if "initaliyuncaptcha" in lower or "aliyuncaptcha.js" in lower or "滑动验证页面" in text or "访问验证" in text:
+        return {
+            "status": "interactive_captcha",
+            "blocked": True,
+            "requires_cookie_or_proxy": True,
+            "reason": "aliyun_interactive_captcha",
         }
     if "aliyun_waf" in lower or "acw_sc__v2" in lower or 'id="renderdata"' in lower:
         return {
@@ -583,6 +612,7 @@ _LEISU_CB_TRIP_COUNT: int = 0  # how many times the breaker has tripped this ses
 _LEISU_CB_THRESHOLD: int = 10        # 10 consecutive 403s → trip the breaker
 _LEISU_CB_COOLDOWN_BASE_SECONDS: float = 1800.0  # 30 min initial cooldown
 _LEISU_CB_COOLDOWN_MAX_SECONDS: float = 21600.0  # cap at 6 hours
+_LEISU_CB_INTERACTIVE_CAPTCHA_COOLDOWN_SECONDS: float = 21600.0  # 6h; human/browser validation required
 
 
 def _leisu_mobile_api_enabled() -> bool:
@@ -594,7 +624,22 @@ def _leisu_mobile_api_enabled() -> bool:
     return True
 
 
-def _leisu_cb_record_failure() -> None:
+def _leisu_mobile_circuit_breaker_access() -> dict[str, Any] | None:
+    if os.getenv("LEISU_MOBILE_API_ENABLED", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    remaining = int(max(0, _LEISU_CB_OPEN_UNTIL - time.time()))
+    if remaining <= 0:
+        return None
+    return {
+        "status": "interactive_captcha_cooldown",
+        "blocked": True,
+        "requires_cookie_or_proxy": True,
+        "reason": "leisu_mobile_api_circuit_open_after_interactive_captcha",
+        "retry_after_seconds": remaining,
+    }
+
+
+def _leisu_cb_record_failure(*, interactive_captcha: bool = False) -> None:
     """Record a 403/auth failure; trip the breaker if threshold exceeded.
 
     Cooldown doubles each consecutive trip (exponential backoff) capped at 6h,
@@ -602,6 +647,16 @@ def _leisu_cb_record_failure() -> None:
     """
     global _LEISU_CB_CONSECUTIVE_403, _LEISU_CB_OPEN_UNTIL, _LEISU_CB_TRIP_COUNT
     _LEISU_CB_CONSECUTIVE_403 += 1
+    if interactive_captcha:
+        _LEISU_CB_TRIP_COUNT += 1
+        _LEISU_CB_OPEN_UNTIL = time.time() + _LEISU_CB_INTERACTIVE_CAPTCHA_COOLDOWN_SECONDS
+        print(
+            "[leisu_circuit_breaker] interactive Aliyun captcha detected; "
+            f"disabling Leisu mobile API for {int(_LEISU_CB_INTERACTIVE_CAPTCHA_COOLDOWN_SECONDS)}s "
+            f"({int(_LEISU_CB_INTERACTIVE_CAPTCHA_COOLDOWN_SECONDS / 3600)}h)",
+            flush=True,
+        )
+        return
     if _LEISU_CB_CONSECUTIVE_403 == _LEISU_CB_THRESHOLD:
         _LEISU_CB_TRIP_COUNT += 1
         cooldown = min(
@@ -635,11 +690,33 @@ def _leisu_mobile_detail_company_limit() -> int:
         return 3
 
 
+def _leisu_proxy_request_spacing_seconds() -> float:
+    raw = os.getenv("LEISU_PROXY_REQUEST_SPACING_SECONDS", "2.0").strip()
+    try:
+        return max(0.0, min(float(raw), 30.0))
+    except ValueError:
+        return 2.0
+
+
+def _leisu_proxy_sync_limit() -> int:
+    raw = os.getenv("LEISU_PROXY_SYNC_LIMIT", "12").strip()
+    try:
+        return max(1, min(int(raw), 100))
+    except ValueError:
+        return 12
+
+
 def _leisu_mobile_auth_key(path: str, *, timestamp: int | None = None, nonce: str | None = None) -> str:
     ts = int(timestamp or (time.time() + 10))
     random_nonce = (nonce or uuid.uuid4().hex).replace("-", "")
     digest = hashlib.md5(f"{path}-{ts}-{random_nonce}-0-{LEISU_MOBILE_API_SECRET}".encode("utf-8")).hexdigest()
     return f"{ts}-{random_nonce}-0-{digest}"
+
+
+def leisu_mobile_api_signed_params(path: str, params: dict[str, Any]) -> dict[str, Any]:
+    signed_params = dict(params)
+    signed_params["auth_key"] = _leisu_mobile_auth_key(path)
+    return signed_params
 
 
 def _leisu_mobile_cookie_header() -> str:
@@ -791,8 +868,7 @@ async def fetch_leisu_mobile_api(
     url = f"{LEISU_MOBILE_API_BASE_URL}{path}"
 
     async def request_once(extra_params: dict[str, Any] | None = None) -> httpx.Response:
-        signed_params = dict(params)
-        signed_params["auth_key"] = _leisu_mobile_auth_key(path)
+        signed_params = leisu_mobile_api_signed_params(path, params)
         if extra_params:
             signed_params.update(extra_params)
         return await active_client.get(url, params=signed_params, headers=_leisu_mobile_headers(referer=referer))
@@ -803,7 +879,17 @@ async def fetch_leisu_mobile_api(
 
     text = response.text
     waf_solved = False
-    if leisu_odds_access_status(text).get("status") == "waf_challenge":
+    initial_access = leisu_odds_access_status(text)
+    if initial_access.get("status") == "interactive_captcha":
+        _leisu_cb_record_failure(interactive_captcha=True)
+        return {
+            "status": "interactive_captcha",
+            "method": "mobile_api",
+            "data": None,
+            "access": initial_access,
+            "source": evidence(str(response.url), time.time(), "leisu.com"),
+        }
+    if initial_access.get("status") == "waf_challenge":
         acw_cookie = _leisu_mobile_waf_cookie_from_html(text, url=str(response.url), referer=referer)
         if not acw_cookie:
             return {
@@ -841,7 +927,7 @@ async def fetch_leisu_mobile_api(
         }
     access = leisu_odds_access_status(text)
     if access.get("blocked"):
-        _leisu_cb_record_failure()
+        _leisu_cb_record_failure(interactive_captcha=access.get("status") == "interactive_captcha")
         return {
             "status": access.get("status") or "blocked",
             "method": "mobile_api",
@@ -1187,6 +1273,83 @@ def odds_from_leisu_mobile_payload(
         )
 
     return odds_from_leisu_odds_payload(payload, match_id=match_id)
+
+
+def leisu_classic_payload_from_mobile_payload(
+    data: dict[str, Any] | None,
+    *,
+    match_id: str = "",
+    detail_payloads: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    odds = odds_from_leisu_mobile_payload(data, match_id=match_id, detail_payloads=detail_payloads)
+    classic_payload: dict[str, Any] = {
+        "source": "leisu_mobile_api",
+        "matchId": str(match_id or (data or {}).get("matchId") or (data or {}).get("match_id") or ""),
+        "euro": [],
+        "asia": [],
+        "size": [],
+    }
+    for market in odds.get("moneyline_1x2") or []:
+        classic_payload["euro"].append(
+            {
+                "name": market.get("provider") or "",
+                "area": market.get("area") or "",
+                "now": {
+                    "homeWin": (market.get("current") or {}).get("home"),
+                    "draw": (market.get("current") or {}).get("draw"),
+                    "awayWin": (market.get("current") or {}).get("away"),
+                    "ts": (market.get("current") or {}).get("timestamp"),
+                },
+                "begin": {
+                    "homeWin": (market.get("opening") or {}).get("home"),
+                    "draw": (market.get("opening") or {}).get("draw"),
+                    "awayWin": (market.get("opening") or {}).get("away"),
+                    "ts": (market.get("opening") or {}).get("timestamp"),
+                },
+                "history": market.get("history") or [],
+            }
+        )
+    for market in odds.get("asian_handicap_markets") or []:
+        classic_payload["asia"].append(
+            {
+                "name": market.get("provider") or "",
+                "area": market.get("area") or "",
+                "now": {
+                    "homeWin": (market.get("current") or {}).get("home_water"),
+                    "draw": (market.get("current") or {}).get("line_label") or (market.get("current") or {}).get("line"),
+                    "awayWin": (market.get("current") or {}).get("away_water"),
+                    "ts": (market.get("current") or {}).get("timestamp"),
+                },
+                "begin": {
+                    "homeWin": (market.get("opening") or {}).get("home_water"),
+                    "draw": (market.get("opening") or {}).get("line_label") or (market.get("opening") or {}).get("line"),
+                    "awayWin": (market.get("opening") or {}).get("away_water"),
+                    "ts": (market.get("opening") or {}).get("timestamp"),
+                },
+                "history": market.get("history") or [],
+            }
+        )
+    for market in odds.get("over_under_markets") or []:
+        classic_payload["size"].append(
+            {
+                "name": market.get("provider") or "",
+                "area": market.get("area") or "",
+                "now": {
+                    "homeWin": (market.get("current") or {}).get("over_water"),
+                    "draw": (market.get("current") or {}).get("line_label") or (market.get("current") or {}).get("line"),
+                    "awayWin": (market.get("current") or {}).get("under_water"),
+                    "ts": (market.get("current") or {}).get("timestamp"),
+                },
+                "begin": {
+                    "homeWin": (market.get("opening") or {}).get("over_water"),
+                    "draw": (market.get("opening") or {}).get("line_label") or (market.get("opening") or {}).get("line"),
+                    "awayWin": (market.get("opening") or {}).get("under_water"),
+                    "ts": (market.get("opening") or {}).get("timestamp"),
+                },
+                "history": market.get("history") or [],
+            }
+        )
+    return classic_payload
 
 
 def odds_from_leisu_odds_payload(data: dict[str, Any] | None, *, match_id: str = "") -> dict[str, Any]:
@@ -1641,73 +1804,11 @@ async def fetch_leisu_mobile_odds_payload(
                 )
 
     odds = odds_from_leisu_mobile_payload(list_payload, match_id=match_id, detail_payloads=detail_payloads)
-    classic_payload = {
-        "source": "leisu_mobile_api",
-        "matchId": match_id,
-        "euro": [],
-        "asia": [],
-        "size": [],
-    }
-    for market in odds.get("moneyline_1x2") or []:
-        classic_payload["euro"].append(
-            {
-                "name": market.get("provider") or "",
-                "area": market.get("area") or "",
-                "now": {
-                    "homeWin": (market.get("current") or {}).get("home"),
-                    "draw": (market.get("current") or {}).get("draw"),
-                    "awayWin": (market.get("current") or {}).get("away"),
-                    "ts": (market.get("current") or {}).get("timestamp"),
-                },
-                "begin": {
-                    "homeWin": (market.get("opening") or {}).get("home"),
-                    "draw": (market.get("opening") or {}).get("draw"),
-                    "awayWin": (market.get("opening") or {}).get("away"),
-                    "ts": (market.get("opening") or {}).get("timestamp"),
-                },
-                "history": market.get("history") or [],
-            }
-        )
-    for market in odds.get("asian_handicap_markets") or []:
-        classic_payload["asia"].append(
-            {
-                "name": market.get("provider") or "",
-                "area": market.get("area") or "",
-                "now": {
-                    "homeWin": (market.get("current") or {}).get("home_water"),
-                    "draw": (market.get("current") or {}).get("line_label") or (market.get("current") or {}).get("line"),
-                    "awayWin": (market.get("current") or {}).get("away_water"),
-                    "ts": (market.get("current") or {}).get("timestamp"),
-                },
-                "begin": {
-                    "homeWin": (market.get("opening") or {}).get("home_water"),
-                    "draw": (market.get("opening") or {}).get("line_label") or (market.get("opening") or {}).get("line"),
-                    "awayWin": (market.get("opening") or {}).get("away_water"),
-                    "ts": (market.get("opening") or {}).get("timestamp"),
-                },
-                "history": market.get("history") or [],
-            }
-        )
-    for market in odds.get("over_under_markets") or []:
-        classic_payload["size"].append(
-            {
-                "name": market.get("provider") or "",
-                "area": market.get("area") or "",
-                "now": {
-                    "homeWin": (market.get("current") or {}).get("over_water"),
-                    "draw": (market.get("current") or {}).get("line_label") or (market.get("current") or {}).get("line"),
-                    "awayWin": (market.get("current") or {}).get("under_water"),
-                    "ts": (market.get("current") or {}).get("timestamp"),
-                },
-                "begin": {
-                    "homeWin": (market.get("opening") or {}).get("over_water"),
-                    "draw": (market.get("opening") or {}).get("line_label") or (market.get("opening") or {}).get("line"),
-                    "awayWin": (market.get("opening") or {}).get("under_water"),
-                    "ts": (market.get("opening") or {}).get("timestamp"),
-                },
-                "history": market.get("history") or [],
-            }
-        )
+    classic_payload = leisu_classic_payload_from_mobile_payload(
+        list_payload,
+        match_id=match_id,
+        detail_payloads=detail_payloads,
+    )
 
     detail_count = sum(len(rows) for rows_by_cid in detail_payloads.values() for rows in rows_by_cid.values())
     return {
@@ -1756,6 +1857,23 @@ async def fetch_leisu_odds_page(
         or os.getenv("LEISU_COOKIE", "").strip()
         or os.getenv("LEISU_ACW_SC_V2", "").strip()
     )
+    mobile_circuit_access = _leisu_mobile_circuit_breaker_access()
+    if mobile_circuit_access and match_id and not direct_access_configured:
+        return {
+            "status": mobile_circuit_access["status"],
+            "method": "mobile_api",
+            "match_id": match_id,
+            "odds_url": odds_url,
+            "fetch_url": f"{LEISU_MOBILE_API_BASE_URL}{LEISU_MOBILE_ODDS_LIST_PATH}",
+            "source": {"url": LEISU_MOBILE_API_BASE_URL, "source": "leisu.com"},
+            "access": mobile_circuit_access,
+            "text": "",
+            "mobile_api": {
+                "circuit_open": True,
+                "retry_after_seconds": mobile_circuit_access["retry_after_seconds"],
+            },
+            "waf_solved": False,
+        }
     if _leisu_mobile_api_enabled() and match_id and not proxy_url:
         try:
             mobile_result = await fetch_leisu_mobile_odds_payload(match_id=match_id)
@@ -6825,6 +6943,10 @@ async def sync_leisu_odds_snapshots(
     bounded_window = max(1, min(int(window_minutes or 24 * 60), 48 * 60))
     bounded_limit = max(1, min(int(limit or 20), 100))
     bounded_concurrency = max(1, min(int(concurrency or 4), 10))
+    if os.getenv("LEISU_ODDS_PROXY_URL", "").strip():
+        bounded_concurrency = 1
+        bounded_limit = min(bounded_limit, _leisu_proxy_sync_limit())
+    proxy_spacing_seconds = _leisu_proxy_request_spacing_seconds() if os.getenv("LEISU_ODDS_PROXY_URL", "").strip() else 0.0
     window_end = as_of_dt + timedelta(minutes=bounded_window)
     local_dates = []
     cursor_date = as_of_dt.date()
@@ -6878,6 +7000,8 @@ async def sync_leisu_odds_snapshots(
                 match_id=str(match.get("match_id") or ""),
                 odds_url=str(match.get("odds_url") or ""),
             )
+            if proxy_spacing_seconds:
+                await asyncio.sleep(proxy_spacing_seconds)
         quality_gate = probed.get("quality_gate") or {}
         can_promote = bool(quality_gate.get("can_promote_to_model_input"))
         should_persist = bool(probed.get("available")) and (can_promote or not require_quality_gate)

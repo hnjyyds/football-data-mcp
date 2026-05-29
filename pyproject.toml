@@ -25,6 +25,12 @@ dev = [
 
 [project.scripts]
 football-data-mcp = "football_data_mcp.server:main"
+leisu-browser-proxy = "scripts.leisu_browser_proxy:main"
+
+[project.optional-dependencies]
+browser-proxy = [
+    "playwright>=1.44.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "frontend/test_server.py"]

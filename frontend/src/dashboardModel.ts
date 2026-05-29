@@ -157,6 +157,8 @@ const FLAG_LABELS: Record<string, string> = {
   over_under_consensus_preferred_line_differs_from_main: "大小球首选盘口偏离主线",
   over_under_consensus_latest_line_differs_from_main: "大小球最新盘口偏离主线",
   over_under_consensus_over_under_complete_market_missing: "大小球公司数据不完整",
+  leisu_access_interactive_captcha: "雷速需要交互式验证",
+  leisu_access_interactive_captcha_cooldown: "雷速验证冷却中",
   leisu_requires_cookie_or_proxy: "雷速需要登录凭据或代理",
   leisu_access_waf_challenge: "雷速访问受限",
   contains_observe_condition_leg: "包含条件观察项",
@@ -2273,6 +2275,8 @@ const DATA_SYNC_STATUS_LABELS: Record<string, string> = {
 };
 
 const DATA_HEALTH_FLAG_LABELS: Record<string, string> = {
+  leisu_access_interactive_captcha: "雷速需要交互式验证",
+  leisu_access_interactive_captcha_cooldown: "雷速验证冷却中",
   leisu_access_waf_challenge: "雷速访问受限",
   leisu_requires_cookie_or_proxy: "需要雷速登录凭据或代理",
   outside_near_kickoff_window: "不在赛前分析窗口",
