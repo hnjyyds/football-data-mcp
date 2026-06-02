@@ -1754,6 +1754,122 @@ function predictionQualityView(snapshot: DashboardSnapshot): DashboardView["pred
   };
 }
 
+function modelFailureCategoryText(category: string): string {
+  if (category === "reason") return "原因分组";
+  if (category === "market") return "市场";
+  if (category === "league_market") return "联赛×市场";
+  if (category === "odds_coverage") return "赔率覆盖";
+  if (category === "probability") return "概率校准";
+  return "诊断";
+}
+
+function modelFailureRuleActionText(action: string): string {
+  if (action === "suppress_formal_recommendation") return "阻断正式推荐";
+  if (action === "reduce_sampling_weight") return "降低采样权重";
+  if (action === "tighten_market_thresholds") return "收紧市场门槛";
+  if (action === "require_snapshot_before_formal_recommendation") return "先补赔率快照";
+  if (action === "keep_market_probability_guardrail") return "保留市场基线";
+  if (action === "collect_more_samples") return "继续补样本";
+  return customerCopy(action || "继续验证");
+}
+
+function modelFailureRuleTargetText(target: string, targetKey: string): string {
+  if (target === "prediction_diagnostic.primary_reason") return `原因：${reasonLabel(targetKey)}`;
+  if (target === "league_market") return `联赛/市场：${targetKey || "待确认"}`;
+  if (target === "market") return `市场：${targetKey || "待确认"}`;
+  if (target === "market_snapshot_coverage") return "赔率快照覆盖";
+  if (target === "probability_source") return "概率源：市场基线";
+  return targetKey || customerCopy(target || "策略目标");
+}
+
+function modelFailureDiagnosticsView(snapshot: DashboardSnapshot): DashboardView["modelFailureDiagnostics"] {
+  const diagnostics = snapshot.model_failure_diagnostics;
+  if (!diagnostics) {
+    return {
+      severity: "warning",
+      tone: "caution",
+      title: "等待失利归因",
+      detail: "后端尚未返回模型失利归因，暂时只能查看总 ROI 和总命中率。",
+      primaryText: "首要问题待确认",
+      policyText: "推荐发布保持关闭",
+      metrics: [
+        { label: "已回测", value: "0", caption: "等待样本", tone: "neutral" },
+        { label: "ROI", value: "—", caption: "等待结算", tone: "neutral" },
+        { label: "赔率覆盖", value: "—", caption: "等待快照", tone: "neutral" },
+        { label: "风险项", value: "0", caption: "等待归因", tone: "neutral" }
+      ],
+      driverRows: [],
+      policyRows: []
+    };
+  }
+  const summary = diagnostics.summary;
+  const primary = diagnostics.primary_driver;
+  const policyRules = diagnostics.policy?.rules || [];
+  const blockedRuleCount = diagnostics.policy?.blocked_rule_count ?? policyRules.filter((rule) => rule.status === "blocked").length;
+  return {
+    severity: diagnostics.severity,
+    tone: toneFromSeverity(diagnostics.severity),
+    title: customerCopy(diagnostics.title),
+    detail: customerCopy(diagnostics.detail),
+    primaryText: primary ? customerCopy(primary.title) : "首要问题待确认",
+    policyText: diagnostics.policy?.formal_recommendation_enabled
+      ? "推荐发布可继续评估"
+      : blockedRuleCount > 0
+        ? `${blockedRuleCount} 条阻断策略`
+        : "推荐发布保持关闭",
+    metrics: [
+      {
+        label: "已回测",
+        value: String(summary.settled_count ?? 0),
+        caption: `命中率 ${formatPercent(summary.hit_rate)}`,
+        tone: (summary.settled_count ?? 0) >= 20 ? "good" : (summary.settled_count ?? 0) > 0 ? "neutral" : "caution"
+      },
+      {
+        label: "ROI",
+        value: formatSignedPercent(summary.roi),
+        caption: "整体样本回测",
+        tone: (summary.roi ?? 0) >= 0 ? "good" : "bad"
+      },
+      {
+        label: "赔率覆盖",
+        value: formatPercent(summary.odds_coverage_ratio),
+        caption: "台账快照覆盖率",
+        tone: (summary.odds_coverage_ratio ?? 0) >= 0.75 ? "good" : (summary.odds_coverage_ratio ?? 0) > 0 ? "caution" : "bad"
+      },
+      {
+        label: "风险项",
+        value: String(summary.driver_count ?? diagnostics.drivers.length),
+        caption: `${summary.negative_driver_count ?? 0} 个负收益项`,
+        tone: (summary.negative_driver_count ?? 0) > 0 ? "bad" : "good"
+      }
+    ],
+    driverRows: (diagnostics.drivers || []).map((driver) => ({
+      key: `${driver.category}:${driver.key}`,
+      categoryText: modelFailureCategoryText(driver.category),
+      title: customerCopy(driver.title),
+      detail: customerCopy(driver.detail),
+      evidence: customerCopy(driver.evidence || "等待证据"),
+      action: customerCopy(driver.action || "继续验证"),
+      sampleText: `${driver.sample_count ?? 0} 场`,
+      roiText: formatSignedPercent(driver.roi),
+      lossText: `${formatSignedDecimal(driver.loss_units, 2)} 单位`,
+      tone: toneFromSeverity(driver.severity)
+    })),
+    policyRows: policyRules.map((rule) => ({
+      key: rule.key,
+      statusText: statusText(rule.status),
+      title: customerCopy(rule.title),
+      detail: customerCopy(rule.detail),
+      actionText: modelFailureRuleActionText(rule.action),
+      targetText: modelFailureRuleTargetText(rule.target, rule.target_key),
+      evidence: customerCopy(rule.evidence || "等待证据"),
+      sampleText: `${rule.sample_count ?? 0} 场`,
+      roiText: formatSignedPercent(rule.roi),
+      tone: toneFromSeverity(rule.status)
+    }))
+  };
+}
+
 function adaptiveActionProgressText(current: unknown, target: unknown, label: string): string {
   const currentValue = numeric(current);
   const targetValue = numeric(target);
@@ -2728,6 +2844,7 @@ function recommendationReleaseGateView(opportunity: DashboardSnapshot["recommend
       label: customerCopy(item.label || "闸门"),
       title: customerCopy(item.title || "待确认"),
       detail: customerCopy(item.detail || ""),
+      statusText: statusText(item.status),
       tone: toneFromSeverity(item.status),
       progressText,
       width: `${Math.max(4, Math.min(100, (ratio ?? 0) * 100))}%`
@@ -2828,6 +2945,15 @@ function recommendationOpportunityView(snapshot: DashboardSnapshot): DashboardVi
     }
   ];
   const counterSignalCount = opportunity.counter_signal_count ?? 0;
+  const modelPolicyBlockedCount = opportunity.model_policy_blocked_count ?? opportunity.release_gate?.model_policy_blocked_count ?? 0;
+  if (modelPolicyBlockedCount > 0) {
+    metrics.push({
+      label: "策略阻断",
+      value: String(modelPolicyBlockedCount),
+      caption: "命中模型失利策略",
+      tone: "caution"
+    });
+  }
   if (counterSignalCount > 0) {
     metrics.push({
       label: "反向观察",
@@ -3649,6 +3775,7 @@ export function buildDashboardView(snapshot: DashboardSnapshot): DashboardView {
     learningEffectiveness: learningEffectivenessView(snapshot),
     backtestCurve: backtestCurveView(snapshot),
     predictionQuality: predictionQualityView(snapshot),
+    modelFailureDiagnostics: modelFailureDiagnosticsView(snapshot),
     adaptiveLearningPlan: adaptiveLearningPlanView(snapshot),
     dashboardContract: dashboardContractView(snapshot),
     productionReadiness: productionReadinessView(snapshot),

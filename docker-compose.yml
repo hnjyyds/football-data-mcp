@@ -1,8 +1,21 @@
 services:
+  football-data-redis:
+    image: "${FOOTBALL_DATA_REDIS_IMAGE:-redis:6-alpine}"
+    container_name: football-data-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   football-data-mcp:
     build: .
     image: football-data-mcp:local
     container_name: football-data-mcp
+    depends_on:
+      football-data-redis:
+        condition: service_healthy
     ports:
       - "8910:8910"
     environment:
@@ -10,10 +23,19 @@ services:
       FOOTBALL_DATA_MCP_PORT: "8910"
       FOOTBALL_DATA_MCP_TRANSPORT: "streamable-http"
       FOOTBALL_DATA_DASHBOARD_CORS_ORIGINS: "${FOOTBALL_DATA_DASHBOARD_CORS_ORIGINS:-http://localhost:8920,http://127.0.0.1:8920}"
+      FOOTBALL_DATA_DASHBOARD_BACKGROUND_ENRICHMENT: "${FOOTBALL_DATA_DASHBOARD_BACKGROUND_ENRICHMENT:-false}"
       FOOTBALL_DATA_ADMIN_TOKEN: "${FOOTBALL_DATA_ADMIN_TOKEN:-}"
       FOOTBALL_DATA_CACHE_SECONDS: "300"
       FOOTBALL_DATA_SNAPSHOT_DB: "/data/football_data_mcp_snapshots.sqlite3"
       FOOTBALL_DATA_LEARNING_DB: "/data/football_data_mcp_learning.sqlite3"
+      FOOTBALL_DATA_TASK_QUEUE_BACKEND: "${FOOTBALL_DATA_TASK_QUEUE_BACKEND:-arq}"
+      FOOTBALL_DATA_ARQ_REDIS_HOST: "${FOOTBALL_DATA_ARQ_REDIS_HOST:-football-data-redis}"
+      FOOTBALL_DATA_ARQ_REDIS_PORT: "${FOOTBALL_DATA_ARQ_REDIS_PORT:-6379}"
+      FOOTBALL_DATA_ARQ_REDIS_DATABASE: "${FOOTBALL_DATA_ARQ_REDIS_DATABASE:-0}"
+      FOOTBALL_DATA_ARQ_QUEUE_NAME: "${FOOTBALL_DATA_ARQ_QUEUE_NAME:-football-data-mcp}"
+      FOOTBALL_DATA_ARQ_JOB_TIMEOUT_SECONDS: "${FOOTBALL_DATA_ARQ_JOB_TIMEOUT_SECONDS:-3600}"
+      FOOTBALL_DATA_VALIDATION_JOB_STALE_AFTER_SECONDS: "${FOOTBALL_DATA_VALIDATION_JOB_STALE_AFTER_SECONDS:-3900}"
+      FOOTBALL_DATA_ARQ_FALLBACK_TO_THREAD: "${FOOTBALL_DATA_ARQ_FALLBACK_TO_THREAD:-true}"
       FOOTBALL_DATA_AUTO_LEARNING_ENABLED: "${FOOTBALL_DATA_AUTO_LEARNING_ENABLED:-true}"
       FOOTBALL_DATA_AUTO_LEARNING_INTERVAL_SECONDS: "${FOOTBALL_DATA_AUTO_LEARNING_INTERVAL_SECONDS:-120}"
       FOOTBALL_DATA_AUTO_LEARNING_CYCLE_TIMEOUT_SECONDS: "${FOOTBALL_DATA_AUTO_LEARNING_CYCLE_TIMEOUT_SECONDS:-300}"
@@ -58,6 +80,34 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8910/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  football-data-worker:
+    build: .
+    image: football-data-mcp:local
+    container_name: football-data-worker
+    depends_on:
+      football-data-redis:
+        condition: service_healthy
+    command: ["python", "-m", "arq", "football_data_mcp.workers.arq_worker.WorkerSettings"]
+    environment:
+      FOOTBALL_DATA_SNAPSHOT_DB: "/data/football_data_mcp_snapshots.sqlite3"
+      FOOTBALL_DATA_LEARNING_DB: "/data/football_data_mcp_learning.sqlite3"
+      FOOTBALL_DATA_TASK_QUEUE_BACKEND: "arq"
+      FOOTBALL_DATA_ARQ_REDIS_HOST: "${FOOTBALL_DATA_ARQ_REDIS_HOST:-football-data-redis}"
+      FOOTBALL_DATA_ARQ_REDIS_PORT: "${FOOTBALL_DATA_ARQ_REDIS_PORT:-6379}"
+      FOOTBALL_DATA_ARQ_REDIS_DATABASE: "${FOOTBALL_DATA_ARQ_REDIS_DATABASE:-0}"
+      FOOTBALL_DATA_ARQ_QUEUE_NAME: "${FOOTBALL_DATA_ARQ_QUEUE_NAME:-football-data-mcp}"
+      FOOTBALL_DATA_ARQ_JOB_TIMEOUT_SECONDS: "${FOOTBALL_DATA_ARQ_JOB_TIMEOUT_SECONDS:-3600}"
+      FOOTBALL_DATA_VALIDATION_JOB_STALE_AFTER_SECONDS: "${FOOTBALL_DATA_VALIDATION_JOB_STALE_AFTER_SECONDS:-3900}"
+    volumes:
+      - football-data-mcp-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m", "arq", "football_data_mcp.workers.arq_worker.WorkerSettings", "--check"]
       interval: 30s
       timeout: 5s
       start_period: 20s

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import importlib.util
+from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any
 
@@ -171,7 +173,7 @@ def _scoreline_distribution(
     return tuple(rows)
 
 
-def _one_x_two_probabilities(distribution: list[dict[str, Any]]) -> dict[str, float]:
+def _one_x_two_probabilities(distribution: Sequence[dict[str, Any]]) -> dict[str, float]:
     home = sum(row["probability"] for row in distribution if row["margin"] > 0)
     draw = sum(row["probability"] for row in distribution if row["margin"] == 0)
     away = sum(row["probability"] for row in distribution if row["margin"] < 0)
@@ -209,7 +211,7 @@ def _settlement_weight(score_after_line: float) -> float:
     return 0.5
 
 
-def _asian_selection_probability(distribution: list[dict[str, Any]], line: float, *, home: bool) -> float:
+def _asian_selection_probability(distribution: Sequence[dict[str, Any]], line: float, *, home: bool) -> float:
     split_lines = _split_quarter_line(line if home else -line)
     total = 0.0
     for row in distribution:
@@ -219,7 +221,7 @@ def _asian_selection_probability(distribution: list[dict[str, Any]], line: float
     return round_metric(total) or 0.0
 
 
-def _total_selection_probability(distribution: list[dict[str, Any]], line: float, *, over: bool) -> float:
+def _total_selection_probability(distribution: Sequence[dict[str, Any]], line: float, *, over: bool) -> float:
     split_lines = _split_quarter_line(line)
     total = 0.0
     for row in distribution:
@@ -388,12 +390,12 @@ def _fit_expected_goals(
     strength_goal_diff: float | None,
     max_goals: int,
     rho_values: tuple[float, ...] = (0.0,),
-) -> tuple[float, float, float, float, list[dict[str, Any]]]:
+) -> tuple[float, float, float, float, Sequence[dict[str, Any]]]:
     best_home = 1.35
     best_away = 1.15
     best_rho = 0.0
     best_loss = float("inf")
-    best_distribution: list[dict[str, Any]] = []
+    best_distribution: Sequence[dict[str, Any]] = ()
 
     # A 0.1 grid keeps shortlist runs fast while still improving materially over
     # the previous fixed-form heuristic. Future backtests can justify finer fits.
@@ -497,7 +499,7 @@ def _kelly_fraction(
     }
 
 
-def _confidence_band(home_xg: float, away_xg: float, distribution: list[dict[str, Any]]) -> dict[str, Any]:
+def _confidence_band(home_xg: float, away_xg: float, distribution: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Estimate 68% and 95% credible intervals for xG from the scoreline distribution."""
     home_probs = np.zeros(len(distribution))
     away_probs = np.zeros(len(distribution))
@@ -532,12 +534,12 @@ def _confidence_band(home_xg: float, away_xg: float, distribution: list[dict[str
         # model_certainty: 1.0 = very tight (spread ≤ 1), 0.0 = very wide (spread ≥ 4)
         certainty = max(0.0, min(1.0, 1.0 - (spread - 1) / 3.0))
         return {
-            "mean": round_metric(center, 3),
+            "mean": round_metric(center, 3) or 0.0,
             "ci68_low": lo68,
             "ci68_high": hi68,
             "ci95_low": lo95,
             "ci95_high": hi95,
-            "model_certainty": round_metric(certainty, 3),
+            "model_certainty": round_metric(certainty, 3) or 0.0,
         }
 
     home_band = _credible_interval(home_marginal, home_xg)
@@ -550,7 +552,7 @@ def _confidence_band(home_xg: float, away_xg: float, distribution: list[dict[str
     }
 
 
-def _top_scorelines(distribution: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+def _top_scorelines(distribution: Sequence[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
     rows = sorted(distribution, key=lambda row: row["probability"], reverse=True)[:limit]
     return [
         {
@@ -570,7 +572,7 @@ def _edge(model_probability: float | None, market_probability: float | None) -> 
 
 
 def _projection_markets_from_distribution(
-    distribution: list[dict[str, Any]],
+    distribution: Sequence[dict[str, Any]],
     *,
     moneyline_target: dict[str, float],
     total_line: float | None,
@@ -624,7 +626,7 @@ def _baseline_projection_summary(
     home_xg: float,
     away_xg: float,
     loss: float,
-    distribution: list[dict[str, Any]],
+    distribution: Sequence[dict[str, Any]],
     moneyline_target: dict[str, float],
     total_line: float | None,
     total_target: dict[str, float],
@@ -655,11 +657,7 @@ def _baseline_projection_summary(
 
 
 def _penaltyblog_available() -> bool:
-    try:
-        import penaltyblog  # noqa: F401
-    except Exception:
-        return False
-    return True
+    return importlib.util.find_spec("penaltyblog") is not None
 
 
 def build_model_projection(

@@ -50,7 +50,7 @@ def _adaptive_k_factor(match_count: int) -> float:
     return K_FACTOR_ESTABLISHED
 
 
-def _time_decay_weight(kickoff_str: str | None, reference_time: datetime | None) -> float:
+def _time_decay_weight(kickoff_str: str | datetime | None, reference_time: datetime | None) -> float:
     """Exponential decay weight based on days between match and reference time."""
     if not kickoff_str or not reference_time:
         return 1.0

@@ -1009,6 +1009,27 @@ def closing_line_value_for_pick(
         window_rows = [(row, row_time) for row, row_time in before_kickoff if row_time >= window_start]
         closing_candidates = window_rows or before_kickoff
 
+    if prediction_time is not None:
+        post_prediction_candidates = [
+            (row, row_time)
+            for row, row_time in closing_candidates
+            if row_time > prediction_time
+        ]
+        if not post_prediction_candidates:
+            return {
+                "status": "unavailable",
+                "method": "closing_line_value_from_market_snapshots_v1",
+                "reason": "post_prediction_closing_snapshots_missing",
+                "home_team": home_team,
+                "away_team": away_team,
+                "selection": resolved_selection,
+                "market_type": market_type,
+                "line": line,
+                "prediction_time_utc": prediction_time.isoformat(),
+                "snapshot_count": len(closing_candidates),
+            }
+        closing_candidates = post_prediction_candidates
+
     latest_by_bookmaker: dict[str, tuple[dict[str, Any], datetime]] = {}
     for row, row_time in closing_candidates:
         bookmaker = str(row.get("bookmaker") or "")
