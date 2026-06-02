@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon";
 
 export type ToastItem = {
@@ -70,10 +70,10 @@ export function ToastContainer({ toasts, onDismiss }: { toasts: ToastItem[]; onD
 
 export function useToasts() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const dismiss = (id: string) => setToasts((prev) => prev.filter((t) => t.id !== id));
-  const push = (message: string, type: ToastItem["type"] = "success") => {
+  const dismiss = useCallback((id: string) => setToasts((prev) => prev.filter((t) => t.id !== id)), []);
+  const push = useCallback((message: string, type: ToastItem["type"] = "success") => {
     const id = `${Date.now()}-${Math.random()}`;
     setToasts((prev) => [...prev.slice(-4), { id, message, type }]);
-  };
-  return { toasts, dismiss, push };
+  }, []);
+  return useMemo(() => ({ toasts, dismiss, push }), [toasts, dismiss, push]);
 }

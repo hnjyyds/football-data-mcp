@@ -4,6 +4,7 @@ and writes results back to the learning store's strategy_state table.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -90,6 +91,34 @@ def run_auto_tune(
     db_path: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    """Synchronous wrapper for CLI/scheduler use; async callers should use run_auto_tune_async."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            run_auto_tune_async(
+                divisions=divisions,
+                training_seasons=training_seasons,
+                validation_seasons=validation_seasons,
+                edge_thresholds=edge_thresholds,
+                min_training_samples_options=min_training_samples_options,
+                db_path=db_path,
+                dry_run=dry_run,
+            )
+        )
+    raise RuntimeError("run_auto_tune cannot run inside an active event loop; use run_auto_tune_async instead")
+
+
+async def run_auto_tune_async(
+    *,
+    divisions: list[str] | None = None,
+    training_seasons: list[str] | None = None,
+    validation_seasons: list[str] | None = None,
+    edge_thresholds: list[float] | None = None,
+    min_training_samples_options: list[int] | None = None,
+    db_path: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
     """
     Run holdout validation sweep and update strategy_state with optimal parameters.
 
@@ -112,7 +141,7 @@ def run_auto_tune(
     )
 
     try:
-        holdout = run_holdout_validation(
+        holdout = await run_holdout_validation(
             divisions=resolved_divisions,
             training_seasons=resolved_training,
             validation_seasons=resolved_validation,
@@ -130,15 +159,19 @@ def run_auto_tune(
     summary_by_division: dict[str, Any] = {}
     best_configs: list[dict[str, Any]] = []
 
-    for division, div_result in (holdout.get("by_division") or {}).items():
-        selected = div_result.get("selected_config") or {}
-        val_raw = div_result.get("validation_raw") or {}
-        val_calibrated = div_result.get("validation_calibrated") or {}
+    for division, div_result in _iter_division_results(holdout):
+        selected = _dict_or_empty(div_result.get("selected_config"))
+        val_raw = _dict_or_empty(div_result.get("validation_result") or div_result.get("validation_raw"))
+        val_calibrated = _dict_or_empty(
+            div_result.get("calibrated_validation_result") or div_result.get("validation_calibrated")
+        )
 
         best_edge = selected.get("edge_threshold")
         best_min_samples = selected.get("min_training_samples")
-        val_roi = val_calibrated.get("roi") or val_raw.get("roi")
-        val_bets = val_calibrated.get("bet_count") or val_raw.get("bet_count") or 0
+        val_roi = val_calibrated.get("roi") if val_calibrated.get("roi") is not None else val_raw.get("roi")
+        val_bets = _int_metric(
+            val_calibrated.get("bet_count") if val_calibrated.get("bet_count") is not None else val_raw.get("bet_count")
+        )
 
         summary_by_division[division] = {
             "best_edge_threshold": best_edge,
@@ -158,7 +191,10 @@ def run_auto_tune(
             })
 
     # Aggregate: take median edge threshold across divisions with enough bets
-    valid_configs = [c for c in best_configs if c.get("validation_bet_count", 0) >= AUTO_TUNE_MIN_VALIDATION_BETS]
+    valid_configs = [
+        c for c in best_configs
+        if _int_metric(c.get("validation_bet_count")) >= AUTO_TUNE_MIN_VALIDATION_BETS
+    ]
     if valid_configs:
         sorted_edges = sorted(c["edge_threshold"] for c in valid_configs)
         median_idx = len(sorted_edges) // 2
@@ -205,6 +241,40 @@ def run_auto_tune(
             result["strategy_state_error"] = str(exc)
 
     return result
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _int_metric(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _iter_division_results(holdout: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Normalize current and legacy holdout contracts into division result rows."""
+    current = holdout.get("division_results")
+    if isinstance(current, list):
+        normalized: list[tuple[str, dict[str, Any]]] = []
+        for item in current:
+            if not isinstance(item, dict):
+                continue
+            division = str(item.get("division") or "").strip()
+            if division:
+                normalized.append((division, item))
+        return normalized
+
+    legacy = holdout.get("by_division")
+    if isinstance(legacy, dict):
+        return [
+            (str(division), value)
+            for division, value in legacy.items()
+            if isinstance(value, dict)
+        ]
+    return []
 
 
 def tune_edge_threshold_from_records(

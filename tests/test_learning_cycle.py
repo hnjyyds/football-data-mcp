@@ -8,6 +8,160 @@ import pytest
 from football_data_mcp import learning_store, snapshot_store, sources as sources_module
 
 
+def test_dashboard_model_failure_diagnostics_explains_loss_drivers():
+    ledger = [
+        {
+            "settlement_status": "settled",
+            "market": "asian_handicap",
+            "league": "巴西丁",
+            "hit": 0,
+            "profit_units": -1.0,
+            "prediction_diagnostic": {"primary_reason": "multi_bookmaker_snapshot_missing"},
+            "has_odds_snapshot": False,
+            "odds_snapshot_count": 0,
+        },
+        {
+            "settlement_status": "settled",
+            "market": "asian_handicap",
+            "league": "巴西丁",
+            "hit": 0,
+            "profit_units": -1.0,
+            "prediction_diagnostic": {"primary_reason": "multi_bookmaker_snapshot_missing"},
+            "has_odds_snapshot": False,
+            "odds_snapshot_count": 0,
+        },
+        {
+            "settlement_status": "settled",
+            "market": "asian_handicap",
+            "league": "巴西丁",
+            "hit": 0,
+            "profit_units": -1.0,
+            "prediction_diagnostic": {"primary_reason": "multi_bookmaker_snapshot_missing"},
+            "has_odds_snapshot": False,
+            "odds_snapshot_count": 0,
+        },
+        {
+            "settlement_status": "settled",
+            "market": "asian_handicap",
+            "league": "巴西丁",
+            "hit": 1,
+            "profit_units": 0.8,
+            "prediction_diagnostic": {"primary_reason": "multi_bookmaker_snapshot_missing"},
+            "has_odds_snapshot": True,
+            "odds_snapshot_count": 2,
+        },
+        {
+            "settlement_status": "settled",
+            "market": "asian_handicap",
+            "league": "巴西丁",
+            "hit": 1,
+            "profit_units": 0.2,
+            "prediction_diagnostic": {"primary_reason": "no_positive_edge"},
+            "has_odds_snapshot": False,
+            "odds_snapshot_count": 0,
+        },
+        {
+            "settlement_status": "settled",
+            "market": "asian_handicap",
+            "league": "日本J1",
+            "hit": 1,
+            "profit_units": 0.9,
+            "prediction_diagnostic": {"primary_reason": "no_positive_edge"},
+            "has_odds_snapshot": True,
+            "odds_snapshot_count": 3,
+        },
+    ]
+
+    diagnostics = sources_module._dashboard_model_failure_diagnostics(
+        prediction_ledger=ledger,
+        prediction_kpis={"settled_count": 6, "hit_rate": 3 / 6, "roi": -0.1833},
+        learning_effectiveness={
+            "deltas": {"learned_brier_minus_market": 0.035},
+            "beats_market": False,
+        },
+        prediction_quality=sources_module._dashboard_prediction_quality(ledger),
+        market_breakdown=sources_module._dashboard_market_breakdown(ledger),
+    )
+
+    assert diagnostics["status"] == "losing_model"
+    assert diagnostics["severity"] == "error"
+    assert diagnostics["summary"]["settled_count"] == 6
+    assert diagnostics["summary"]["negative_driver_count"] >= 3
+    assert diagnostics["primary_driver"]["category"] == "reason"
+    assert diagnostics["primary_driver"]["key"] == "multi_bookmaker_snapshot_missing"
+    assert "多公司赔率快照" in diagnostics["primary_driver"]["title"]
+    categories = {item["category"] for item in diagnostics["drivers"]}
+    assert {"probability", "odds_coverage", "league_market", "market", "reason"} <= categories
+    assert diagnostics["drivers"][0]["loss_units"] >= diagnostics["drivers"][1]["loss_units"]
+    assert diagnostics["policy"]["formal_recommendation_enabled"] is False
+
+
+def test_dashboard_model_failure_diagnostics_exports_action_policy_rules():
+    ledger = [
+        {
+            "settlement_status": "settled",
+            "market": "asian_handicap",
+            "league": "巴西丁",
+            "hit": 0,
+            "profit_units": -1.0,
+            "prediction_diagnostic": {"primary_reason": "no_positive_edge"},
+            "has_odds_snapshot": False,
+            "odds_snapshot_count": 0,
+        }
+        for _ in range(24)
+    ] + [
+        {
+            "settlement_status": "settled",
+            "market": "asian_handicap",
+            "league": "日本J1",
+            "hit": 1,
+            "profit_units": 0.7,
+            "prediction_diagnostic": {"primary_reason": "edge_below_threshold"},
+            "has_odds_snapshot": True,
+            "odds_snapshot_count": 2,
+        }
+        for _ in range(6)
+    ]
+
+    diagnostics = sources_module._dashboard_model_failure_diagnostics(
+        prediction_ledger=ledger,
+        prediction_kpis={"settled_count": 30, "hit_rate": 6 / 30, "roi": -0.66},
+        learning_effectiveness={
+            "deltas": {"learned_brier_minus_market": 0.018},
+            "beats_market": False,
+        },
+        prediction_quality=sources_module._dashboard_prediction_quality(ledger),
+        market_breakdown=sources_module._dashboard_market_breakdown(ledger),
+    )
+    policy = diagnostics["policy"]
+    rules = {rule["key"]: rule for rule in policy["rules"]}
+
+    assert policy["blocked_rule_count"] >= 2
+    assert policy["rules"][0]["status"] == "blocked"
+    assert rules["suppress_reason:no_positive_edge"]["status"] == "blocked"
+    assert rules["suppress_reason:no_positive_edge"]["action"] == "suppress_formal_recommendation"
+    assert rules["suppress_reason:no_positive_edge"]["target"] == "prediction_diagnostic.primary_reason"
+    assert rules["suppress_reason:no_positive_edge"]["target_key"] == "no_positive_edge"
+    assert rules["require_market_snapshots:missing_market_snapshots"]["status"] == "blocked"
+    assert rules["keep_market_baseline:learned_probability_not_beating_market"]["target"] == "probability_source"
+    assert rules["down_weight_league_market:巴西丁:asian_handicap"]["action"] == "reduce_sampling_weight"
+
+
+def test_dashboard_model_failure_diagnostics_waits_for_enough_settled_samples():
+    diagnostics = sources_module._dashboard_model_failure_diagnostics(
+        prediction_ledger=[],
+        prediction_kpis={"settled_count": 2, "hit_rate": 0.5, "roi": -0.5},
+        learning_effectiveness={},
+        prediction_quality={},
+        market_breakdown={},
+    )
+
+    assert diagnostics["status"] == "insufficient_sample"
+    assert diagnostics["severity"] == "warning"
+    assert diagnostics["drivers"] == []
+    assert diagnostics["policy"]["formal_recommendation_enabled"] is False
+
+
 def test_run_auto_learning_cycle_records_shortlist_and_parlay(monkeypatch, tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
 
@@ -2852,6 +3006,109 @@ def test_recommendation_release_gate_blocks_negative_quality_segment_candidate()
     assert gates["candidate_threshold"]["status"] == "warning"
 
 
+def test_recommendation_opportunity_executes_model_failure_policy_rules():
+    rows = []
+    for index in range(20):
+        rows.append(
+            {
+                "ledger_id": f"observation:signal-{index}",
+                "prediction_type": "observation",
+                "settlement_status": "settled",
+                "recommendation": "immediate_bet",
+                "hit": 1,
+                "profit_units": 0.12,
+            }
+        )
+    for ledger_id, reason, has_snapshot in [
+        ("observation:open-no-edge", "no_positive_edge", True),
+        ("observation:open-missing-snapshot", "edge_below_threshold", False),
+    ]:
+        rows.append(
+            {
+                "ledger_id": ledger_id,
+                "prediction_type": "observation",
+                "settlement_status": "open",
+                "recommendation": "immediate_bet",
+                "edge": 0.09,
+                "learned_probability": 0.69,
+                "decimal_odds": 1.91,
+                "has_odds_snapshot": has_snapshot,
+                "odds_snapshot_count": 2 if has_snapshot else 0,
+                "prediction_diagnostic": {
+                    "primary_reason": reason,
+                    "threshold_gaps": {
+                        "probability": 0.03,
+                        "value_edge": 0.05,
+                        "min_decimal_odds": 0.21,
+                        "max_decimal_odds": 0.14,
+                    },
+                },
+            }
+        )
+
+    opportunity = sources_module._dashboard_recommendation_opportunity(
+        rows,
+        strategy_state={
+            "sample_count": 40,
+            "min_live_sample_count": 20,
+            "roi": 0.08,
+            "hit_rate": 0.62,
+            "min_calibrated_probability": 0.66,
+            "min_value_edge": 0.04,
+            "min_decimal_odds": 1.7,
+            "max_decimal_odds": 2.05,
+        },
+        candidate_filters=[],
+        learning_effectiveness={"learning_improved": True, "beats_market": True},
+        prediction_quality={},
+        model_failure_diagnostics={
+            "status": "losing_model",
+            "policy": {
+                "formal_recommendation_enabled": False,
+                "reason": "model_failure_diagnostics",
+                "rules": [
+                    {
+                        "key": "suppress_reason:no_positive_edge",
+                        "status": "blocked",
+                        "title": "暂停无正向边际正式推荐",
+                        "detail": "无正向边际只进入纸面预测和回测。",
+                        "action": "suppress_formal_recommendation",
+                        "target": "prediction_diagnostic.primary_reason",
+                        "target_key": "no_positive_edge",
+                        "sample_count": 398,
+                        "roi": -0.0957,
+                        "loss_units": 38.1,
+                    },
+                    {
+                        "key": "require_market_snapshots:missing_market_snapshots",
+                        "status": "blocked",
+                        "title": "正式推荐前必须补齐赔率快照",
+                        "detail": "缺少多公司同盘口快照时，只允许纸面预测和回测。",
+                        "action": "require_snapshot_before_formal_recommendation",
+                        "target": "market_snapshot_coverage",
+                        "target_key": "missing_market_snapshots",
+                        "sample_count": 444,
+                        "roi": None,
+                        "loss_units": 0,
+                    },
+                ],
+            },
+        },
+    )
+    release_gate = opportunity["release_gate"]
+    gates = {gate["key"]: gate for gate in release_gate["gates"]}
+
+    assert opportunity["paper_signal_count"] == 2
+    assert opportunity["model_policy_blocked_count"] == 2
+    assert opportunity["threshold_ready_count"] == 0
+    assert opportunity["top_candidates"] == []
+    assert release_gate["status"] == "paper_only_model_failure_policy"
+    assert release_gate["formal_enabled"] is False
+    assert "模型失利策略" in release_gate["detail"]
+    assert gates["model_failure_policy"]["status"] == "blocked"
+    assert gates["model_failure_policy"]["current"] == 0
+
+
 def test_shadow_walk_forward_failure_blocks_formal_gate_and_production_readiness():
     rows = []
     for index in range(20):
@@ -3139,7 +3396,9 @@ def test_dashboard_snapshot_exposes_contract_health_for_frontend_sections(tmp_pa
     snapshot = sources_module.dashboard_snapshot(db_path=db_path, limit=20)
     contract = snapshot["dashboard_contract"]
     adaptive_plan = snapshot["adaptive_learning_plan"]
+    program_capabilities = snapshot["program_capabilities"]
     sections = {section["key"]: section for section in contract["sections"]}
+    capabilities = {item["key"]: item for item in program_capabilities["capabilities"]}
 
     assert contract["contract_version"] == "dashboard_contract_v1"
     assert contract["status"] == "warning"
@@ -3171,6 +3430,16 @@ def test_dashboard_snapshot_exposes_contract_health_for_frontend_sections(tmp_pa
     assert sections["recommendation_gate"]["status"] == "warning"
     assert "继续预测" in sections["recommendation_gate"]["detail"]
     assert all(section["label"] for section in contract["sections"])
+    assert program_capabilities["operating_mode"] == "paper_learning"
+    assert program_capabilities["summary"]["total_count"] == len(capabilities) == 10
+    assert program_capabilities["summary"]["blocked_count"] >= 1
+    assert capabilities["continuous_prediction"]["current"] == 2
+    assert capabilities["continuous_prediction"]["available"] is True
+    assert capabilities["settlement_backtest"]["status"] == "missing"
+    assert capabilities["production_release_gate"]["status"] == "blocked"
+    assert capabilities["dashboard_contract"]["available"] is True
+    assert capabilities["task_queue"]["title"] == "异步任务队列"
+    assert capabilities["task_queue"]["status"] in {"ok", "warning", "error"}
 
 
 def test_dashboard_model_governance_reads_legacy_candidate_model_evidence(tmp_path):
@@ -5252,6 +5521,7 @@ def test_dashboard_match_detail_exposes_context_and_odds_snapshots(tmp_path):
                 "home_team": "资料主队",
                 "away_team": "资料客队",
                 "kickoff_utc_plus_8": "2026-05-25T19:00:00+08:00",
+                "created_at_utc": "2026-05-25T07:50:00+00:00",
                 "market": "asian_handicap",
                 "selection": "资料主队 -0.5",
                 "selection_key": "home_cover",

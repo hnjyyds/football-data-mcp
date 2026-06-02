@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "MCP server for single-match football schedule, odds, and form aggregation."
 requires-python = ">=3.11"
 dependencies = [
+    "arq>=0.28.0",
     "beautifulsoup4>=4.12.0",
     "httpx>=0.27.0",
     "mcp>=1.0.0",
@@ -52,24 +53,32 @@ python_version = "3.11"
 ignore_missing_imports = true
 follow_imports = "skip"
 files = [
+    "football_data_mcp/api",
     "football_data_mcp/api_contracts.py",
     "football_data_mcp/api_http.py",
     "football_data_mcp/config.py",
+    "football_data_mcp/core",
     "football_data_mcp/dashboard_service.py",
     "football_data_mcp/server.py",
     "football_data_mcp/learning_store.py",
+    "football_data_mcp/repositories",
+    "football_data_mcp/services",
     "football_data_mcp/snapshot_store.py",
 ]
 
 [tool.pyright]
 pythonVersion = "3.11"
 include = [
+    "football_data_mcp/api",
     "football_data_mcp/api_contracts.py",
     "football_data_mcp/api_http.py",
     "football_data_mcp/config.py",
+    "football_data_mcp/core",
     "football_data_mcp/dashboard_service.py",
     "football_data_mcp/server.py",
     "football_data_mcp/learning_store.py",
+    "football_data_mcp/repositories",
+    "football_data_mcp/services",
     "football_data_mcp/snapshot_store.py",
 ]
 exclude = [

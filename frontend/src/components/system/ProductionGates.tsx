@@ -41,6 +41,7 @@ export function ProductionGates({
               <div className="text-xs font-medium text-slate-800 dark:text-slate-200">{gate.name}</div>
               {gate.detail && <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{gate.detail}</div>}
             </div>
+            <Badge variant={toneVariant(gate.tone)} className="flex-shrink-0">{gate.status}</Badge>
             {gate.required && (
               <span className="text-xs text-slate-400 dark:text-slate-500 flex-shrink-0">必须</span>
             )}

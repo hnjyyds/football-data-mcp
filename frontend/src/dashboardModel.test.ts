@@ -294,6 +294,20 @@ const snapshot: DashboardSnapshot = {
     settled_signal_count: 4,
     no_value_count: 1,
     threshold_ready_count: 1,
+    model_policy_blocked_count: 1,
+    model_policy_blockers: [
+      {
+        rule_key: "suppress_reason:no_positive_edge",
+        title: "暂停无正向边际正式推荐",
+        detail: "无正向边际只进入纸面预测和回测。",
+        action: "suppress_formal_recommendation",
+        target: "prediction_diagnostic.primary_reason",
+        target_key: "no_positive_edge",
+        count: 1,
+        sample_count: 398,
+        roi: -0.0957
+      }
+    ],
     reanalysis_backlog_count: 1,
     missing_snapshot_count: 0,
     gate_thresholds: {
@@ -316,6 +330,20 @@ const snapshot: DashboardSnapshot = {
       signal_hit_rate: 0.45,
       signal_roi: -0.12,
       min_signal_sample_count: 20,
+      model_policy_blocked_count: 1,
+      model_policy_blockers: [
+        {
+          rule_key: "suppress_reason:no_positive_edge",
+          title: "暂停无正向边际正式推荐",
+          detail: "无正向边际只进入纸面预测和回测。",
+          action: "suppress_formal_recommendation",
+          target: "prediction_diagnostic.primary_reason",
+          target_key: "no_positive_edge",
+          count: 1,
+          sample_count: 398,
+          roi: -0.0957
+        }
+      ],
       learning_improved: true,
       beats_market: false,
       prediction_policy: "always_predict_and_backtest",
@@ -349,6 +377,16 @@ const snapshot: DashboardSnapshot = {
           current: -0.12,
           target: 0,
           ratio: null
+        },
+        {
+          key: "model_failure_policy",
+          label: "失利策略",
+          status: "warning",
+          title: "部分候选命中策略",
+          detail: "暂停无正向边际正式推荐 阻断 1 场候选，暂不升级为正式推荐。",
+          current: 1,
+          target: 2,
+          ratio: 0.5
         },
         {
           key: "snapshot_coverage",
@@ -2231,6 +2269,7 @@ describe("dashboard model", () => {
       "观察信号:2",
       "已过门槛:1",
       "待复算:1",
+      "策略阻断:1",
       "历史信号:4"
     ]);
     expect(view.recommendationOpportunity.thresholdText).toBe("最低概率 58.0% · 最低边际 +2.0% · 赔率 1.65-2.05");
@@ -2256,6 +2295,12 @@ describe("dashboard model", () => {
           title: "全局收益为负",
           tone: "caution",
           progressText: "-12.0%"
+        }),
+        expect.objectContaining({
+          label: "失利策略",
+          title: "部分候选命中策略",
+          tone: "caution",
+          progressText: "1/2"
         }),
         expect.objectContaining({
           label: "赔率快照",
@@ -3252,5 +3297,114 @@ describe("dashboard model", () => {
     expect(profitMetric).toBeDefined();
     expect(profitMetric!.value).toBe("—");
     expect(profitMetric!.caption).toBe("0 场已结算");
+  });
+
+  it("maps model failure diagnostics to readable driver rows", () => {
+    const view = buildDashboardView({
+      ...snapshot,
+      model_failure_diagnostics: {
+        status: "losing_model",
+        severity: "error",
+        title: "模型当前亏损，需定位失利来源",
+        detail: "已回测 6 场，整体 ROI -18.3%；首要问题：缺少多公司赔率快照 分组亏损。",
+        summary: {
+          settled_count: 6,
+          hit_rate: 0.5,
+          roi: -0.1833,
+          negative_driver_count: 3,
+          driver_count: 5,
+          odds_coverage_ratio: 0.333333,
+          learned_brier_minus_market: 0.035
+        },
+        primary_driver: {
+          category: "reason",
+          key: "multi_bookmaker_snapshot_missing",
+          title: "缺少多公司赔率快照 分组亏损",
+          detail: "缺少多公司赔率快照 分组已回测 4 场，ROI -55.0%。",
+          sample_count: 4,
+          hit_rate: 0.25,
+          roi: -0.55,
+          loss_units: 2.2,
+          severity: "error",
+          evidence: "赔率覆盖 1/4，样本质量 thin_sample。",
+          action: "继续采集同公司同盘口多时间点快照。"
+        },
+        drivers: [
+          {
+            category: "reason",
+            key: "multi_bookmaker_snapshot_missing",
+            title: "缺少多公司赔率快照 分组亏损",
+            detail: "缺少多公司赔率快照 分组已回测 4 场，ROI -55.0%。",
+            sample_count: 4,
+            hit_rate: 0.25,
+            roi: -0.55,
+            loss_units: 2.2,
+            severity: "error",
+            evidence: "赔率覆盖 1/4，样本质量 thin_sample。",
+            action: "继续采集同公司同盘口多时间点快照。"
+          }
+        ],
+        policy: {
+          formal_recommendation_enabled: false,
+          reason: "model_failure_diagnostics",
+          rule_count: 2,
+          blocked_rule_count: 1,
+          rules: [
+            {
+              key: "suppress_reason:multi_bookmaker_snapshot_missing",
+              type: "suppress_reason",
+              status: "blocked",
+              title: "暂停缺少多公司赔率快照正式推荐",
+              detail: "该分组只进入纸面预测和回测。",
+              action: "suppress_formal_recommendation",
+              target: "prediction_diagnostic.primary_reason",
+              target_key: "multi_bookmaker_snapshot_missing",
+              sample_count: 4,
+              roi: -0.55,
+              loss_units: 2.2,
+              evidence: "赔率覆盖 1/4。"
+            },
+            {
+              key: "require_market_snapshots:missing_market_snapshots",
+              type: "require_market_snapshots",
+              status: "warning",
+              title: "正式推荐前必须补齐赔率快照",
+              detail: "缺少多公司同盘口快照时，只允许纸面预测和回测。",
+              action: "require_snapshot_before_formal_recommendation",
+              target: "market_snapshot_coverage",
+              target_key: "missing_market_snapshots",
+              sample_count: 6,
+              roi: null,
+              loss_units: 0,
+              evidence: "覆盖率 33.3%。"
+            }
+          ]
+        }
+      }
+    });
+
+    expect(view.modelFailureDiagnostics.title).toBe("模型当前亏损，需定位失利来源");
+    expect(view.modelFailureDiagnostics.primaryText).toContain("多公司赔率快照");
+    expect(view.modelFailureDiagnostics.policyText).toBe("1 条阻断策略");
+    expect(view.modelFailureDiagnostics.metrics.map((item) => `${item.label}:${item.value}`)).toEqual([
+      "已回测:6",
+      "ROI:-18.3%",
+      "赔率覆盖:33.3%",
+      "风险项:5"
+    ]);
+    expect(view.modelFailureDiagnostics.driverRows[0]).toMatchObject({
+      categoryText: "原因分组",
+      roiText: "-55.0%",
+      lossText: "+2.20 单位",
+      tone: "bad"
+    });
+    expect(view.modelFailureDiagnostics.policyRows[0]).toMatchObject({
+      statusText: "阻断",
+      actionText: "阻断正式推荐",
+      targetText: "原因：缺少多公司赔率",
+      sampleText: "4 场",
+      roiText: "-55.0%",
+      tone: "bad"
+    });
   });
 });

@@ -68,4 +68,65 @@ describe("LedgerTable a11y", () => {
     const iconWithLabel = container.querySelector('tbody [aria-label="命中"]');
     expect(iconWithLabel).not.toBeNull();
   });
+
+  it("shows filter counts and can focus awaiting reanalysis rows", () => {
+    render(
+      <LedgerTable
+        rows={[
+          row({
+            ledger_id: "awaiting:1",
+            home_team: "Awaiting FC",
+            away_team: "Snapshot United",
+            settlement_status: "open",
+            rejection_reason: "awaiting_reanalysis_after_snapshot",
+            prediction_diagnostic: {
+              primary_reason: "awaiting_reanalysis_after_snapshot",
+            } as PredictionLedgerRow["prediction_diagnostic"],
+          }),
+          row({
+            ledger_id: "open:1",
+            home_team: "Open FC",
+            away_team: "Normal United",
+            settlement_status: "open",
+            rejection_reason: "no_positive_edge",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "待复算 1" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "待复算 1" }));
+    expect(screen.getByText("Awaiting FC")).toBeInTheDocument();
+    expect(screen.queryByText("Open FC")).not.toBeInTheDocument();
+  });
+
+  it("accepts an external blocker reason filter and exposes a clear action", () => {
+    const onClear = vi.fn();
+    render(
+      <LedgerTable
+        reasonFilter={{ reason: "no_positive_edge", label: "无正向边际" }}
+        onReasonFilterClear={onClear}
+        rows={[
+          row({
+            ledger_id: "blocked:1",
+            home_team: "Blocked FC",
+            away_team: "Reason United",
+            rejection_reason: "no_positive_edge",
+          }),
+          row({
+            ledger_id: "other:1",
+            home_team: "Other FC",
+            away_team: "Reason United",
+            rejection_reason: "edge_below_threshold",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("无正向边际")).toBeInTheDocument();
+    expect(screen.getByText("Blocked FC")).toBeInTheDocument();
+    expect(screen.queryByText("Other FC")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "清除阻断筛选" }));
+    expect(onClear).toHaveBeenCalledTimes(1);
+  });
 });

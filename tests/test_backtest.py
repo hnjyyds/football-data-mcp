@@ -91,6 +91,41 @@ def test_build_historical_samples_extracts_results_and_preferred_markets():
     assert sample["odds"]["preferred_moneyline_1x2"]["provider"] == "Average"
     assert sample["odds"]["quality_contract"]["supported_markets"]["moneyline_1x2"] is True
     assert sample["odds"]["quality_contract"]["supported_markets"]["over_under"] is True
+    assert sample["odds"]["quality_contract"]["supported_markets"]["asian_handicap"] is True
+
+
+def test_asian_handicap_settlement_handles_half_and_quarter_lines():
+    home_win = backtest._settle_asian_handicap_bet(
+        home_goals=2,
+        away_goals=1,
+        home_line=-0.5,
+        side="home_cover",
+        decimal_odds=1.92,
+        stake=1.0,
+    )
+    home_half_loss = backtest._settle_asian_handicap_bet(
+        home_goals=1,
+        away_goals=1,
+        home_line=-0.25,
+        side="home_cover",
+        decimal_odds=1.92,
+        stake=1.0,
+    )
+    away_half_win = backtest._settle_asian_handicap_bet(
+        home_goals=1,
+        away_goals=1,
+        home_line=-0.25,
+        side="away_cover",
+        decimal_odds=1.9,
+        stake=1.0,
+    )
+
+    assert home_win["result"] == "win"
+    assert home_win["profit"] == 0.92
+    assert home_half_loss["result"] == "half_loss"
+    assert home_half_loss["profit"] == -0.5
+    assert away_half_win["result"] == "half_win"
+    assert away_half_win["profit"] == 0.45
 
 
 def test_walk_forward_backtest_uses_only_prior_matches_and_reports_metrics():
@@ -128,6 +163,14 @@ def test_walk_forward_backtest_uses_only_prior_matches_and_reports_metrics():
     dixon_coles = result["records"][0]["model_engine"]["dixon_coles"]
     assert dixon_coles["rho_source"] == "historical_league_mle"
     assert dixon_coles["historical_rho"]["sample_count"] == 2
+    asian_record = result["records"][0]["asian_handicap_validation"]
+    assert asian_record["available"] is True
+    assert asian_record["market"] == "asian_handicap"
+    assert asian_record["line"] == -0.5
+    assert asian_record["selection"]["side"] in {"home_cover", "away_cover"}
+    assert result["asian_handicap_validation"]["available_count"] == 2
+    assert result["asian_handicap_validation"]["evaluated_count"] == 2
+    assert result["asian_handicap_validation"]["market"] == "asian_handicap"
     assert result["summary"]["historical_rho_available_record_count"] == 2
     assert result["metrics"]["model"]["log_loss_1x2"] > 0
     assert result["metrics"]["market"]["brier_score_1x2"] > 0
@@ -344,6 +387,8 @@ def test_holdout_validation_selects_on_training_and_scores_validation(monkeypatc
     assert division_result["selected_config"]["seasons"] == ["2122"]
     assert division_result["validation_result"]["seasons"] == ["2223"]
     assert division_result["validation_result"]["evaluated_count"] > 0
+    assert division_result["validation_result"]["asian_handicap_validation"]["available_count"] > 0
+    assert division_result["calibrated_validation_result"]["asian_handicap_validation"]["market"] == "asian_handicap"
     assert division_result["probability_calibration"]["method"] == "holdout_probability_bins_v1"
     assert division_result["probability_calibration"]["training_record_count"] > 0
     assert division_result["calibrated_validation_result"]["selection_source"] == "holdout_probability_calibrated_validation"

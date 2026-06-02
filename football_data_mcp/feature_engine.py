@@ -351,8 +351,12 @@ class XGResidualModel:
         self.is_trained = True
         self.training_metadata = {
             "sample_count": len(training_records),
-            "home_feature_importances": dict(zip(self.FEATURE_KEYS, [float(v) for v in self.home_model.feature_importances_])),
-            "away_feature_importances": dict(zip(self.FEATURE_KEYS, [float(v) for v in self.away_model.feature_importances_])),
+            "home_feature_importances": dict(
+                zip(self.FEATURE_KEYS, [float(v) for v in np.asarray(self.home_model.feature_importances_).tolist()])
+            ),
+            "away_feature_importances": dict(
+                zip(self.FEATURE_KEYS, [float(v) for v in np.asarray(self.away_model.feature_importances_).tolist()])
+            ),
             "home_residual_mean": float(np.mean(y_home)),
             "away_residual_mean": float(np.mean(y_away)),
             "home_residual_std": float(np.std(y_home)),

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
-import { ToastContainer } from "./Toast";
+import { useEffect, useRef } from "react";
+import { ToastContainer, useToasts } from "./Toast";
 
 describe("Toast", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -39,5 +40,28 @@ describe("Toast", () => {
     expect(region.getAttribute("aria-live")).toBe("polite");
     rerender(<ToastContainer toasts={[{ id: "b", message: "boom", type: "error" }]} onDismiss={() => {}} />);
     expect(container.querySelector("[aria-live]")?.getAttribute("aria-live")).toBe("assertive");
+  });
+
+  it("keeps push and dismiss callbacks stable across toast state updates", () => {
+    const snapshots: Array<{ pushStable: boolean; dismissStable: boolean; count: number }> = [];
+
+    function Probe() {
+      const { toasts, dismiss, push } = useToasts();
+      const firstPush = useRef(push);
+      const firstDismiss = useRef(dismiss);
+      useEffect(() => {
+        snapshots.push({
+          pushStable: firstPush.current === push,
+          dismissStable: firstDismiss.current === dismiss,
+          count: toasts.length,
+        });
+      }, [toasts.length, dismiss, push]);
+      return <button onClick={() => push("hi")}>push</button>;
+    }
+
+    render(<Probe />);
+    fireEvent.click(screen.getByRole("button", { name: "push" }));
+
+    expect(snapshots.at(-1)).toEqual({ pushStable: true, dismissStable: true, count: 1 });
   });
 });

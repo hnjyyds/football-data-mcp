@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Iterable
 from collections import Counter
 import csv
 import gzip
@@ -29,6 +30,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
 from football_data_mcp import external_sources, learning_store, model_engine, snapshot_store
+from football_data_mcp.config import env_bool
 
 
 FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
@@ -765,7 +767,10 @@ def decode_leisu_mobile_api_response(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
     try:
-        code = int(payload.get("code"))
+        raw_code = payload.get("code")
+        if raw_code is None:
+            raise ValueError("missing code")
+        code = int(raw_code)
     except (TypeError, ValueError):
         return payload.get("data", payload)
     data = payload.get("data")
@@ -1561,9 +1566,14 @@ def leisu_market_snapshots_from_odds(
     *,
     match: dict[str, Any] | None = None,
     fetched_at_utc: str | None = None,
+    provider: str = "leisu",
+    source_key: str = "leisu_odds",
+    raw_source: str = "leisu_odds",
+    use_market_timestamps: bool = True,
 ) -> list[snapshot_store.MarketSnapshot]:
     match = match or {}
-    source_detail = odds.get("source_detail") or {}
+    source_detail = as_dict(odds.get("source_detail"))
+    market_policy = as_dict(odds.get("market_policy"))
     match_id = str(match.get("match_id") or source_detail.get("match_id") or "").strip()
     fetched_at = _iso_utc_or_empty(fetched_at_utc) or now_utc().isoformat()
     home_team = str(match.get("home_team") or "").strip()
@@ -1572,8 +1582,8 @@ def leisu_market_snapshots_from_odds(
     if not kickoff_utc and match.get("kickoff_utc_plus_8"):
         kickoff_utc = _iso_utc_or_empty(match.get("kickoff_utc_plus_8"))
     common = {
-        "provider": "leisu",
-        "source_key": "leisu_odds",
+        "provider": str(provider or "analysis_odds"),
+        "source_key": str(source_key or "analysis_odds"),
         "event_id": match_id,
         "league": str(match.get("league") or "").strip(),
         "home_team": home_team,
@@ -1621,9 +1631,14 @@ def leisu_market_snapshots_from_odds(
                 selection=selection,
                 decimal_odds=round_metric(decimal_odds, 4) or decimal_odds,
                 line=line,
-                source_time_utc=_leisu_snapshot_source_time(timestamp, fetched_at),
+                source_time_utc=(
+                    _leisu_snapshot_source_time(timestamp, fetched_at)
+                    if use_market_timestamps
+                    else fetched_at
+                ),
                 raw={
-                    "source": "leisu_odds",
+                    "source": raw_source,
+                    "upstream_source": source_detail.get("source") or market_policy.get("source") or "",
                     "side": side,
                     "area": market.get("area") or "",
                     "current": current or {},
@@ -1636,6 +1651,8 @@ def leisu_market_snapshots_from_odds(
         )
 
     def market_points(market: dict[str, Any]) -> list[dict[str, Any]]:
+        if not use_market_timestamps:
+            return [market.get("current") or {}]
         history = [item for item in (market.get("history") or []) if isinstance(item, dict)]
         return history or [market.get("current") or {}]
 
@@ -1724,6 +1741,34 @@ def leisu_market_snapshots_from_odds(
             )
 
     return snapshots
+
+
+def analysis_market_snapshots_from_odds(
+    odds: dict[str, Any],
+    *,
+    match: dict[str, Any] | None = None,
+    fetched_at_utc: str | None = None,
+) -> list[snapshot_store.MarketSnapshot]:
+    """Persist analysis-time odds as fallback market snapshots.
+
+    This keeps the movement/CLV store alive even when Leisu's dedicated
+    multi-company sync is blocked by WAF/proxy requirements. The source time is
+    the MCP analysis fetch time because several public odds payloads expose
+    provider timestamps in local or stale formats.
+    """
+
+    source_detail = as_dict(odds.get("source_detail"))
+    market_policy = as_dict(odds.get("market_policy"))
+    upstream = str(source_detail.get("source") or market_policy.get("source") or "analysis_odds").strip() or "analysis_odds"
+    return leisu_market_snapshots_from_odds(
+        odds,
+        match=match,
+        fetched_at_utc=fetched_at_utc,
+        provider="analysis_odds",
+        source_key=upstream,
+        raw_source="analysis_odds",
+        use_market_timestamps=False,
+    )
 
 
 def _leisu_odds_headers() -> dict[str, str]:
@@ -2069,9 +2114,10 @@ def _sporttery_pool_decimal_odds(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sporttery_three_way_probability(odds: dict[str, Any]) -> dict[str, float]:
-    values = {key: parse_float(odds.get(key)) for key in ("home", "draw", "away")}
-    if any(value is None or value <= 1 for value in values.values()):
+    parsed_values = {key: parse_float(odds.get(key)) for key in ("home", "draw", "away")}
+    if any(value is None or value <= 1 for value in parsed_values.values()):
         return {}
+    values = {key: value for key, value in parsed_values.items() if value is not None}
     raw = {key: 1 / float(value) for key, value in values.items()}
     total = sum(raw.values())
     if not total:
@@ -2080,9 +2126,10 @@ def _sporttery_three_way_probability(odds: dict[str, Any]) -> dict[str, float]:
 
 
 def _three_way_raw_implied_probability(odds: dict[str, Any]) -> dict[str, float]:
-    values = {key: parse_float(odds.get(key)) for key in ("home", "draw", "away")}
-    if any(value is None or value <= 1 for value in values.values()):
+    parsed_values = {key: parse_float(odds.get(key)) for key in ("home", "draw", "away")}
+    if any(value is None or value <= 1 for value in parsed_values.values()):
         return {}
+    values = {key: value for key, value in parsed_values.items() if value is not None}
     return {key: round_metric(1 / float(value)) or 0.0 for key, value in values.items()}
 
 
@@ -2330,7 +2377,7 @@ def parse_visible_match_score(text: str, query: str, home_team: str = "", away_t
     visible_norm = normalize_text(visible)
     if not visible_norm:
         return 0.0
-    terms = []
+    terms: list[str] = []
     for item in [query, home_team, away_team]:
         terms.extend(token for token in normalize_text(item).split() if len(token) > 2)
     unique_terms = list(dict.fromkeys(terms))
@@ -2460,7 +2507,7 @@ def parse_as_of(as_of: str | None, timezone_name: str | None = None) -> datetime
     return parsed.astimezone(tz)
 
 
-def time_window_policy(as_of: datetime, window_hours: int, *, as_of_supplied: bool = False) -> dict[str, Any]:
+def time_window_policy(as_of: datetime, window_hours: int | float, *, as_of_supplied: bool = False) -> dict[str, Any]:
     """Return one canonical time-window description for downstream agents."""
     tz = as_of.tzinfo or DEFAULT_USER_TIMEZONE
     local = as_of.astimezone(tz)
@@ -2857,9 +2904,9 @@ def parse_goal_line(value: Any) -> float | None:
         return None
     parts = text.split("/")
     parsed = [parse_float(part) for part in parts]
-    parsed = [part for part in parsed if part is not None]
-    if len(parsed) == len(parts) and parsed:
-        return round_metric(sum(parsed) / len(parsed))
+    parsed_numbers = [part for part in parsed if part is not None]
+    if len(parsed_numbers) == len(parts) and parsed_numbers:
+        return round_metric(sum(parsed_numbers) / len(parsed_numbers))
     return None
 
 
@@ -3002,16 +3049,22 @@ def is_complete_over_under_market(market: dict[str, Any]) -> bool:
     return all(current.get(key) is not None for key in ("over_water", "line", "under_water"))
 
 
-def average_metric(values: list[float]) -> float | None:
-    if not values:
-        return None
-    return round_metric(sum(values) / len(values))
+def numeric_values(values: Iterable[object]) -> list[float]:
+    return [parsed for value in values if (parsed := parse_float(value)) is not None]
 
 
-def median_metric(values: list[float]) -> float | None:
-    if not values:
+def average_metric(values: Iterable[object]) -> float | None:
+    numbers = numeric_values(values)
+    if not numbers:
         return None
-    ordered = sorted(values)
+    return round_metric(sum(numbers) / len(numbers))
+
+
+def median_metric(values: Iterable[object]) -> float | None:
+    numbers = numeric_values(values)
+    if not numbers:
+        return None
+    ordered = sorted(numbers)
     midpoint = len(ordered) // 2
     if len(ordered) % 2:
         return round_metric(ordered[midpoint])
@@ -3220,9 +3273,8 @@ def parse_market_timestamp_for_selection(raw_timestamp: Any) -> datetime | None:
         try:
             numeric = int(raw)
             if numeric > 10_000_000:
-                if numeric > 10_000_000_000:
-                    numeric = numeric / 1000
-                return datetime.fromtimestamp(float(numeric), tz=timezone.utc)
+                numeric_seconds = numeric / 1000 if numeric > 10_000_000_000 else float(numeric)
+                return datetime.fromtimestamp(numeric_seconds, tz=timezone.utc)
         except (TypeError, ValueError, OSError):
             return None
     try:
@@ -3344,9 +3396,9 @@ def build_asian_handicap_consensus(
         parse_market_timestamp_for_selection((market.get("current") or {}).get("timestamp"))
         for market in complete
     ]
-    parsed_times = [item for item in parsed_times if item is not None]
-    oldest_time = min(parsed_times) if parsed_times else None
-    latest_time = max(parsed_times) if parsed_times else None
+    valid_times = [item for item in parsed_times if item is not None]
+    oldest_time = min(valid_times) if valid_times else None
+    latest_time = max(valid_times) if valid_times else None
     timestamp_span_minutes = None
     if oldest_time and latest_time:
         timestamp_span_minutes = round_metric((latest_time - oldest_time).total_seconds() / 60)
@@ -3504,9 +3556,9 @@ def build_over_under_consensus(
         parse_market_timestamp_for_selection((market.get("current") or {}).get("timestamp"))
         for market in complete
     ]
-    parsed_times = [item for item in parsed_times if item is not None]
-    oldest_time = min(parsed_times) if parsed_times else None
-    latest_time = max(parsed_times) if parsed_times else None
+    valid_times = [item for item in parsed_times if item is not None]
+    oldest_time = min(valid_times) if valid_times else None
+    latest_time = max(valid_times) if valid_times else None
     timestamp_span_minutes = None
     if oldest_time and latest_time:
         timestamp_span_minutes = round_metric((latest_time - oldest_time).total_seconds() / 60)
@@ -3590,7 +3642,8 @@ def _select_freshest_preferred_market(candidates: list[dict[str, Any]]) -> dict[
         parsed_timestamp = parse_market_timestamp_for_selection((market.get("current") or {}).get("timestamp"))
         if parsed_timestamp is None:
             continue
-        provider_rank = provider_priority.index(market.get("provider")) if market.get("provider") in provider_priority else len(provider_priority)
+        provider = str(market.get("provider") or "")
+        provider_rank = provider_priority.index(provider) if provider in provider_priority else len(provider_priority)
         ranked.append((parsed_timestamp, -provider_rank, -index, market))
     if ranked:
         return max(ranked, key=lambda item: item[:3])[3]
@@ -3649,18 +3702,19 @@ def asian_water_to_decimal(value: Any) -> float | None:
 
 def moneyline_probability_metrics(prices: dict[str, Any] | None) -> dict[str, Any]:
     prices = prices or {}
-    odds = {
+    parsed_odds = {
         "home": parse_float(prices.get("home")),
         "draw": parse_float(prices.get("draw")),
         "away": parse_float(prices.get("away")),
     }
-    if not all(value and value > 1 for value in odds.values()):
+    if not all(value and value > 1 for value in parsed_odds.values()):
         return {
             "available": False,
             "reason": "incomplete_or_invalid_1x2_prices",
-            "odds": odds,
+            "odds": parsed_odds,
         }
 
+    odds = {key: value for key, value in parsed_odds.items() if value is not None}
     implied = {key: 1 / float(value) for key, value in odds.items()}
     probability_sum = sum(implied.values())
     return {
@@ -3684,7 +3738,7 @@ def moneyline_probability_metrics(prices: dict[str, Any] | None) -> dict[str, An
 
 def asian_handicap_probability_metrics(prices: dict[str, Any] | None) -> dict[str, Any]:
     prices = prices or {}
-    decimal_odds = {
+    parsed_decimal_odds = {
         "home_cover": asian_water_to_decimal(prices.get("home_water")),
         "away_cover": asian_water_to_decimal(prices.get("away_water")),
     }
@@ -3693,15 +3747,16 @@ def asian_handicap_probability_metrics(prices: dict[str, Any] | None) -> dict[st
         "away_cover": parse_float(prices.get("away_water")),
     }
     line = parse_float(prices.get("line"))
-    if not all(value and value > 1 for value in decimal_odds.values()) or line is None:
+    if not all(value and value > 1 for value in parsed_decimal_odds.values()) or line is None:
         return {
             "available": False,
             "reason": "incomplete_or_invalid_asian_handicap_prices",
             "line": line,
             "raw_water": raw_water,
-            "decimal_odds": decimal_odds,
+            "decimal_odds": parsed_decimal_odds,
         }
 
+    decimal_odds = {key: value for key, value in parsed_decimal_odds.items() if value is not None}
     implied = {key: 1 / float(value) for key, value in decimal_odds.items()}
     probability_sum = sum(implied.values())
     return {
@@ -3730,7 +3785,7 @@ def asian_handicap_probability_metrics(prices: dict[str, Any] | None) -> dict[st
 
 def over_under_probability_metrics(prices: dict[str, Any] | None) -> dict[str, Any]:
     prices = prices or {}
-    decimal_odds = {
+    parsed_decimal_odds = {
         "over": asian_water_to_decimal(prices.get("over_water")),
         "under": asian_water_to_decimal(prices.get("under_water")),
     }
@@ -3739,15 +3794,16 @@ def over_under_probability_metrics(prices: dict[str, Any] | None) -> dict[str, A
         "under": parse_float(prices.get("under_water")),
     }
     line = parse_float(prices.get("line"))
-    if not all(value and value > 1 for value in decimal_odds.values()) or line is None:
+    if not all(value and value > 1 for value in parsed_decimal_odds.values()) or line is None:
         return {
             "available": False,
             "reason": "incomplete_or_invalid_over_under_prices",
             "line": line,
             "raw_water": raw_water,
-            "decimal_odds": decimal_odds,
+            "decimal_odds": parsed_decimal_odds,
         }
 
+    decimal_odds = {key: value for key, value in parsed_decimal_odds.items() if value is not None}
     implied = {key: 1 / float(value) for key, value in decimal_odds.items()}
     probability_sum = sum(implied.values())
     return {
@@ -4052,12 +4108,12 @@ def build_odds_quality_contract(odds: dict[str, Any], source: dict[str, Any] | N
 
 
 def _max_probability_side(probabilities: dict[str, Any], labels: dict[str, str]) -> dict[str, Any]:
-    parsed = {key: parse_float(value) for key, value in (probabilities or {}).items()}
-    parsed = {key: value for key, value in parsed.items() if value is not None}
-    if not parsed:
+    parsed_values = {key: parse_float(value) for key, value in (probabilities or {}).items()}
+    values = {key: value for key, value in parsed_values.items() if value is not None}
+    if not values:
         return {"key": "", "label": "", "probability": None}
-    key = max(parsed, key=lambda item: parsed[item])
-    return {"key": key, "label": labels.get(key, key), "probability": round_metric(parsed[key])}
+    key = max(values, key=lambda item: values[item])
+    return {"key": key, "label": labels.get(key, key), "probability": round_metric(values[key])}
 
 
 def _agreement_ratio(consensus: dict[str, Any]) -> float | None:
@@ -4264,13 +4320,14 @@ def _adjust_moneyline_probabilities(market_probabilities: dict[str, Any], form: 
     }
     if not all(value is not None for value in market.values()):
         return {}
+    market_values = {key: value for key, value in market.items() if value is not None}
     signal = _form_signal(form)
     delta = parse_float(signal.get("home_probability_delta")) or 0.0
     return _normalize_probabilities(
         {
-            "home": float(market["home"]) + delta,
-            "draw": float(market["draw"]) - abs(delta) * 0.25,
-            "away": float(market["away"]) - delta * 0.75,
+            "home": float(market_values["home"]) + delta,
+            "draw": float(market_values["draw"]) - abs(delta) * 0.25,
+            "away": float(market_values["away"]) - delta * 0.75,
         }
     )
 
@@ -4339,11 +4396,11 @@ def _expected_total_goals(form: dict[str, Any]) -> float | None:
         estimates.append((away_for + home_against) / 2)
     if estimates:
         return round_metric(sum(estimates))
-    totals = [
+    parsed_totals = [
         parse_float(home.get(f"{prefix}avg_total_goals")),
         parse_float(away.get(f"{prefix}avg_total_goals")),
     ]
-    totals = [item for item in totals if item is not None]
+    totals = [item for item in parsed_totals if item is not None]
     return round_metric(sum(totals) / len(totals)) if totals else None
 
 
@@ -5182,9 +5239,9 @@ def build_betting_decision_support(
                 "stake_level": "none",
                 "reason": "no_positive_edge",
             }
-        movement_delta = parse_float(best_candidate.get("market_movement_probability_delta"))
+        best_movement_delta = parse_float(best_candidate.get("market_movement_probability_delta"))
         movement_signal = str(best_candidate.get("market_movement_signal") or "")
-        if movement_signal == "against_selection" and abs(movement_delta or 0.0) >= 0.02:
+        if movement_signal == "against_selection" and abs(best_movement_delta or 0.0) >= 0.02:
             _append_unique(caution_flags, "market_movement_against_selection")
     final_decision = _build_final_decision(
         best_candidate,
@@ -5440,6 +5497,9 @@ def build_analysis_pack(
     missing_blocks = [key for key, value in data_blocks.items() if not value]
     market_intelligence = odds.get("market_intelligence") or build_market_intelligence(odds)
     model_projection = betting_decision_support.get("model_engine") or {}
+    top_scorelines = model_projection.get("top_scorelines")
+    if not isinstance(top_scorelines, list):
+        top_scorelines = []
     model_engine_summary = {
         "available": bool(model_projection.get("available")),
         "version": model_projection.get("version"),
@@ -5447,7 +5507,7 @@ def build_analysis_pack(
         "expected_goals": model_projection.get("expected_goals") or {},
         "derived_probabilities": model_projection.get("derived_probabilities") or {},
         "market_edges": model_projection.get("market_edges") or {},
-        "top_scorelines": model_projection.get("top_scorelines") or [],
+        "top_scorelines": top_scorelines,
         "dixon_coles": model_projection.get("dixon_coles") or {},
         "fitted_market_targets": model_projection.get("fitted_market_targets") or {},
         "model_quality": model_projection.get("model_quality") or {},
@@ -5491,7 +5551,7 @@ def build_analysis_pack(
                 "method": model_engine_summary["method"],
                 "expected_goals": model_engine_summary["expected_goals"],
                 "fitted_market_targets": model_engine_summary["fitted_market_targets"],
-                "top_scorelines": model_engine_summary["top_scorelines"][:5],
+                "top_scorelines": top_scorelines[:5],
                 "probability_source": model_engine_summary["probability_source"],
             },
             "data_bundle": {
@@ -5571,13 +5631,22 @@ def analysis_readiness_for_dongqiudi_match(match: dict[str, Any]) -> dict[str, A
     }
 
 
-def parse_float(value: str | None) -> float | None:
+def as_dict(value: object | None) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def as_list(value: object | None) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def parse_float(value: object | None) -> float | None:
     if value in (None, ""):
         return None
     try:
-        return float(str(value).strip())
-    except ValueError:
+        numeric = float(str(value).strip())
+    except (TypeError, ValueError):
         return None
+    return numeric if math.isfinite(numeric) else None
 
 
 def public_fixture(row: dict[str, str], *, score: float | None = None, source: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -6054,7 +6123,7 @@ def _normalize_formation(value: str) -> str:
 
 
 def _position_counts(players: list[dict[str, Any]]) -> dict[str, int]:
-    counter = Counter()
+    counter: Counter[str] = Counter()
     for player in players:
         position = str(player.get("position") or "").strip()
         if position:
@@ -6235,9 +6304,9 @@ def _context_field_status_for_key(context: dict[str, Any], key: str) -> str:
 def _context_lineup_status(context: dict[str, Any]) -> str:
     if "lineup" not in context:
         return "not_collected"
-    lineup = context.get("lineup") if isinstance(context.get("lineup"), dict) else {}
-    analysis = lineup.get("lineup_analysis") if isinstance(lineup.get("lineup_analysis"), dict) else {}
-    source_lineups = lineup.get("official_lineups") or lineup.get("forecast_lineups") or {}
+    lineup = as_dict(context.get("lineup"))
+    analysis = as_dict(lineup.get("lineup_analysis"))
+    source_lineups = as_dict(lineup.get("official_lineups") or lineup.get("forecast_lineups"))
     has_players = any(
         (source_lineups.get(side) or {}).get("lineups")
         for side in ("home", "away")
@@ -6249,11 +6318,11 @@ def _context_lineup_status(context: dict[str, Any]) -> str:
 
 
 def _context_access_issue(context: dict[str, Any]) -> dict[str, Any] | None:
-    sources = context.get("sources") if isinstance(context.get("sources"), dict) else {}
+    sources = as_dict(context.get("sources"))
     for source in sources.values():
         if not isinstance(source, dict):
             continue
-        access = source.get("access") if isinstance(source.get("access"), dict) else {}
+        access = as_dict(source.get("access"))
         if access.get("blocked"):
             return {
                 "blocked": True,
@@ -6344,7 +6413,7 @@ def _leisu_weather_text(detail_payload: dict[str, Any]) -> str:
 
 
 def _leisu_venue(lineup_payload: dict[str, Any]) -> dict[str, Any]:
-    venue = lineup_payload.get("venue") if isinstance(lineup_payload.get("venue"), dict) else {}
+    venue = as_dict(lineup_payload.get("venue"))
     return {
         key: value
         for key, value in {
@@ -6358,13 +6427,13 @@ def _leisu_venue(lineup_payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _leisu_referee(lineup_payload: dict[str, Any]) -> dict[str, Any]:
-    referee = lineup_payload.get("referee") if isinstance(lineup_payload.get("referee"), dict) else {}
+    referee = as_dict(lineup_payload.get("referee"))
     name = referee.get("name") or referee.get("name_zh") or referee.get("name_en")
     return {"name": name, "id": referee.get("id")} if name else {}
 
 
 def _leisu_player_for_lineup(player: dict[str, Any]) -> dict[str, Any]:
-    nested = player.get("player") if isinstance(player.get("player"), dict) else {}
+    nested = as_dict(player.get("player"))
     return {
         "person": player.get("person") or player.get("name") or player.get("player_name") or nested.get("name") or "",
         "shirtnumber": player.get("shirtnumber") or player.get("shirt_number") or player.get("number") or nested.get("shirt_number") or "",
@@ -6427,7 +6496,7 @@ def normalize_leisu_match_context(
         },
         lineup_source or detail_source,
     )
-    result = {
+    result: dict[str, Any] = {
         "source_name": "leisu",
         "provider": "leisu",
         "match_id": str(match_id or ""),
@@ -6569,7 +6638,7 @@ async def _enrich_match_context_with_leisu(
             league=target_league,
             as_of=parse_as_of(as_of, timezone_name),
         )
-        leisu_match = candidate.get("match") if isinstance(candidate.get("match"), dict) else {}
+        leisu_match = as_dict(candidate.get("match"))
         leisu_match_id = str(leisu_match.get("match_id") or "").strip()
         if not candidate.get("available") or not leisu_match_id:
             return match_context
@@ -6604,14 +6673,14 @@ def _run_async_blocking(coro):
 def _dashboard_leisu_event_id_from_snapshot(odds_snapshot: dict[str, Any] | None) -> str:
     if not isinstance(odds_snapshot, dict):
         return ""
-    resolution = odds_snapshot.get("resolution") if isinstance(odds_snapshot.get("resolution"), dict) else {}
+    resolution = as_dict(odds_snapshot.get("resolution"))
     provider = str(resolution.get("provider") or "").strip().lower()
     event_id = str(resolution.get("event_id") or "").strip()
     return event_id if provider == "leisu" and event_id else ""
 
 
 def _dashboard_persisted_raw_match_context(record: dict[str, Any]) -> dict[str, Any] | None:
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    raw = as_dict(record.get("raw"))
     return raw.get("match_context") if isinstance(raw.get("match_context"), dict) else None
 
 
@@ -6641,7 +6710,7 @@ def _dashboard_context_with_leisu_snapshot_enrichment(
     merged_context = merge_match_contexts(raw_match_context, supplemental)
     if not merged_context:
         return base_context
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    raw = as_dict(record.get("raw"))
     enriched_raw = {**raw, "match_context": merged_context}
     if merged_context.get("source_name") or merged_context.get("provider"):
         enriched_raw["context_source_name"] = merged_context.get("source_name") or merged_context.get("provider")
@@ -6812,8 +6881,8 @@ async def sync_market_snapshots(
 
 
 def _prediction_record_match_terms(record: dict[str, Any]) -> dict[str, Any]:
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
-    raw_match = raw.get("match") if isinstance(raw.get("match"), dict) else {}
+    raw = as_dict(record.get("raw"))
+    raw_match = as_dict(raw.get("match"))
     home = str(record.get("home_team") or raw_match.get("home_team") or "").strip()
     away = str(record.get("away_team") or raw_match.get("away_team") or "").strip()
     league = str(record.get("league") or raw_match.get("league") or "").strip()
@@ -7286,9 +7355,11 @@ async def find_candidates(
 
     dongqiudi_rows, dongqiudi_source = await load_dongqiudi_window(as_of_dt, window_hours)
     for row in dongqiudi_rows:
-        home = ((row.get("team_A") or {}).get("name") or "")
-        away = ((row.get("team_B") or {}).get("name") or "")
-        competition = row.get("competition") or {}
+        team_a = as_dict(row.get("team_A"))
+        team_b = as_dict(row.get("team_B"))
+        competition = as_dict(row.get("competition"))
+        home = team_a.get("name") or ""
+        away = team_b.get("name") or ""
         score = row_match_score(
             {"HomeTeam": home, "AwayTeam": away, "Div": str(competition.get("name") or "")},
             translated_query,
@@ -7300,7 +7371,8 @@ async def find_candidates(
             continue
         kickoff = parse_dongqiudi_kickoff(row.get("start_play"))
         window = classify_window(kickoff, as_of_dt, window_hours)
-        scored.append(("dongqiudi", score, window["in_window"], kickoff or datetime.min.replace(tzinfo=timezone.utc), row, window, row.get("_schedule_source") or dongqiudi_source))
+        row_source = as_dict(row.get("_schedule_source")) or dongqiudi_source or {}
+        scored.append(("dongqiudi", score, window["in_window"], kickoff or datetime.min.replace(tzinfo=timezone.utc), row, window, row_source))
 
     sporttery_source: dict[str, Any] | None = None
     try:
@@ -7329,7 +7401,7 @@ async def find_candidates(
         if kickoff and kickoff.tzinfo is None:
             kickoff = kickoff.replace(tzinfo=timezone.utc)
         window = classify_window(kickoff, as_of_dt, window_hours)
-        scored.append(("sporttery", score, window["in_window"], kickoff or datetime.min.replace(tzinfo=timezone.utc), row, window, sporttery_source))
+        scored.append(("sporttery", score, window["in_window"], kickoff or datetime.min.replace(tzinfo=timezone.utc), row, window, sporttery_source or {}))
 
     scored.sort(key=lambda item: (item[2], item[1], item[3]), reverse=True)
     candidates = []
@@ -7719,8 +7791,8 @@ def _shortlist_value_score(analysis: dict[str, Any], *, mode: str = "confidence"
 
 
 def _compact_model_engine_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
-    support = analysis.get("betting_decision_support") if isinstance(analysis.get("betting_decision_support"), dict) else {}
-    analysis_pack = analysis.get("analysis_pack") if isinstance(analysis.get("analysis_pack"), dict) else {}
+    support = as_dict(analysis.get("betting_decision_support"))
+    analysis_pack = as_dict(analysis.get("analysis_pack"))
     engine_candidates = (
         analysis.get("model_engine"),
         support.get("model_engine"),
@@ -7783,7 +7855,7 @@ def _shortlist_pick_from_analysis(analysis: dict[str, Any], *, mode: str = "conf
 
 
 def _append_recommendation_log(record: dict[str, Any], path: str | None) -> dict[str, Any]:
-    target = path or os.getenv("FOOTBALL_DATA_MCP_RECOMMENDATION_LOG", "/tmp/football-data-mcp-recommendations.jsonl")
+    target = str(path or os.getenv("FOOTBALL_DATA_MCP_RECOMMENDATION_LOG") or "/tmp/football-data-mcp-recommendations.jsonl")
     try:
         directory = os.path.dirname(target)
         if directory:
@@ -8204,7 +8276,8 @@ def _sporttery_pick_from_analysis(
             ),
         )
         recommendation = _recommendation_from_edge(parse_float(best.get("edge")), confidence, blocking_flags)
-        if parse_float(best.get("edge")) is None or parse_float(best.get("edge")) < min_edge:
+        best_edge = parse_float(best.get("edge"))
+        if best_edge is None or best_edge < min_edge:
             return None, "official_had_ev_below_threshold"
         if recommendation == "no_value":
             return None, "official_had_no_positive_edge"
@@ -8268,6 +8341,47 @@ def _sporttery_pick_from_analysis(
         "parlay_mode": parlay_mode,
         "quality": analysis.get("quality") or {},
     }, None
+
+
+def _analysis_market_snapshots_for_shortlist(
+    analysis: dict[str, Any],
+    *,
+    fetched_at_utc: str,
+) -> list[snapshot_store.MarketSnapshot]:
+    if analysis.get("status") != "ok":
+        return []
+    odds = analysis.get("odds") if isinstance(analysis.get("odds"), dict) else {}
+    if not odds or not odds.get("has_valid_numeric_odds"):
+        return []
+    match = analysis.get("match") or (analysis.get("agent_brief") or {}).get("match") or {}
+    if not match:
+        return []
+    return analysis_market_snapshots_from_odds(
+        odds,
+        match=match,
+        fetched_at_utc=fetched_at_utc,
+    )
+
+
+def _shortlist_snapshot_sync_result(
+    snapshots: list[snapshot_store.MarketSnapshot],
+    *,
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    saved_count = snapshot_store.save_market_snapshots(snapshots, db_path=db_path)
+    return {
+        "enabled": True,
+        "provider": "analysis_odds",
+        "status": "ok" if saved_count > 0 else "no_new_snapshots" if snapshots else "empty",
+        "generated_snapshot_count": len(snapshots),
+        "saved_snapshot_count": saved_count,
+        "db_path": db_path or snapshot_store.snapshot_db_path(),
+        "rule": (
+            "Every analyzed shortlist match persists the currently available odds payload "
+            "as market_snapshots. Repeated pre-kickoff analyses create the time series used "
+            "by movement charts and post-prediction CLV."
+        ),
+    }
 
 
 async def _official_sporttery_picks(
@@ -8394,7 +8508,7 @@ def _build_parlay_ticket(
     estimated_hit_probability = round_metric(raw_combined_probability * dependence_factor, 6) or 0.0
     expected_multiplier = round_metric(combined_odds * estimated_hit_probability, 6) or 0.0
     edge_proxy = round_metric(expected_multiplier - 1, 4) or 0.0
-    caution_flags = []
+    caution_flags: list[str] = []
     for leg in legs:
         for flag in leg.get("caution_flags") or []:
             _append_unique(caution_flags, flag)
@@ -8587,6 +8701,7 @@ async def recommend_jingcai_parlay(
         ),
     }
     official_rejected: list[dict[str, Any]] = []
+    picks: list[dict[str, Any]] = []
     if not include_non_official_markets:
         as_of_dt = parse_as_of(as_of, timezone_name)
         try:
@@ -8659,7 +8774,8 @@ async def recommend_jingcai_parlay(
             analysis_concurrency=6,
             recommendation_log_path=None,
         )
-        picks = shortlist.get("picks") or []
+        raw_picks = as_list(shortlist.get("picks"))
+        picks = [item for item in raw_picks if isinstance(item, dict)]
     eligible_legs: list[dict[str, Any]] = []
     rejected_legs: list[dict[str, Any]] = list(official_rejected)
     for pick in picks:
@@ -9008,8 +9124,8 @@ async def settle_learning_recommendations(
 ) -> dict[str, Any]:
     """Settle open paper recommendations with supplied scores and optional public-source scores."""
     supplied_results = list(results or [])
-    fetched = {"source": "disabled", "fetched_count": 0, "results": [], "errors": []}
-    match_state_refresh = {
+    fetched: dict[str, Any] = {"source": "disabled", "fetched_count": 0, "results": [], "errors": []}
+    match_state_refresh: dict[str, Any] = {
         "source": "disabled",
         "probed_count": 0,
         "state_count": 0,
@@ -9319,7 +9435,7 @@ def _snapshot_reanalysis_candidates(
     for record in records:
         if not _dashboard_is_observation(record):
             continue
-        raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+        raw = as_dict(record.get("raw"))
         reason = str(raw.get("reason") or record.get("recommendation") or "")
         if (
             _dashboard_reconciled_rejection_reason(
@@ -9363,7 +9479,7 @@ def _snapshot_reanalysis_record_item(
     reason: str | None,
     learning_policy: dict[str, Any],
 ) -> dict[str, Any]:
-    previous_raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    previous_raw = as_dict(record.get("raw"))
     previous_reason = str(previous_raw.get("reason") or record.get("recommendation") or "")
     if reason:
         support = targeted_analysis.get("betting_decision_support") or {}
@@ -9523,7 +9639,10 @@ async def reanalyze_snapshot_backlog(
                 reason=reason,
                 learning_policy=learning_policy,
             )
-            updated = learning_store.update_open_recommendation_record(record.get("id"), item, db_path=db_path)
+            record_id = record.get("id")
+            if record_id is None:
+                return {"status": "skipped", "result": "record_id_missing", "query": query}
+            updated = learning_store.update_open_recommendation_record(record_id, item, db_path=db_path)
             return {
                 "record_id": record.get("id"),
                 "ledger_id": f"recommendation:{record.get('id')}",
@@ -9708,6 +9827,7 @@ async def run_auto_learning_cycle(
             "returned_count": asian_result.get("returned_count"),
             "rejected_count": asian_result.get("rejected_count"),
             "funnel_report": asian_result.get("funnel_report") or {},
+            "analysis_market_snapshot_sync": asian_result.get("analysis_market_snapshot_sync") or {},
             "target_market": asian_result.get("target_market"),
             "mode": asian_result.get("mode"),
             "picks": calibrated_picks,
@@ -9839,6 +9959,7 @@ async def run_auto_learning_cycle(
         "saved_shadow_prediction_count": saved_shadow_prediction_count,
         "asian_shortlist": asian_summary,
         "jingcai_parlay": parlay_summary,
+        "analysis_market_snapshot_sync": asian_summary.get("analysis_market_snapshot_sync") or {},
         "market_snapshot_sync": market_snapshot_sync,
         "snapshot_reanalysis": snapshot_reanalysis,
         "settlement": settlement,
@@ -9887,8 +10008,13 @@ def _dashboard_logo_url(value: Any) -> str:
     return ""
 
 
+_DASHBOARD_FDO_INDEX_REFRESHING = False
+_DASHBOARD_FDO_INDEX_REFRESH_LOCK = threading.Lock()
+
+
 def _ensure_fdo_index_warm() -> None:
     """Warm the FDO team enrichment index in a background-safe way."""
+    global _DASHBOARD_FDO_INDEX_REFRESHING
     try:
         from football_data_mcp.data_sources_registry import (
             build_fdo_team_index,
@@ -9899,22 +10025,40 @@ def _ensure_fdo_index_warm() -> None:
         return
     if time.time() - _FDO_TEAM_INDEX_BUILT_AT < _FDO_TEAM_INDEX_TTL:
         return  # still fresh
+    with _DASHBOARD_FDO_INDEX_REFRESH_LOCK:
+        if _DASHBOARD_FDO_INDEX_REFRESHING:
+            return
+        _DASHBOARD_FDO_INDEX_REFRESHING = True
     import asyncio as _aio
+
+    async def _run_refresh() -> None:
+        global _DASHBOARD_FDO_INDEX_REFRESHING
+        try:
+            await build_fdo_team_index()
+        except Exception:
+            pass
+        finally:
+            with _DASHBOARD_FDO_INDEX_REFRESH_LOCK:
+                _DASHBOARD_FDO_INDEX_REFRESHING = False
+
     try:
         try:
             loop = _aio.get_running_loop()
             # Already in async context: schedule and forget
-            loop.create_task(build_fdo_team_index())
+            loop.create_task(_run_refresh())
         except RuntimeError:
             # No loop running: spawn a background thread instead of blocking
-            import threading
             def _run_in_thread():
                 try:
-                    _aio.run(build_fdo_team_index())
+                    _aio.run(_run_refresh())
                 except Exception:
-                    pass
+                    with _DASHBOARD_FDO_INDEX_REFRESH_LOCK:
+                        global _DASHBOARD_FDO_INDEX_REFRESHING
+                        _DASHBOARD_FDO_INDEX_REFRESHING = False
             threading.Thread(target=_run_in_thread, daemon=True).start()
     except Exception:
+        with _DASHBOARD_FDO_INDEX_REFRESH_LOCK:
+            _DASHBOARD_FDO_INDEX_REFRESHING = False
         pass  # silent — enrichment is best-effort
 
 
@@ -9924,6 +10068,8 @@ def _ensure_fdo_index_warm() -> None:
 _DONGQIUDI_TEAM_LOGO_CACHE: dict[str, str] = {}
 _DONGQIUDI_LOGO_CACHE_BUILT_AT: float = 0.0
 _DONGQIUDI_LOGO_CACHE_TTL = 600.0  # rebuild from listings every 10 min
+_DONGQIUDI_LOGO_CACHE_REFRESHING = False
+_DONGQIUDI_LOGO_CACHE_REFRESH_LOCK = threading.Lock()
 
 
 async def _refresh_dongqiudi_team_logo_cache() -> dict[str, Any]:
@@ -9965,25 +10111,51 @@ def _ensure_dongqiudi_logo_cache_warm() -> None:
     so dashboard_snapshot can return immediately. Cache miss is harmless
     (logo fallback chain has other layers).
     """
+    global _DONGQIUDI_LOGO_CACHE_REFRESHING
     if time.time() - _DONGQIUDI_LOGO_CACHE_BUILT_AT < _DONGQIUDI_LOGO_CACHE_TTL:
         return
+    with _DONGQIUDI_LOGO_CACHE_REFRESH_LOCK:
+        if _DONGQIUDI_LOGO_CACHE_REFRESHING:
+            return
+        _DONGQIUDI_LOGO_CACHE_REFRESHING = True
     import asyncio as _aio
-    import threading
+
+    async def _run_refresh() -> None:
+        global _DONGQIUDI_LOGO_CACHE_REFRESHING
+        try:
+            await _refresh_dongqiudi_team_logo_cache()
+        except Exception:
+            pass
+        finally:
+            with _DONGQIUDI_LOGO_CACHE_REFRESH_LOCK:
+                _DONGQIUDI_LOGO_CACHE_REFRESHING = False
+
     try:
         try:
             loop = _aio.get_running_loop()
-            loop.create_task(_refresh_dongqiudi_team_logo_cache())
+            loop.create_task(_run_refresh())
         except RuntimeError:
             # No running loop: spawn a thread that owns its own loop.
             # Avoid blocking the synchronous caller (dashboard_snapshot).
             def _run_in_thread():
                 try:
-                    _aio.run(_refresh_dongqiudi_team_logo_cache())
+                    _aio.run(_run_refresh())
                 except Exception:
-                    pass
+                    with _DONGQIUDI_LOGO_CACHE_REFRESH_LOCK:
+                        global _DONGQIUDI_LOGO_CACHE_REFRESHING
+                        _DONGQIUDI_LOGO_CACHE_REFRESHING = False
             threading.Thread(target=_run_in_thread, daemon=True).start()
     except Exception:
+        with _DONGQIUDI_LOGO_CACHE_REFRESH_LOCK:
+            _DONGQIUDI_LOGO_CACHE_REFRESHING = False
         pass
+
+
+def _dashboard_background_enrichment_enabled(explicit: bool | None = None) -> bool:
+    """Return whether a dashboard read may start best-effort external enrichment refreshes."""
+    if explicit is not None:
+        return bool(explicit)
+    return env_bool("FOOTBALL_DATA_DASHBOARD_BACKGROUND_ENRICHMENT", False)
 
 
 def _dashboard_dongqiudi_logo_fallback(record: dict[str, Any], side: str) -> str:
@@ -10010,7 +10182,7 @@ def _dashboard_fdo_logo_fallback(record: dict[str, Any], side: str) -> str:
 
 
 def _dashboard_team_logo_url(record: dict[str, Any], side: str) -> str:
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    raw = as_dict(record.get("raw"))
     paths = (
         (f"{side}_team_logo_url",),
         (f"{side}_logo_url",),
@@ -10106,7 +10278,7 @@ def _dashboard_governed_probability(
 
 
 def _dashboard_record_data_block_state(record: dict[str, Any], key: str) -> bool | None:
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    raw = as_dict(record.get("raw"))
     completeness = raw.get("data_completeness") or raw.get("data_coverage") or {}
     if not isinstance(completeness, dict):
         return None
@@ -10126,7 +10298,7 @@ def _dashboard_record_data_block_state(record: dict[str, Any], key: str) -> bool
 
 
 def _dashboard_record_caution_flags(record: dict[str, Any]) -> set[str]:
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    raw = as_dict(record.get("raw"))
     flags = {str(flag) for flag in record.get("caution_flags") or []}
     flags.update(str(flag) for flag in raw.get("caution_flags") or [])
     support = raw.get("betting_decision_support") or {}
@@ -10379,7 +10551,7 @@ def _dashboard_feature_tone(*, good: bool = False, bad: bool = False, caution: b
 
 
 def _dashboard_data_quality_for_record(record: dict[str, Any]) -> dict[str, Any]:
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    raw = as_dict(record.get("raw"))
     completeness = raw.get("data_completeness") or raw.get("data_coverage") or raw.get("quality") or {}
     if not isinstance(completeness, dict):
         completeness = {}
@@ -10691,8 +10863,8 @@ def _dashboard_normalized_match_state(record: dict[str, Any]) -> dict[str, Any]:
             "source": "settlement",
         }
 
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
-    state = raw.get("match_state") if isinstance(raw.get("match_state"), dict) else {}
+    raw = as_dict(record.get("raw"))
+    state = as_dict(raw.get("match_state"))
     time_state = _dashboard_time_based_open_match_state(record)
     if state:
         phase = str(state.get("phase") or "unknown")
@@ -10999,8 +11171,7 @@ def _dashboard_prediction_kpis(
         reverse=True,
     )
     settled_rows = all_settled_rows_sorted[:rolling_window]
-    profits = [parse_float(row.get("profit_units")) for row in settled_rows]
-    profits = [profit for profit in profits if profit is not None]
+    profits = numeric_values(row.get("profit_units") for row in settled_rows)
     hit_count = sum(1 for row in settled_rows if int(row.get("hit") or 0) == 1)
     miss_count = sum(1 for row in settled_rows if int(row.get("hit") or 0) == 0)
     recommended_settled_rows = [
@@ -11012,7 +11183,7 @@ def _dashboard_prediction_kpis(
     phase_counts: Counter[str] = Counter()
     live_count = scheduled_count = final_pending_count = maybe_live_count = result_pending_count = postponed_count = 0
     for row in rows:
-        state = row.get("match_state") if isinstance(row.get("match_state"), dict) else {}
+        state = as_dict(row.get("match_state"))
         phase = str(state.get("phase") or "unknown")
         phase_counts[phase] += 1
         if row.get("settlement_status") != "open":
@@ -11031,8 +11202,7 @@ def _dashboard_prediction_kpis(
             result_pending_count += 1
 
     def segment_kpis(segment_rows: list[dict[str, Any]]) -> dict[str, Any]:
-        segment_profits = [parse_float(row.get("profit_units")) for row in segment_rows]
-        segment_profits = [profit for profit in segment_profits if profit is not None]
+        segment_profits = numeric_values(row.get("profit_units") for row in segment_rows)
         segment_hit_count = sum(1 for row in segment_rows if int(row.get("hit") or 0) == 1)
         segment_miss_count = sum(1 for row in segment_rows if int(row.get("hit") or 0) == 0)
         return {
@@ -11048,8 +11218,7 @@ def _dashboard_prediction_kpis(
     # All-time totals (still useful for "总样本"/audit)
     all_time_hit = sum(1 for row in all_settled_rows if int(row.get("hit") or 0) == 1)
     all_time_miss = sum(1 for row in all_settled_rows if int(row.get("hit") or 0) == 0)
-    all_time_profits = [parse_float(row.get("profit_units")) for row in all_settled_rows]
-    all_time_profits = [p for p in all_time_profits if p is not None]
+    all_time_profits = numeric_values(row.get("profit_units") for row in all_settled_rows)
 
     return {
         "total_count": len(rows),
@@ -11263,22 +11432,19 @@ def _dashboard_prediction_quality_adjustment(
 def _dashboard_prediction_quality(rows: list[dict[str, Any]]) -> dict[str, Any]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        diagnostic = row.get("prediction_diagnostic") if isinstance(row.get("prediction_diagnostic"), dict) else {}
+        diagnostic = as_dict(row.get("prediction_diagnostic"))
         reason = str(diagnostic.get("primary_reason") or row.get("rejection_reason") or row.get("recommendation") or "observed_not_recommended")
         grouped.setdefault(reason, []).append(row)
 
-    segments = []
+    segments: list[dict[str, Any]] = []
     for reason, segment_rows in grouped.items():
         settled_rows = [row for row in segment_rows if row.get("settlement_status") == "settled"]
         open_rows = [row for row in segment_rows if row.get("settlement_status") == "open"]
         hit_count = sum(1 for row in settled_rows if int(row.get("hit") or 0) == 1)
         miss_count = sum(1 for row in settled_rows if int(row.get("hit") or 0) == 0)
-        profits = [parse_float(row.get("profit_units")) for row in settled_rows]
-        profits = [value for value in profits if value is not None]
-        probabilities = [parse_float(row.get("learned_probability")) for row in segment_rows]
-        probabilities = [value for value in probabilities if value is not None]
-        edges = [parse_float(row.get("edge")) for row in segment_rows]
-        edges = [value for value in edges if value is not None]
+        profits = numeric_values(row.get("profit_units") for row in settled_rows)
+        probabilities = numeric_values(row.get("learned_probability") for row in segment_rows)
+        edges = numeric_values(row.get("edge") for row in segment_rows)
         odds_covered_count = sum(1 for row in segment_rows if bool(row.get("has_odds_snapshot")) or int(row.get("odds_snapshot_count") or 0) > 0)
         signal_count = sum(1 for row in segment_rows if str(row.get("recommendation") or "") in _DASHBOARD_SIGNAL_RECOMMENDATIONS)
         settled_count = len(settled_rows)
@@ -11329,7 +11495,11 @@ def _dashboard_prediction_quality(rows: list[dict[str, Any]]) -> dict[str, Any]:
         reverse=True,
     )
     settled_count = sum(int(segment.get("settled_count") or 0) for segment in segments)
-    negative_count = sum(1 for segment in segments if parse_float(segment.get("roi")) is not None and parse_float(segment.get("roi")) < 0)
+    negative_count = sum(
+        1
+        for segment in segments
+        if (segment_roi := parse_float(segment.get("roi"))) is not None and segment_roi < 0
+    )
     best = max(
         (segment for segment in segments if parse_float(segment.get("roi")) is not None),
         key=lambda item: parse_float(item.get("roi")) or -999.0,
@@ -11498,11 +11668,7 @@ def _dashboard_probability_governance(
     for index, candidate in enumerate(candidates, start=1):
         candidate["rank"] = index
 
-    shadow_quality = (
-        shadow_recalibration.get("quality")
-        if isinstance(shadow_recalibration, dict) and isinstance(shadow_recalibration.get("quality"), dict)
-        else {}
-    )
+    shadow_quality = as_dict(shadow_recalibration.get("quality")) if isinstance(shadow_recalibration, dict) else {}
     shadow_delta = parse_float(shadow_quality.get("walk_forward_brier_delta"))
     shadow_failed = shadow_delta is not None and shadow_delta > 0
     market_candidate = next((candidate for candidate in candidates if candidate["source"] == "market_probability"), {})
@@ -11592,11 +11758,9 @@ def _dashboard_probability_bands(rows: list[dict[str, Any]], probability_key: st
     bands = []
     for key, label, minimum, maximum in _DASHBOARD_PROBABILITY_BANDS:
         samples = band_rows[key]
-        hit_values = [1.0 if parse_float(row.get("hit")) and parse_float(row.get("hit")) >= 1 else 0.0 for row in samples]
-        probabilities = [parse_float(row.get("_band_probability")) for row in samples]
-        probabilities = [value for value in probabilities if value is not None]
-        profits = [parse_float(row.get("profit_units")) for row in samples]
-        profits = [value for value in profits if value is not None]
+        hit_values = [1.0 if (hit := parse_float(row.get("hit"))) is not None and hit >= 1 else 0.0 for row in samples]
+        probabilities = numeric_values(row.get("_band_probability") for row in samples)
+        profits = numeric_values(row.get("profit_units") for row in samples)
         sample_count = len(samples)
         hit_count = int(sum(hit_values))
         avg_probability = sum(probabilities) / len(probabilities) if probabilities else None
@@ -11784,10 +11948,11 @@ def _dashboard_band_posterior_probability(hit_count: int, sample_count: int) -> 
     return (hit_count + 1.0) / (sample_count + 2.0)
 
 
-def _dashboard_average(values: list[float]) -> float | None:
-    if not values:
+def _dashboard_average(values: Iterable[object]) -> float | None:
+    numbers = numeric_values(values)
+    if not numbers:
         return None
-    return sum(values) / len(values)
+    return sum(numbers) / len(numbers)
 
 
 def _dashboard_shadow_row_sort_key(item: tuple[dict[str, Any], str, float, float]) -> tuple[str, str, str, int]:
@@ -11939,8 +12104,7 @@ def _dashboard_shadow_recalibration(
     ]
     selected_walk_points = [point for point in walk_points if point["band_key"] in selected_band_keys]
     selected_hit_count = sum(1 for row in selected_rows if int(row.get("hit") or 0) == 1)
-    selected_profits = [parse_float(row.get("profit_units")) for row in selected_rows]
-    selected_profits = [value for value in selected_profits if value is not None]
+    selected_profits = numeric_values(row.get("profit_units") for row in selected_rows)
     selected_roi = sum(selected_profits) / len(selected_profits) if selected_profits else None
     selected_walk_brier = _dashboard_brier_from_points(selected_walk_points, "walk_probability")
     walk_forward_delta = walk_forward_brier - learned_brier if walk_forward_brier is not None else None
@@ -12090,8 +12254,7 @@ def _dashboard_learning_effectiveness(rows: list[dict[str, Any]]) -> dict[str, A
     probability_bands = _dashboard_probability_bands(settled_rows, "learned_probability")
     calibration_health = _dashboard_probability_band_health(probability_bands)
     shadow_recalibration = _dashboard_shadow_recalibration(settled_rows, calibration_health)
-    profits = [parse_float(row.get("profit_units")) for row in settled_rows]
-    profits = [value for value in profits if value is not None]
+    profits = numeric_values(row.get("profit_units") for row in settled_rows)
     roi = sum(profits) / len(profits) if profits else None
     sample_count = int(learned_quality.get("sample_count") or 0)
     model_brier = parse_float(model_quality.get("brier_score"))
@@ -12182,7 +12345,7 @@ _DASHBOARD_SIGNAL_RECOMMENDATIONS = {
 
 
 def _dashboard_prediction_reason(row: dict[str, Any]) -> str:
-    diagnostic = row.get("prediction_diagnostic") if isinstance(row.get("prediction_diagnostic"), dict) else {}
+    diagnostic = as_dict(row.get("prediction_diagnostic"))
     return str(
         diagnostic.get("primary_reason")
         or row.get("rejection_reason")
@@ -12194,7 +12357,7 @@ def _dashboard_prediction_reason(row: dict[str, Any]) -> str:
 def _dashboard_prediction_quality_segment_map(prediction_quality: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     if not isinstance(prediction_quality, dict):
         return {}
-    segments = prediction_quality.get("segments") if isinstance(prediction_quality.get("segments"), list) else []
+    segments = as_list(prediction_quality.get("segments"))
     segment_map: dict[str, dict[str, Any]] = {}
     for segment in segments:
         if not isinstance(segment, dict):
@@ -12213,7 +12376,7 @@ def _dashboard_negative_quality_segment_blocker(
     segment = segment_map.get(reason)
     if not segment:
         return None
-    adjustment = segment.get("adjustment") if isinstance(segment.get("adjustment"), dict) else {}
+    adjustment = as_dict(segment.get("adjustment"))
     action = str(adjustment.get("action") or "")
     roi = parse_float(segment.get("roi"))
     settled_count = int(segment.get("settled_count") or 0)
@@ -12267,9 +12430,103 @@ def _dashboard_quality_blocker_label_text(blockers: list[dict[str, Any]]) -> str
     return "、".join(labels[:3])
 
 
+def _dashboard_model_failure_policy_rules(model_failure_diagnostics: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(model_failure_diagnostics, dict):
+        return []
+    policy = as_dict(model_failure_diagnostics.get("policy"))
+    return [rule for rule in as_list(policy.get("rules")) if isinstance(rule, dict)]
+
+
+def _dashboard_row_has_odds_snapshot(row: dict[str, Any]) -> bool:
+    return bool(row.get("has_odds_snapshot") or int(row.get("odds_snapshot_count") or 0) > 0)
+
+
+def _dashboard_model_failure_policy_blocker(
+    row: dict[str, Any],
+    rules: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Apply only hard policy rules that can be evaluated on one candidate row."""
+    for rule in rules:
+        if str(rule.get("status") or "") != "blocked":
+            continue
+        action = str(rule.get("action") or "")
+        target = str(rule.get("target") or "")
+        target_key = str(rule.get("target_key") or "")
+        if (
+            action == "suppress_formal_recommendation"
+            and target == "prediction_diagnostic.primary_reason"
+            and _dashboard_prediction_reason(row) == target_key
+        ):
+            return {
+                "rule_key": rule.get("key") or f"suppress_reason:{target_key}",
+                "title": rule.get("title") or _dashboard_reason_label(target_key),
+                "detail": rule.get("detail") or "该分组命中模型失利策略，只进入纸面预测和回测。",
+                "action": action,
+                "target": target,
+                "target_key": target_key,
+                "label": rule.get("title") or _dashboard_reason_label(target_key),
+                "ledger_id": row.get("ledger_id") or "",
+                "sample_count": int(rule.get("sample_count") or 0),
+                "roi": round_metric(parse_float(rule.get("roi")), 4),
+            }
+        if (
+            action == "require_snapshot_before_formal_recommendation"
+            and target == "market_snapshot_coverage"
+            and not _dashboard_row_has_odds_snapshot(row)
+        ):
+            return {
+                "rule_key": rule.get("key") or "require_market_snapshots:missing_market_snapshots",
+                "title": rule.get("title") or "正式推荐前必须补齐赔率快照",
+                "detail": rule.get("detail") or "缺少多公司赔率快照时，只进入纸面预测和回测。",
+                "action": action,
+                "target": target,
+                "target_key": target_key,
+                "label": rule.get("title") or "缺少赔率快照",
+                "ledger_id": row.get("ledger_id") or "",
+                "sample_count": int(rule.get("sample_count") or 0),
+                "roi": round_metric(parse_float(rule.get("roi")), 4),
+            }
+    return None
+
+
+def _dashboard_model_policy_blocker_summary(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for blocker in blockers:
+        rule_key = str(blocker.get("rule_key") or "")
+        if not rule_key:
+            continue
+        group = grouped.setdefault(
+            rule_key,
+            {
+                "rule_key": rule_key,
+                "title": blocker.get("title") or "模型失利策略",
+                "detail": blocker.get("detail") or "",
+                "action": blocker.get("action") or "",
+                "target": blocker.get("target") or "",
+                "target_key": blocker.get("target_key") or "",
+                "count": 0,
+                "sample_count": blocker.get("sample_count") or 0,
+                "roi": blocker.get("roi"),
+            },
+        )
+        group["count"] = int(group.get("count") or 0) + 1
+    return sorted(grouped.values(), key=lambda item: (-int(item.get("count") or 0), str(item.get("rule_key") or "")))
+
+
+def _dashboard_model_policy_blocker_label_text(blockers: list[dict[str, Any]]) -> str:
+    labels: list[str] = []
+    for blocker in blockers:
+        label = str(blocker.get("title") or blocker.get("label") or "")
+        if label and label not in labels:
+            labels.append(label)
+    if not labels:
+        return "模型失利策略"
+    return "、".join(labels[:2])
+
+
 def _dashboard_row_threshold_ready(row: dict[str, Any]) -> bool:
-    diagnostic = row.get("prediction_diagnostic") if isinstance(row.get("prediction_diagnostic"), dict) else {}
-    gaps = diagnostic.get("threshold_gaps") if isinstance(diagnostic.get("threshold_gaps"), dict) else {}
+    diagnostic = as_dict(row.get("prediction_diagnostic"))
+    gaps = as_dict(diagnostic.get("threshold_gaps"))
     probability_gap = parse_float(gaps.get("probability"))
     value_edge_gap = parse_float(gaps.get("value_edge"))
     min_odds_gap = parse_float(gaps.get("min_decimal_odds"))
@@ -12283,8 +12540,8 @@ def _dashboard_row_threshold_ready(row: dict[str, Any]) -> bool:
 
 
 def _dashboard_opportunity_candidate(row: dict[str, Any]) -> dict[str, Any]:
-    diagnostic = row.get("prediction_diagnostic") if isinstance(row.get("prediction_diagnostic"), dict) else {}
-    gaps = diagnostic.get("threshold_gaps") if isinstance(diagnostic.get("threshold_gaps"), dict) else {}
+    diagnostic = as_dict(row.get("prediction_diagnostic"))
+    gaps = as_dict(diagnostic.get("threshold_gaps"))
     return {
         "ledger_id": row.get("ledger_id") or "",
         "league": row.get("league") or "",
@@ -12310,7 +12567,7 @@ def _dashboard_opportunity_candidate(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _dashboard_shadow_band(shadow_recalibration: dict[str, Any], band_key: str) -> dict[str, Any]:
-    for band in shadow_recalibration.get("bands") or []:
+    for band in as_list(shadow_recalibration.get("bands")):
         if isinstance(band, dict) and str(band.get("key") or "") == band_key:
             return band
     return {}
@@ -12348,8 +12605,7 @@ def _dashboard_counter_signal_candidate(
 
 def _dashboard_backtest_segment(rows: list[dict[str, Any]]) -> dict[str, Any]:
     settled_rows = [row for row in rows if row.get("settlement_status") == "settled"]
-    profits = [parse_float(row.get("profit_units")) for row in settled_rows]
-    profits = [value for value in profits if value is not None]
+    profits = numeric_values(row.get("profit_units") for row in settled_rows)
     hit_count = sum(1 for row in settled_rows if int(row.get("hit") or 0) == 1)
     miss_count = sum(1 for row in settled_rows if int(row.get("hit") or 0) == 0)
     return {
@@ -12373,6 +12629,8 @@ def _dashboard_recommendation_release_gate(
     signal_backtest: dict[str, Any] | None = None,
     negative_segment_blocked_count: int = 0,
     negative_segment_blockers: list[dict[str, Any]] | None = None,
+    model_policy_blocked_count: int = 0,
+    model_policy_blockers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     sample_count = int(strategy_state.get("sample_count") or 0)
     min_sample_count = int(strategy_state.get("min_live_sample_count") or 20)
@@ -12381,22 +12639,15 @@ def _dashboard_recommendation_release_gate(
     hit_rate = parse_float(strategy_state.get("hit_rate"))
     signal_backtest = signal_backtest or {}
     negative_segment_blockers = negative_segment_blockers or []
+    model_policy_blockers = model_policy_blockers or []
     signal_sample_count = int(signal_backtest.get("sample_count") or 0)
     signal_roi = parse_float(signal_backtest.get("roi"))
     signal_hit_rate = parse_float(signal_backtest.get("hit_rate"))
     effectiveness = learning_effectiveness or {}
     beats_market = bool(effectiveness.get("beats_market"))
     learning_improved = bool(effectiveness.get("learning_improved"))
-    shadow_recalibration = (
-        effectiveness.get("shadow_recalibration")
-        if isinstance(effectiveness.get("shadow_recalibration"), dict)
-        else {}
-    )
-    shadow_quality = (
-        shadow_recalibration.get("quality")
-        if isinstance(shadow_recalibration.get("quality"), dict)
-        else {}
-    )
+    shadow_recalibration = as_dict(effectiveness.get("shadow_recalibration"))
+    shadow_quality = as_dict(shadow_recalibration.get("quality"))
     shadow_status = str(shadow_recalibration.get("status") or "")
     shadow_walk_sample_count = int(shadow_quality.get("walk_forward_sample_count") or 0)
     shadow_walk_delta = parse_float(shadow_quality.get("walk_forward_brier_delta"))
@@ -12465,6 +12716,16 @@ def _dashboard_recommendation_release_gate(
         formal_enabled = False
         title = "正式推荐暂停"
         detail = f"正向纸面信号回测收益率 {signal_roi:+.1%}，继续预测并回测，但不升级为正式推荐。"
+        severity = "warning"
+    elif model_policy_blocked_count > 0 and threshold_ready_count <= 0:
+        status = "paper_only_model_failure_policy"
+        formal_enabled = False
+        title = "模型失利策略阻断"
+        blocker_text = _dashboard_model_policy_blocker_label_text(model_policy_blockers)
+        detail = (
+            f"{blocker_text} 已命中模型失利策略，当前 {model_policy_blocked_count} 场候选只保留观察；"
+            "需要先完成降权、补快照或重训验证后再评估正式推荐。"
+        )
         severity = "warning"
     elif negative_segment_blocked_count > 0 and threshold_ready_count <= 0:
         status = "paper_only_negative_segment"
@@ -12579,6 +12840,35 @@ def _dashboard_recommendation_release_gate(
             else 1.0,
         },
         {
+            "key": "model_failure_policy",
+            "label": "失利策略",
+            "status": (
+                "blocked"
+                if model_policy_blocked_count > 0 and threshold_ready_count <= 0
+                else "warning"
+                if model_policy_blocked_count > 0
+                else "ok"
+            ),
+            "title": (
+                "策略阻断候选"
+                if model_policy_blocked_count > 0 and threshold_ready_count <= 0
+                else "部分候选命中策略"
+                if model_policy_blocked_count > 0
+                else "失利策略未阻断"
+            ),
+            "detail": (
+                f"{_dashboard_model_policy_blocker_label_text(model_policy_blockers)} 阻断 "
+                f"{model_policy_blocked_count} 场候选，暂不升级为正式推荐。"
+                if model_policy_blocked_count > 0
+                else "当前纸面候选未命中硬阻断失利策略。"
+            ),
+            "current": max(0, paper_signal_count - model_policy_blocked_count),
+            "target": paper_signal_count,
+            "ratio": _dashboard_ratio(max(0, paper_signal_count - model_policy_blocked_count), paper_signal_count)
+            if paper_signal_count
+            else 1.0,
+        },
+        {
             "key": "global_backtest_roi",
             "label": "全局回测",
             "status": "warning" if roi is not None and roi < 0 else "ok",
@@ -12680,6 +12970,8 @@ def _dashboard_recommendation_release_gate(
         "min_signal_sample_count": min_signal_sample_count,
         "negative_segment_blocked_count": negative_segment_blocked_count,
         "negative_segment_blockers": _dashboard_quality_blocker_summary(negative_segment_blockers)[:6],
+        "model_policy_blocked_count": model_policy_blocked_count,
+        "model_policy_blockers": _dashboard_model_policy_blocker_summary(model_policy_blockers)[:6],
         "learning_improved": learning_improved,
         "beats_market": beats_market,
         "prediction_policy": "always_predict_and_backtest",
@@ -12694,20 +12986,13 @@ def _dashboard_recommendation_opportunity(
     candidate_filters: list[dict[str, Any]],
     learning_effectiveness: dict[str, Any] | None = None,
     prediction_quality: dict[str, Any] | None = None,
+    model_failure_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    calibration_health = (
-        learning_effectiveness.get("calibration_health")
-        if isinstance(learning_effectiveness, dict) and isinstance(learning_effectiveness.get("calibration_health"), dict)
-        else {}
-    )
-    shadow_recalibration = (
-        learning_effectiveness.get("shadow_recalibration")
-        if isinstance(learning_effectiveness, dict) and isinstance(learning_effectiveness.get("shadow_recalibration"), dict)
-        else {}
-    )
+    calibration_health = as_dict(learning_effectiveness.get("calibration_health")) if isinstance(learning_effectiveness, dict) else {}
+    shadow_recalibration = as_dict(learning_effectiveness.get("shadow_recalibration")) if isinstance(learning_effectiveness, dict) else {}
     candidate_band_keys = {
         str(key)
-        for key in (calibration_health.get("candidate_band_keys") or [])
+        for key in as_list(calibration_health.get("candidate_band_keys"))
         if str(key)
     }
     current_rows = [row for row in rows if row.get("settlement_status") == "open"]
@@ -12726,12 +13011,22 @@ def _dashboard_recommendation_opportunity(
             blocker := _dashboard_negative_quality_segment_blocker(row, quality_segment_map)
         )
     }
+    model_policy_rules = _dashboard_model_failure_policy_rules(model_failure_diagnostics)
+    model_policy_blockers_by_ledger = {
+        str(row.get("ledger_id") or id(row)): blocker
+        for row in signal_rows
+        if (
+            blocker := _dashboard_model_failure_policy_blocker(row, model_policy_rules)
+        )
+    }
+    blocked_signal_ids = set(negative_segment_blockers_by_ledger) | set(model_policy_blockers_by_ledger)
     eligible_signal_rows = [
         row
         for row in signal_rows
-        if str(row.get("ledger_id") or id(row)) not in negative_segment_blockers_by_ledger
+        if str(row.get("ledger_id") or id(row)) not in blocked_signal_ids
     ]
     negative_segment_blockers = list(negative_segment_blockers_by_ledger.values())
+    model_policy_blockers = list(model_policy_blockers_by_ledger.values())
     historical_signal_rows = [
         row
         for row in rows
@@ -12768,9 +13063,11 @@ def _dashboard_recommendation_opportunity(
         status = "paper_signals_pending"
         severity = "warning"
         title = "有纸面信号，尚未升为正式推荐"
+        model_policy_text = f"{len(model_policy_blockers)} 场被模型失利策略阻断，" if model_policy_blockers else ""
         detail = (
             f"{len(signal_rows)} 场纸面信号已进入回测台账，其中 "
             f"{reanalysis_backlog_count} 场赔率补齐后等待复算，"
+            f"{model_policy_text}"
             f"{len(threshold_ready_rows)} 场已满足当前概率/边际/赔率门槛。"
         )
     elif counter_signal_rows:
@@ -12818,6 +13115,8 @@ def _dashboard_recommendation_opportunity(
         "threshold_ready_count": len(threshold_ready_rows),
         "negative_segment_blocked_count": len(negative_segment_blockers),
         "negative_segment_blockers": _dashboard_quality_blocker_summary(negative_segment_blockers)[:6],
+        "model_policy_blocked_count": len(model_policy_blockers),
+        "model_policy_blockers": _dashboard_model_policy_blocker_summary(model_policy_blockers)[:6],
         "reanalysis_backlog_count": reanalysis_backlog_count,
         "missing_snapshot_count": missing_snapshot_count,
         "gate_thresholds": {
@@ -12837,6 +13136,8 @@ def _dashboard_recommendation_opportunity(
             signal_backtest=signal_backtest,
             negative_segment_blocked_count=len(negative_segment_blockers),
             negative_segment_blockers=negative_segment_blockers,
+            model_policy_blocked_count=len(model_policy_blockers),
+            model_policy_blockers=model_policy_blockers,
         ),
         "top_blockers": top_blockers,
         "top_candidates": [_dashboard_opportunity_candidate(row) for row in candidates[:6]],
@@ -12918,19 +13219,19 @@ def _dashboard_contract_health(
     total_predictions = int(prediction_kpis.get("total_count") or 0)
     settled_count = int(prediction_kpis.get("settled_count") or 0)
     open_count = int(prediction_kpis.get("open_count") or 0)
-    release_gate = recommendation_opportunity.get("release_gate") if isinstance(recommendation_opportunity.get("release_gate"), dict) else {}
+    release_gate = as_dict(recommendation_opportunity.get("release_gate"))
     formal_enabled = bool(release_gate.get("formal_enabled"))
     snapshot_count = int(market_snapshot_summary.get("total_snapshot_count") or 0)
     snapshot_event_count = int(market_snapshot_summary.get("event_count") or 0)
     context_total = int(context_coverage.get("total_count") or 0)
-    context_fields = context_coverage.get("fields") if isinstance(context_coverage.get("fields"), list) else []
+    context_fields = as_list(context_coverage.get("fields"))
     context_available = sum(int(field.get("available_count") or 0) for field in context_fields if isinstance(field, dict))
     context_possible = max(0, context_total * max(1, len(context_fields))) if context_fields else 0
     context_ratio = _dashboard_ratio(context_available, context_possible) if context_possible else None
     release_gate_status = str(release_gate.get("status") or "")
     gate_blocked = any(
         str(gate.get("status") or "") == "blocked"
-        for gate in (release_gate.get("gates") or [])
+        for gate in as_list(release_gate.get("gates"))
         if isinstance(gate, dict)
     )
     recommendation_status = (
@@ -13069,7 +13370,7 @@ def _dashboard_contract_health(
 
 
 def _dashboard_record_model_engine(record: dict[str, Any]) -> dict[str, Any]:
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    raw = as_dict(record.get("raw"))
     candidate_paths = (
         ("model_engine",),
         ("model_card", "model_engine"),
@@ -13086,7 +13387,7 @@ def _dashboard_record_model_engine(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _dashboard_legacy_candidate_model_engine(record: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
-    best = raw.get("best_candidate") if isinstance(raw.get("best_candidate"), dict) else {}
+    best = as_dict(raw.get("best_candidate"))
     if not best:
         return {}
 
@@ -13140,7 +13441,7 @@ def _dashboard_model_governance_check(
     target: int | float | None = None,
 ) -> dict[str, Any]:
     ratio = None
-    if current is not None and target not in (None, 0):
+    if current is not None and target is not None and target != 0:
         try:
             ratio = max(0.0, min(float(current) / float(target), 1.0))
         except (TypeError, ValueError, ZeroDivisionError):
@@ -13181,23 +13482,23 @@ def _dashboard_model_governance(
     market_anchor_count = 0
     fallback_count = 0
     for _record, engine in model_rows:
-        dixon_coles = engine.get("dixon_coles") if isinstance(engine.get("dixon_coles"), dict) else {}
+        dixon_coles = as_dict(engine.get("dixon_coles"))
         rho_source = str(dixon_coles.get("rho_source") or "unknown")
         rho_source_counts[rho_source] += 1
         rho_value = parse_float(dixon_coles.get("rho"))
         if rho_value is not None:
             rho_values.append(rho_value)
-        historical_rho = dixon_coles.get("historical_rho") if isinstance(dixon_coles.get("historical_rho"), dict) else {}
+        historical_rho = as_dict(dixon_coles.get("historical_rho"))
         historical_value = parse_float(historical_rho.get("rho"))
         if historical_value is not None:
             historical_rho_values.append(historical_value)
         historical_sample_count = int(historical_rho.get("sample_count") or 0)
         if historical_sample_count > 0:
             historical_sample_counts.append(historical_sample_count)
-        fitted_targets = engine.get("fitted_market_targets") if isinstance(engine.get("fitted_market_targets"), dict) else {}
+        fitted_targets = as_dict(engine.get("fitted_market_targets"))
         if any(bool(value) for value in fitted_targets.values()):
             market_anchor_count += 1
-        quality = engine.get("model_quality") if isinstance(engine.get("model_quality"), dict) else {}
+        quality = as_dict(engine.get("model_quality"))
         if bool(quality.get("fallback_used")):
             fallback_count += 1
 
@@ -13205,17 +13506,9 @@ def _dashboard_model_governance(
     calibration_sample_count = int(learning_effectiveness.get("sample_count") or 0)
     learning_improved = bool(learning_effectiveness.get("learning_improved"))
     beats_market = bool(learning_effectiveness.get("beats_market"))
-    probability_governance = (
-        learning_effectiveness.get("probability_governance")
-        if isinstance(learning_effectiveness.get("probability_governance"), dict)
-        else {}
-    )
-    shadow_recalibration = (
-        learning_effectiveness.get("shadow_recalibration")
-        if isinstance(learning_effectiveness.get("shadow_recalibration"), dict)
-        else {}
-    )
-    shadow_quality = shadow_recalibration.get("quality") if isinstance(shadow_recalibration.get("quality"), dict) else {}
+    probability_governance = as_dict(learning_effectiveness.get("probability_governance"))
+    shadow_recalibration = as_dict(learning_effectiveness.get("shadow_recalibration"))
+    shadow_quality = as_dict(shadow_recalibration.get("quality"))
     clv_available_count = int(clv_tracking.get("available_count") or 0)
     clv_tracked_count = int(clv_tracking.get("tracked_count") or 0)
     avg_clv_return = parse_float(clv_tracking.get("avg_clv_return"))
@@ -13368,7 +13661,7 @@ def _dashboard_production_readiness(
     roi = parse_float(prediction_kpis.get("roi"))
     learning_improved = bool(learning_effectiveness.get("learning_improved"))
     beats_market = bool(learning_effectiveness.get("beats_market"))
-    release_gate = recommendation_opportunity.get("release_gate") if isinstance(recommendation_opportunity.get("release_gate"), dict) else {}
+    release_gate = as_dict(recommendation_opportunity.get("release_gate"))
     formal_enabled = bool(release_gate.get("formal_enabled"))
     release_gate_items = [
         gate for gate in (release_gate.get("gates") or [])
@@ -13799,6 +14092,416 @@ def _dashboard_market_breakdown(prediction_ledger: list[dict[str, Any]]) -> dict
     }
 
 
+def _dashboard_driver_loss_units(roi: float | None, sample_count: int) -> float:
+    if roi is None or sample_count <= 0 or roi >= 0:
+        return 0.0
+    return abs(float(roi) * sample_count)
+
+
+def _dashboard_failure_driver(
+    *,
+    category: str,
+    key: str,
+    title: str,
+    detail: str,
+    sample_count: int,
+    hit_rate: float | None = None,
+    roi: float | None = None,
+    loss_units: float | None = None,
+    severity: str = "warning",
+    evidence: str = "",
+    action: str = "",
+) -> dict[str, Any]:
+    computed_loss = _dashboard_driver_loss_units(roi, sample_count) if loss_units is None else max(0.0, float(loss_units))
+    return {
+        "category": category,
+        "key": key,
+        "title": title,
+        "detail": detail,
+        "sample_count": sample_count,
+        "hit_rate": round_metric(hit_rate),
+        "roi": round_metric(roi, 4),
+        "loss_units": round_metric(computed_loss, 4) or 0.0,
+        "severity": severity,
+        "evidence": evidence,
+        "action": action,
+    }
+
+
+def _dashboard_model_failure_policy_rule(
+    *,
+    key: str,
+    rule_type: str,
+    status: str,
+    title: str,
+    detail: str,
+    action: str,
+    target: str,
+    target_key: str,
+    driver: dict[str, Any],
+) -> dict[str, Any]:
+    sample_count = int(driver.get("sample_count") or 0)
+    return {
+        "key": key,
+        "type": rule_type,
+        "status": status,
+        "title": title,
+        "detail": detail,
+        "action": action,
+        "target": target,
+        "target_key": target_key,
+        "driver_category": str(driver.get("category") or ""),
+        "sample_count": sample_count,
+        "roi": round_metric(parse_float(driver.get("roi")), 4),
+        "loss_units": round_metric(parse_float(driver.get("loss_units")), 4) or 0.0,
+        "evidence": str(driver.get("evidence") or ""),
+    }
+
+
+def _dashboard_model_failure_action_policy(
+    *,
+    status: str,
+    drivers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Turn failure diagnostics into rules that later services can execute.
+
+    这里不是直接投注或改模型，而是把归因结果翻译成清晰动作：
+    - 哪些原因分组要阻断正式推荐；
+    - 哪些联赛/市场组合需要降权；
+    - 哪些数据覆盖问题必须先补齐；
+    - 概率没跑赢市场时继续保留市场基线保护。
+    """
+    rules: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(rule: dict[str, Any]) -> None:
+        key = str(rule.get("key") or "")
+        if not key or key in seen:
+            return
+        seen.add(key)
+        rules.append(rule)
+
+    for driver in drivers:
+        category = str(driver.get("category") or "")
+        driver_key = str(driver.get("key") or "")
+        sample_count = int(driver.get("sample_count") or 0)
+        roi = parse_float(driver.get("roi"))
+        enough_sample = sample_count >= 20
+        label = str(driver.get("title") or driver_key)
+
+        if category == "reason":
+            if enough_sample and roi is not None and roi < 0:
+                add(
+                    _dashboard_model_failure_policy_rule(
+                        key=f"suppress_reason:{driver_key}",
+                        rule_type="suppress_reason",
+                        status="blocked",
+                        title=f"暂停 {label} 正式推荐",
+                        detail=f"{label} 已有 {sample_count} 场回测且 ROI 为负，后续只进入纸面预测和回测。",
+                        action="suppress_formal_recommendation",
+                        target="prediction_diagnostic.primary_reason",
+                        target_key=driver_key,
+                        driver=driver,
+                    )
+                )
+            else:
+                add(
+                    _dashboard_model_failure_policy_rule(
+                        key=f"collect_reason_samples:{driver_key}",
+                        rule_type="collect_reason_samples",
+                        status="warning",
+                        title=f"补足 {label} 样本",
+                        detail=f"{label} 只有 {sample_count} 场回测，先继续采样，不直接升级正式推荐。",
+                        action="collect_more_samples",
+                        target="prediction_diagnostic.primary_reason",
+                        target_key=driver_key,
+                        driver=driver,
+                    )
+                )
+        elif category == "league_market":
+            add(
+                _dashboard_model_failure_policy_rule(
+                    key=f"down_weight_league_market:{driver_key}",
+                    rule_type="down_weight_league_market",
+                    status="warning" if enough_sample else "info",
+                    title=f"降低 {label} 权重",
+                    detail=f"{label} 表现为负收益，后续采样和候选排序需要单独降权观察。",
+                    action="reduce_sampling_weight",
+                    target="league_market",
+                    target_key=driver_key,
+                    driver=driver,
+                )
+            )
+        elif category == "market":
+            add(
+                _dashboard_model_failure_policy_rule(
+                    key=f"down_weight_market:{driver_key}",
+                    rule_type="down_weight_market",
+                    status="warning",
+                    title=f"降低 {label} 市场权重",
+                    detail=f"{label} 的市场整体为负收益，正式推荐前要提高门槛或单独校准。",
+                    action="tighten_market_thresholds",
+                    target="market",
+                    target_key=driver_key,
+                    driver=driver,
+                )
+            )
+        elif category == "odds_coverage":
+            add(
+                _dashboard_model_failure_policy_rule(
+                    key=f"require_market_snapshots:{driver_key}",
+                    rule_type="require_market_snapshots",
+                    status="blocked",
+                    title="正式推荐前必须补齐赔率快照",
+                    detail="缺少多公司同盘口快照时，只允许纸面预测和回测，不升级正式推荐。",
+                    action="require_snapshot_before_formal_recommendation",
+                    target="market_snapshot_coverage",
+                    target_key=driver_key,
+                    driver=driver,
+                )
+            )
+        elif category == "probability":
+            add(
+                _dashboard_model_failure_policy_rule(
+                    key=f"keep_market_baseline:{driver_key}",
+                    rule_type="keep_market_baseline",
+                    status="blocked",
+                    title="保留市场基线保护",
+                    detail="学习概率未稳定跑赢市场前，正式推荐概率源继续以市场隐含概率作为保护。",
+                    action="keep_market_probability_guardrail",
+                    target="probability_source",
+                    target_key="market_probability",
+                    driver=driver,
+                )
+            )
+
+    rules.sort(
+        key=lambda item: (
+            _dashboard_action_status_rank(str(item.get("status") or "")),
+            -(parse_float(item.get("loss_units")) or 0.0),
+            -int(item.get("sample_count") or 0),
+            str(item.get("key") or ""),
+        )
+    )
+    blocked_rule_count = sum(1 for rule in rules if rule.get("status") == "blocked")
+    return {
+        "formal_recommendation_enabled": False,
+        "reason": "model_failure_diagnostics" if status != "no_major_loss_driver" else "production_gate_required",
+        "rule_count": len(rules),
+        "blocked_rule_count": blocked_rule_count,
+        "rules": rules[:10],
+    }
+
+
+def _dashboard_model_failure_diagnostics(
+    *,
+    prediction_ledger: list[dict[str, Any]],
+    prediction_kpis: dict[str, Any],
+    learning_effectiveness: dict[str, Any],
+    prediction_quality: dict[str, Any],
+    market_breakdown: dict[str, Any],
+) -> dict[str, Any]:
+    """Explain why the model is not production-ready by ranking loss drivers.
+
+    主要阶段：
+    - 先判断样本量是否足够做归因；
+    - 再把市场、联赛×市场、预测原因、赔率覆盖和市场基线差距统一成 driver；
+    - 最后按亏损贡献排序，给前端一个可直接展示的根因列表。
+    """
+    settled_count = int(prediction_kpis.get("settled_count") or 0)
+    if settled_count <= 0:
+        settled_count = sum(1 for row in prediction_ledger if row.get("settlement_status") == "settled")
+    hit_rate = parse_float(prediction_kpis.get("hit_rate"))
+    roi = parse_float(prediction_kpis.get("roi"))
+    if settled_count < 5:
+        return {
+            "status": "insufficient_sample",
+            "severity": "warning",
+            "title": "样本不足，暂不做失利归因",
+            "detail": f"当前只有 {settled_count} 场已回测样本，容易被单场结果带偏；继续积累后再判断具体输在哪里。",
+            "summary": {
+                "settled_count": settled_count,
+                "hit_rate": round_metric(hit_rate),
+                "roi": round_metric(roi, 4),
+                "negative_driver_count": 0,
+                "odds_coverage_ratio": None,
+            },
+            "primary_driver": None,
+            "drivers": [],
+            "policy": {
+                "formal_recommendation_enabled": False,
+                "reason": "insufficient_settled_samples",
+                "rule_count": 0,
+                "blocked_rule_count": 0,
+                "rules": [],
+            },
+        }
+
+    drivers: list[dict[str, Any]] = []
+    market_rows = as_list(market_breakdown.get("by_market"))
+    for row in market_rows:
+        row_roi = parse_float(row.get("roi"))
+        sample_count = int(row.get("sample_count") or 0)
+        if row_roi is None or row_roi >= 0 or sample_count <= 0:
+            continue
+        market = str(row.get("market") or "unknown")
+        drivers.append(
+            _dashboard_failure_driver(
+                category="market",
+                key=market,
+                title=f"{market} 市场整体亏损",
+                detail=f"{market} 市场已回测 {sample_count} 场，ROI {row_roi:+.1%}。",
+                sample_count=sample_count,
+                hit_rate=parse_float(row.get("hit_rate")),
+                roi=row_roi,
+                evidence=f"命中 {int(row.get('hit_count') or 0)}/{sample_count}",
+                action="检查该市场的概率阈值、盘口方向和赔率源质量。",
+            )
+        )
+
+    for row in as_list(market_breakdown.get("heatmap_cells")):
+        row_roi = parse_float(row.get("roi"))
+        sample_count = int(row.get("sample_count") or 0)
+        if row_roi is None or row_roi >= 0 or sample_count <= 0:
+            continue
+        league = str(row.get("league") or "unknown")
+        market = str(row.get("market") or "unknown")
+        drivers.append(
+            _dashboard_failure_driver(
+                category="league_market",
+                key=f"{league}:{market}",
+                title=f"{league} × {market} 亏损",
+                detail=f"{league} 的 {market} 已回测 {sample_count} 场，ROI {row_roi:+.1%}。",
+                sample_count=sample_count,
+                hit_rate=parse_float(row.get("hit_rate")),
+                roi=row_roi,
+                evidence="联赛和市场组合热力图显示该分组为负收益。",
+                action="优先降低该联赛/市场组合的采样权重，或单独训练/校准。",
+            )
+        )
+
+    for segment in as_list(prediction_quality.get("segments")):
+        row_roi = parse_float(segment.get("roi"))
+        sample_count = int(segment.get("settled_count") or 0)
+        if row_roi is None or row_roi >= 0 or sample_count <= 0:
+            continue
+        reason = str(segment.get("reason") or segment.get("key") or "unknown")
+        label = str(segment.get("label") or _dashboard_reason_label(reason))
+        drivers.append(
+            _dashboard_failure_driver(
+                category="reason",
+                key=reason,
+                title=f"{label} 分组亏损",
+                detail=f"{label} 分组已回测 {sample_count} 场，ROI {row_roi:+.1%}。",
+                sample_count=sample_count,
+                hit_rate=parse_float(segment.get("hit_rate")),
+                roi=row_roi,
+                evidence=f"赔率覆盖 {int(segment.get('odds_covered_count') or 0)}/{int(segment.get('total_count') or 0)}，样本质量 {segment.get('sample_quality') or 'unknown'}。",
+                action=str((as_dict(segment.get("adjustment"))).get("detail") or "按该原因分组降权、过滤或继续补样本。"),
+            )
+        )
+
+    ledger_count = len(prediction_ledger)
+    covered_count = sum(
+        1
+        for row in prediction_ledger
+        if bool(row.get("has_odds_snapshot")) or int(row.get("odds_snapshot_count") or 0) > 0
+    )
+    odds_coverage_ratio = covered_count / ledger_count if ledger_count else None
+    if ledger_count and covered_count < ledger_count:
+        severity = "error" if odds_coverage_ratio is not None and odds_coverage_ratio < 0.5 else "warning"
+        drivers.append(
+            _dashboard_failure_driver(
+                category="odds_coverage",
+                key="missing_market_snapshots",
+                title="赔率快照覆盖不足",
+                detail=f"台账只有 {covered_count}/{ledger_count} 场有赔率快照，走势/CLV 归因不完整。",
+                sample_count=ledger_count,
+                severity=severity,
+                evidence=f"覆盖率 {odds_coverage_ratio:.1%}" if odds_coverage_ratio is not None else "覆盖率不可算",
+                action="继续采集同公司同盘口多时间点快照，并对缺快照样本降权。",
+            )
+        )
+
+    deltas = as_dict(learning_effectiveness.get("deltas"))
+    learned_minus_market = parse_float(deltas.get("learned_brier_minus_market"))
+    beats_market = bool(learning_effectiveness.get("beats_market"))
+    if learned_minus_market is not None and learned_minus_market >= 0:
+        drivers.append(
+            _dashboard_failure_driver(
+                category="probability",
+                key="learned_probability_not_beating_market",
+                title="学习概率没有跑赢市场基线",
+                detail=f"学习后 Brier 比市场基线高 {learned_minus_market:+.4f}，说明概率校准还没有超过市场隐含概率。",
+                sample_count=settled_count,
+                severity="error",
+                evidence="Brier 越低越好；当前 learned - market >= 0。",
+                action="先重跑 holdout validation，并检查是否需要切换模型特征或赔率数据源。",
+            )
+        )
+    elif not beats_market:
+        drivers.append(
+            _dashboard_failure_driver(
+                category="probability",
+                key="market_baseline_guardrail",
+                title="市场基线闸门未通过",
+                detail="当前学习概率尚未被证明优于市场隐含概率，推荐发布应继续关闭。",
+                sample_count=settled_count,
+                severity="warning",
+                evidence="beats_market=false",
+                action="继续用市场基线作为保护概率，直到 holdout 证明模型优于市场。",
+            )
+        )
+
+    drivers.sort(
+        key=lambda item: (
+            parse_float(item.get("loss_units")) or 0.0,
+            int(item.get("sample_count") or 0),
+            1 if item.get("severity") == "error" else 0,
+        ),
+        reverse=True,
+    )
+    negative_driver_count = sum(1 for driver in drivers if (parse_float(driver.get("roi")) or 0.0) < 0)
+    primary_driver = drivers[0] if drivers else None
+    if roi is not None and roi < 0:
+        status = "losing_model"
+        severity = "error"
+        title = "模型当前亏损，需定位失利来源"
+        detail = (
+            f"已回测 {settled_count} 场，整体 ROI {roi:+.1%}；"
+            f"首要问题：{primary_driver.get('title') if primary_driver else '等待进一步归因'}。"
+        )
+    elif drivers:
+        status = "diagnostic_watchlist"
+        severity = "warning"
+        title = "模型存在质量风险"
+        detail = f"整体收益未明显为负，但发现 {len(drivers)} 个风险分组，需要继续观察。"
+    else:
+        status = "no_major_loss_driver"
+        severity = "ok"
+        title = "暂无明显失利分组"
+        detail = "已回测样本中暂未发现显著负收益分组，但推荐发布仍需通过市场基线和生产闸门。"
+
+    return {
+        "status": status,
+        "severity": severity,
+        "title": title,
+        "detail": detail,
+        "summary": {
+            "settled_count": settled_count,
+            "hit_rate": round_metric(hit_rate),
+            "roi": round_metric(roi, 4),
+            "negative_driver_count": negative_driver_count,
+            "driver_count": len(drivers),
+            "odds_coverage_ratio": round_metric(odds_coverage_ratio, 6),
+            "learned_brier_minus_market": round_metric(learned_minus_market, 6),
+        },
+        "primary_driver": primary_driver,
+        "drivers": drivers[:8],
+        "policy": _dashboard_model_failure_action_policy(status=status, drivers=drivers),
+    }
+
+
 def _dashboard_prediction_accountability(
     *,
     prediction_kpis: dict[str, Any],
@@ -13817,7 +14520,7 @@ def _dashboard_prediction_accountability(
     learning_active = bool(strategy_state.get("active"))
     learning_improved = bool(learning_effectiveness.get("learning_improved"))
     beats_market = bool(learning_effectiveness.get("beats_market"))
-    release_gate = recommendation_opportunity.get("release_gate") if isinstance(recommendation_opportunity.get("release_gate"), dict) else {}
+    release_gate = as_dict(recommendation_opportunity.get("release_gate"))
     formal_enabled = bool(release_gate.get("formal_enabled"))
     primary_blocker = str((candidate_filters[0] or {}).get("reason") or "") if candidate_filters else ""
     primary_blocker_label = _dashboard_reason_label(primary_blocker) if primary_blocker else "暂无主要阻断"
@@ -13969,22 +14672,11 @@ def _dashboard_adaptive_learning_plan(
             "policy_effect": "继续采样，不投注",
         }
     ]
-    release_gate = recommendation_opportunity.get("release_gate") if isinstance(recommendation_opportunity.get("release_gate"), dict) else {}
-    release_gates = [
-        gate for gate in (release_gate.get("gates") or [])
-        if isinstance(gate, dict)
-    ]
+    release_gate = as_dict(recommendation_opportunity.get("release_gate"))
+    release_gates = [gate for gate in as_list(release_gate.get("gates")) if isinstance(gate, dict)]
     shadow_gate = next((gate for gate in release_gates if str(gate.get("key") or "") == "shadow_walk_forward"), {})
-    shadow_recalibration = (
-        learning_effectiveness.get("shadow_recalibration")
-        if isinstance(learning_effectiveness.get("shadow_recalibration"), dict)
-        else {}
-    )
-    shadow_quality = (
-        shadow_recalibration.get("quality")
-        if isinstance(shadow_recalibration.get("quality"), dict)
-        else {}
-    )
+    shadow_recalibration = as_dict(learning_effectiveness.get("shadow_recalibration"))
+    shadow_quality = as_dict(shadow_recalibration.get("quality"))
     shadow_delta = parse_float(shadow_gate.get("current"))
     if shadow_delta is None:
         shadow_delta = parse_float(shadow_quality.get("walk_forward_brier_delta"))
@@ -14010,7 +14702,8 @@ def _dashboard_adaptive_learning_plan(
             }
         )
 
-    learned_minus_market = parse_float((learning_effectiveness.get("deltas") or {}).get("learned_brier_minus_market"))
+    deltas = as_dict(learning_effectiveness.get("deltas"))
+    learned_minus_market = parse_float(deltas.get("learned_brier_minus_market"))
     if not bool(learning_effectiveness.get("beats_market")):
         actions.append(
             {
@@ -14028,10 +14721,10 @@ def _dashboard_adaptive_learning_plan(
             }
         )
 
-    for segment in (prediction_quality.get("segments") or [])[:8]:
+    for segment in as_list(prediction_quality.get("segments"))[:8]:
         if not isinstance(segment, dict):
             continue
-        adjustment = segment.get("adjustment") if isinstance(segment.get("adjustment"), dict) else {}
+        adjustment = as_dict(segment.get("adjustment"))
         action = str(adjustment.get("action") or "")
         reason = str(segment.get("reason") or "observed_not_recommended")
         label = str(segment.get("label") or _dashboard_reason_label(reason))
@@ -14127,8 +14820,8 @@ def _dashboard_adaptive_learning_plan(
     }
 
 
-def _dashboard_ratio(current: int | float, target: int | float) -> float | None:
-    if target <= 0:
+def _dashboard_ratio(current: int | float | None, target: int | float | None) -> float | None:
+    if current is None or target is None or target <= 0:
         return None
     return round_metric(max(0.0, min(1.0, float(current) / float(target))), 6)
 
@@ -14194,7 +14887,7 @@ def _dashboard_decision_audit(
     elif observation_count > 0:
         recommendation_status = "warning"
         recommendation_title = "当前无正式推荐"
-        main_reason = top_rejection_reasons[0]["reason"] if top_rejection_reasons else "observed_not_recommended"
+        main_reason = str(top_rejection_reasons[0].get("reason") or "observed_not_recommended") if top_rejection_reasons else "observed_not_recommended"
         recommendation_detail = f"{observation_count} 场进入纸面预测，主要原因：{_dashboard_reason_label(main_reason)}。"
     else:
         recommendation_status = "info"
@@ -14531,11 +15224,11 @@ def _dashboard_record_core_metrics(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _dashboard_live_calibration(raw: dict[str, Any], strategy_state: dict[str, Any]) -> dict[str, Any]:
-    learning_policy = raw.get("learning_policy") if isinstance(raw.get("learning_policy"), dict) else {}
-    live_calibration = learning_policy.get("live_calibration") if isinstance(learning_policy.get("live_calibration"), dict) else None
-    if live_calibration is None and isinstance(raw.get("live_calibration"), dict):
-        live_calibration = raw.get("live_calibration")
-    if live_calibration is not None:
+    learning_policy = as_dict(raw.get("learning_policy"))
+    live_calibration = as_dict(learning_policy.get("live_calibration"))
+    if not live_calibration:
+        live_calibration = as_dict(raw.get("live_calibration"))
+    if live_calibration:
         return dict(live_calibration)
     return {
         "active": bool(strategy_state.get("active")),
@@ -14692,10 +15385,11 @@ def _dashboard_record_evidence(
     odds_coverage: dict[str, Any] | None = None,
     probability_governance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
-    market_candidates = raw.get("market_candidates") or raw.get("candidates") or []
-    if not market_candidates and isinstance(raw.get("best_candidate"), dict) and raw.get("best_candidate"):
-        market_candidates = [raw["best_candidate"]]
+    raw = as_dict(record.get("raw"))
+    market_candidates = as_list(raw.get("market_candidates") or raw.get("candidates"))
+    best_candidate = as_dict(raw.get("best_candidate"))
+    if not market_candidates and best_candidate:
+        market_candidates = [best_candidate]
     data_completeness = raw.get("data_completeness") or raw.get("data_coverage") or raw.get("quality") or {}
     evidence_prediction_type = prediction_type or _dashboard_prediction_type(record, source="recommendation")
     evidence_rejection_reason = str(
@@ -14933,7 +15627,7 @@ def _dashboard_context_source_attempts(
                 continue
             provider = str(item.get("provider") or "").strip()
             label = str(item.get("label") or _dashboard_context_provider_label(provider)).strip()
-            statuses = item.get("field_statuses") if isinstance(item.get("field_statuses"), dict) else {}
+            statuses = as_dict(item.get("field_statuses"))
             attempts.append(
                 {
                     "provider": provider,
@@ -15012,7 +15706,7 @@ def _dashboard_player_summary(player: dict[str, Any]) -> dict[str, Any]:
 
 
 def _dashboard_lineup_source(lineup: dict[str, Any]) -> dict[str, Any]:
-    status = lineup.get("lineup_status") if isinstance(lineup.get("lineup_status"), dict) else {}
+    status = as_dict(lineup.get("lineup_status"))
     basis = str(status.get("lineup_basis") or "")
     if basis == "official_lineups" and isinstance(lineup.get("official_lineups"), dict):
         return lineup.get("official_lineups") or {}
@@ -15026,9 +15720,9 @@ def _dashboard_lineup_source(lineup: dict[str, Any]) -> dict[str, Any]:
 
 
 def _dashboard_lineup_side(lineup: dict[str, Any], side: str) -> dict[str, Any]:
-    analysis = lineup.get("lineup_analysis") if isinstance(lineup.get("lineup_analysis"), dict) else {}
-    analysis_side = analysis.get(side) if isinstance(analysis.get(side), dict) else {}
-    source_side = _dashboard_lineup_source(lineup).get(side) or {}
+    analysis = as_dict(lineup.get("lineup_analysis"))
+    analysis_side = as_dict(analysis.get(side))
+    source_side = as_dict(_dashboard_lineup_source(lineup).get(side))
     starters = [
         _dashboard_player_summary(player)
         for player in source_side.get("lineups") or []
@@ -15050,8 +15744,8 @@ def _dashboard_lineup_summary(lineup: Any) -> dict[str, Any]:
             "away": {"formation": "", "starter_count": 0, "starters": []},
             "warnings": ["lineup_unavailable"],
         }
-    analysis = lineup.get("lineup_analysis") if isinstance(lineup.get("lineup_analysis"), dict) else {}
-    status = lineup.get("lineup_status") if isinstance(lineup.get("lineup_status"), dict) else {}
+    analysis = as_dict(lineup.get("lineup_analysis"))
+    status = as_dict(lineup.get("lineup_status"))
     home = _dashboard_lineup_side(lineup, "home")
     away = _dashboard_lineup_side(lineup, "away")
     available = bool(
@@ -15071,8 +15765,8 @@ def _dashboard_lineup_summary(lineup: Any) -> dict[str, Any]:
 
 
 def _dashboard_match_context(record: dict[str, Any], *, odds_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
-    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
-    raw_match_context = raw.get("match_context") if isinstance(raw.get("match_context"), dict) else None
+    raw = as_dict(record.get("raw"))
+    raw_match_context = as_dict(raw.get("match_context")) or None
     venue_paths = (
         ("match_context", "venue"),
         ("match_context", "lineup", "base", "field"),
@@ -15159,10 +15853,12 @@ _DASHBOARD_CONTEXT_COVERAGE_LABELS = {
 
 def _dashboard_context_coverage_status(context: dict[str, Any], key: str) -> str:
     if key == "lineup":
-        if (context.get("lineup") or {}).get("available"):
+        lineup = as_dict(context.get("lineup"))
+        source = as_dict(context.get("source"))
+        if lineup.get("available"):
             return "available"
-        return "not_collected" if (context.get("source") or {}).get("status") == "not_collected" else "source_empty"
-    field = context.get(key) if isinstance(context.get(key), dict) else {}
+        return "not_collected" if source.get("status") == "not_collected" else "source_empty"
+    field = as_dict(context.get(key))
     status = str(field.get("status") or "").strip()
     return status if status in {"available", "source_empty", "not_collected"} else "not_collected"
 
@@ -15233,8 +15929,8 @@ def _dashboard_context_coverage(
             market_db_path=market_db_path,
         )
         context = _dashboard_match_context(record, odds_snapshot=_dashboard_coverage_odds_snapshot(odds_coverage))
-        source = context.get("source") if isinstance(context.get("source"), dict) else {}
-        attempts = context.get("source_attempts") if isinstance(context.get("source_attempts"), list) else []
+        source = as_dict(context.get("source"))
+        attempts = as_list(context.get("source_attempts"))
         counted_sources: set[tuple[str, str, str]] = set()
         for attempt in attempts:
             if not isinstance(attempt, dict):
@@ -15296,18 +15992,18 @@ def _dashboard_context_coverage(
         )
 
     matched_source = next((item for item in source_counts if item["status"] == "matched"), source_counts[0])
-    matched_count = int(matched_source.get("count") or 0) if matched_source.get("status") == "matched" else 0
+    matched_count = int(parse_float(matched_source.get("count")) or 0) if matched_source.get("status") == "matched" else 0
     summary_priority = {"weather": 0, "venue": 1, "referee": 2, "lineup": 3}
     best_field = max(
         fields,
         key=lambda item: (
-            int(item["available_count"]),
+            int(parse_float(item.get("available_count")) or 0),
             -summary_priority.get(str(item.get("key") or ""), 99),
         ),
     )
     summary_parts = [f"{matched_source.get('label') or '源站'}已匹配 {matched_count}/{total} 场"]
     leisu_odds_count = sum(
-        int(item.get("count") or 0)
+        int(parse_float(item.get("count")) or 0)
         for item in source_counts
         if str(item.get("provider") or "").strip().lower() == "leisu"
         and str(item.get("status") or "") == "odds_matched_context_not_collected"
@@ -15346,19 +16042,12 @@ def _dashboard_match_odds_snapshot(
     )
     bookmakers = sorted({str(row.get("bookmaker") or "") for row in rows if row.get("bookmaker")})
     market_types = sorted({str(row.get("market_type") or "") for row in rows if row.get("market_type")})
-    resolution_row = next(
-        (
-            row
-            for row in rows
-            if isinstance(row.get("raw"), dict)
-            and any(
-                (row.get("raw") or {}).get(key)
-                for key in ("leisu_home_team", "leisu_away_team", "match_resolution_reason")
-            )
-        ),
-        rows[0] if rows else None,
-    )
-    resolution_raw = (resolution_row or {}).get("raw") if isinstance((resolution_row or {}).get("raw"), dict) else {}
+    def has_resolution_identity(row: dict[str, Any]) -> bool:
+        raw = as_dict(row.get("raw"))
+        return any(raw.get(key) for key in ("leisu_home_team", "leisu_away_team", "match_resolution_reason"))
+
+    resolution_row = next((row for row in rows if has_resolution_identity(row)), rows[0] if rows else None)
+    resolution_raw = as_dict((resolution_row or {}).get("raw"))
     record_home = str(record.get("home_team") or "")
     record_away = str(record.get("away_team") or "")
     record_league = str(record.get("league") or "")
@@ -15531,8 +16220,9 @@ def dashboard_match_detail(
                 "at_utc": odds_snapshot.get("latest_fetched_at_utc") or "",
             }
         )
-    clv_record = (clv_tracking.get("records") or [{}])[0] if isinstance(clv_tracking, dict) else {}
-    clv = clv_record.get("clv") if isinstance(clv_record, dict) and isinstance(clv_record.get("clv"), dict) else {}
+    clv_records = as_list(clv_tracking.get("records")) if isinstance(clv_tracking, dict) else []
+    clv_record = clv_records[0] if clv_records and isinstance(clv_records[0], dict) else {}
+    clv = as_dict(clv_record.get("clv"))
     if clv.get("status") == "available":
         timeline.append(
             {
@@ -15647,17 +16337,223 @@ def _dashboard_learning_events(
     return sorted(events, key=lambda item: str(item.get("at_utc") or ""), reverse=True)[:12]
 
 
+def _dashboard_capability(
+    *,
+    key: str,
+    title: str,
+    status: str,
+    available: bool,
+    detail: str,
+    current: int | float | None = None,
+    target: int | float | None = None,
+    next_action: str = "",
+) -> dict[str, Any]:
+    """Build one user-facing capability row for the dashboard.
+
+    这里的能力不是宣传文案，而是系统基于当前数据能实际做到什么：
+    - ok：能力已经可用；
+    - warning：能力在运行，但样本或证据还不够；
+    - blocked/missing：能力暂时不能使用，需要补数据或修链路。
+    """
+    return {
+        "key": key,
+        "title": title,
+        "status": status,
+        "available": available,
+        "current": round_metric(current, 4) if current is not None else None,
+        "target": round_metric(target, 4) if target is not None else None,
+        "ratio": _dashboard_ratio(current, target) if current is not None and target not in (None, 0) else None,
+        "detail": detail,
+        "next_action": next_action,
+    }
+
+
+def _dashboard_program_capabilities(
+    *,
+    prediction_kpis: dict[str, Any],
+    strategy_state: dict[str, Any],
+    market_snapshot_summary: dict[str, Any],
+    context_coverage: dict[str, Any],
+    clv_tracking: dict[str, Any],
+    dashboard_contract: dict[str, Any],
+    production_readiness: dict[str, Any],
+    auto_learning_state: dict[str, Any],
+    task_queue_health: dict[str, Any],
+) -> dict[str, Any]:
+    """Summarize concrete system capabilities from the current dashboard snapshot."""
+    total_predictions = int(prediction_kpis.get("total_count") or 0)
+    settled_count = int(prediction_kpis.get("settled_count") or 0)
+    strategy_sample_count = int(strategy_state.get("sample_count") or 0)
+    snapshot_count = int(market_snapshot_summary.get("total_snapshot_count") or 0)
+    context_fields = [
+        field for field in (context_coverage.get("fields") or [])
+        if isinstance(field, dict)
+    ]
+    context_available = max(
+        (int(field.get("available_count") or 0) for field in context_fields),
+        default=0,
+    )
+    context_possible = int(context_coverage.get("total_count") or 0)
+    clv_available = int(clv_tracking.get("available_count") or 0)
+    contract_status = str(dashboard_contract.get("status") or "")
+    production_ready = bool(production_readiness.get("production_ready"))
+    auto_enabled = bool(auto_learning_state.get("enabled"))
+    auto_error = str(auto_learning_state.get("last_error") or "").strip()
+    queue_status = str(task_queue_health.get("status") or "")
+    queue_backend = str(task_queue_health.get("backend") or "thread")
+    queued_jobs = task_queue_health.get("queued_jobs")
+    worker_healthy = task_queue_health.get("worker_healthy")
+    capabilities = [
+        _dashboard_capability(
+            key="continuous_prediction",
+            title="持续预测与观察入库",
+            status="ok" if total_predictions > 0 else "missing",
+            available=total_predictions > 0,
+            current=total_predictions,
+            target=20,
+            detail=f"当前已有 {total_predictions} 条预测/观察样本进入台账。",
+            next_action="继续保持自动学习循环，让每个候选都留下可回测记录。",
+        ),
+        _dashboard_capability(
+            key="settlement_backtest",
+            title="赛果结算与回测",
+            status="ok" if settled_count >= 20 else "warning" if settled_count > 0 else "missing",
+            available=settled_count > 0,
+            current=settled_count,
+            target=20,
+            detail=f"当前已结算 {settled_count} 条，用于命中率、ROI 和分桶校准。",
+            next_action="等待更多比赛完赛并自动结算，优先补足 20 条以上稳定样本。",
+        ),
+        _dashboard_capability(
+            key="live_calibration",
+            title="实时学习校准",
+            status="ok" if strategy_state.get("active") else "warning" if strategy_sample_count > 0 else "missing",
+            available=strategy_sample_count > 0,
+            current=strategy_sample_count,
+            target=int(strategy_state.get("min_live_sample_count") or 20),
+            detail=f"当前策略样本 {strategy_sample_count} 条，状态为 {strategy_state.get('status') or 'unknown'}。",
+            next_action="扩大样本后再放宽正式推荐门槛，避免少量样本误导。",
+        ),
+        _dashboard_capability(
+            key="odds_snapshot_memory",
+            title="赔率快照记忆",
+            status="ok" if snapshot_count > 0 else "missing",
+            available=snapshot_count > 0,
+            current=snapshot_count,
+            target=100,
+            detail=f"当前持久化 {snapshot_count} 条赔率快照，可用于盘口横截面和走势追踪。",
+            next_action="持续采同公司同盘口多时间点，形成真正的赔率走势序列。",
+        ),
+        _dashboard_capability(
+            key="context_coverage",
+            title="比赛上下文覆盖",
+            status=(
+                "ok"
+                if context_possible and context_available >= context_possible
+                else "warning"
+                if context_available > 0
+                else "missing"
+            ),
+            available=context_available > 0,
+            current=context_available,
+            target=context_possible or None,
+            detail=f"当前 {context_available}/{context_possible} 条样本有可展示的上下文证据。",
+            next_action="优先补阵容、场地、天气、裁判等不会直接来自赔率的解释性证据。",
+        ),
+        _dashboard_capability(
+            key="clv_tracking",
+            title="CLV 收盘线追踪",
+            status="ok" if clv_available >= 30 else "warning" if clv_available > 0 else "missing",
+            available=clv_available > 0,
+            current=clv_available,
+            target=30,
+            detail=f"当前 {clv_available} 条预测可计算预测后收盘线价值。",
+            next_action="每次预测后继续采后续赔率，避免把同一时间点误当作 CLV。",
+        ),
+        _dashboard_capability(
+            key="dashboard_contract",
+            title="前后端契约健康",
+            status="ok" if contract_status == "ok" else "warning" if contract_status else "missing",
+            available=bool(contract_status),
+            current=int((dashboard_contract.get("summary") or {}).get("passed_count") or 0),
+            target=int((dashboard_contract.get("summary") or {}).get("required_count") or 0) or None,
+            detail=str(dashboard_contract.get("detail") or "仪表盘契约已返回结构化健康检查。"),
+            next_action="新增字段时先补契约测试，再接 UI。",
+        ),
+        _dashboard_capability(
+            key="production_release_gate",
+            title="正式推荐发布门禁",
+            status="ok" if production_ready else "blocked",
+            available=production_ready,
+            current=int(prediction_kpis.get("recommended_count") or 0),
+            target=1,
+            detail=str(production_readiness.get("detail") or production_readiness.get("headline") or "正式推荐仍受质量门禁控制。"),
+            next_action="只有命中率、ROI、CLV 和契约健康同时过关后才发布正式推荐。",
+        ),
+        _dashboard_capability(
+            key="auto_learning_daemon",
+            title="后台自动学习守护",
+            status="error" if auto_error else "ok" if auto_enabled else "blocked",
+            available=auto_enabled and not auto_error,
+            current=int(auto_learning_state.get("run_count") or 0),
+            target=None,
+            detail=auto_error or ("自动学习已启用。" if auto_enabled else "自动学习未启用。"),
+            next_action="保持后台循环在线，候选、分析、结算和快照采集才会持续推进。",
+        ),
+        _dashboard_capability(
+            key="task_queue",
+            title="异步任务队列",
+            status="ok" if queue_status == "ok" else "warning" if queue_status == "degraded" else "error",
+            available=queue_status in {"ok", "degraded"},
+            current=int(queued_jobs) if isinstance(queued_jobs, int) else None,
+            target=None,
+            detail=(
+                f"当前后端 {queue_backend.upper()}；"
+                f"队列积压 {queued_jobs if queued_jobs is not None else '未知'} 个任务；"
+                f"worker {'健康' if worker_healthy else '未确认'}。"
+            ),
+            next_action=str(task_queue_health.get("detail") or "保持 Redis 和 worker 在线，长任务才能可靠入队、续跑和重试。"),
+        ),
+    ]
+    ready_count = sum(1 for item in capabilities if item["status"] == "ok")
+    warning_count = sum(1 for item in capabilities if item["status"] == "warning")
+    blocked_count = sum(1 for item in capabilities if item["status"] in {"blocked", "missing", "error"})
+    if blocked_count:
+        status = "limited"
+    elif warning_count:
+        status = "learning"
+    else:
+        status = "ready"
+    return {
+        "status": status,
+        "operating_mode": "production_ready" if production_ready else "paper_learning",
+        "summary": {
+            "total_count": len(capabilities),
+            "ready_count": ready_count,
+            "warning_count": warning_count,
+            "blocked_count": blocked_count,
+        },
+        "capabilities": capabilities,
+    }
+
+
 def dashboard_snapshot(
     *,
     db_path: str | None = None,
     market_db_path: str | None = None,
     limit: int = 500,
+    allow_background_enrichment_refresh: bool | None = None,
 ) -> dict[str, Any]:
     """Build a read-only dashboard snapshot from persisted paper-learning state."""
     bounded_limit = max(10, min(int(limit or 500), 500))
-    # Warm enrichment indexes in the background; safe to fail
-    _ensure_fdo_index_warm()
-    _ensure_dongqiudi_logo_cache_warm()
+    # Dashboard reads must stay cheap and predictable. External enrichment
+    # refreshes are opt-in and should normally run in daemon/job flows.
+    background_enrichment_refresh = _dashboard_background_enrichment_enabled(
+        allow_background_enrichment_refresh
+    )
+    if background_enrichment_refresh:
+        _ensure_fdo_index_warm()
+        _ensure_dongqiudi_logo_cache_warm()
     calibration = learning_store.calibration_status(db_path=db_path, limit=20)
     strategy_states = calibration.get("strategy_states") or []
     strategy_state = next(
@@ -15768,12 +16664,21 @@ def dashboard_snapshot(
     )
     backtest_curve = _dashboard_backtest_curve(full_prediction_ledger)
     prediction_quality = _dashboard_prediction_quality(full_prediction_ledger)
+    market_breakdown = _dashboard_market_breakdown(full_prediction_ledger)
+    model_failure_diagnostics = _dashboard_model_failure_diagnostics(
+        prediction_ledger=full_prediction_ledger,
+        prediction_kpis=prediction_kpis,
+        learning_effectiveness=learning_effectiveness,
+        prediction_quality=prediction_quality,
+        market_breakdown=market_breakdown,
+    )
     recommendation_opportunity = _dashboard_recommendation_opportunity(
         full_prediction_ledger,
         strategy_state=strategy_state,
         candidate_filters=candidate_filters,
         learning_effectiveness=learning_effectiveness,
         prediction_quality=prediction_quality,
+        model_failure_diagnostics=model_failure_diagnostics,
     )
     adaptive_learning_plan = _dashboard_adaptive_learning_plan(
         learning_effectiveness=learning_effectiveness,
@@ -15829,12 +16734,29 @@ def dashboard_snapshot(
         strategy_state=strategy_state,
         clv_tracking=clv_tracking,
     )
-    market_breakdown = _dashboard_market_breakdown(full_prediction_ledger)
+    try:
+        from football_data_mcp.services.task_queue import task_queue_health_snapshot
+        task_queue_health = task_queue_health_snapshot()
+    except Exception as exc:
+        task_queue_health = {"backend": "unknown", "status": "error", "detail": str(exc)}
+    program_capabilities = _dashboard_program_capabilities(
+        prediction_kpis=prediction_kpis,
+        strategy_state=strategy_state,
+        market_snapshot_summary=market_snapshot_summary,
+        context_coverage=context_coverage,
+        clv_tracking=clv_tracking,
+        dashboard_contract=dashboard_contract,
+        production_readiness=production_readiness,
+        auto_learning_state=AUTO_LEARNING_STATE,
+        task_queue_health=task_queue_health,
+    )
     try:
         from football_data_mcp import validation_store
         latest_validation = validation_store.get_latest_validation(db_path=db_path)
+        latest_validation_job = validation_store.get_latest_validation_job(db_path=db_path)
     except Exception:
         latest_validation = None
+        latest_validation_job = None
     try:
         from football_data_mcp import league_strategy
         league_breakdown = league_strategy.compute_league_breakdown(db_path=db_path)
@@ -15873,13 +16795,18 @@ def dashboard_snapshot(
         "production_readiness": production_readiness,
         "prediction_accountability": prediction_accountability,
         "profitability_forecast": profitability_forecast,
+        "program_capabilities": program_capabilities,
+        "task_queue": task_queue_health,
         "market_breakdown": market_breakdown,
+        "model_failure_diagnostics": model_failure_diagnostics,
         "latest_validation": latest_validation,
+        "validation_job": latest_validation_job,
         "league_breakdown": league_breakdown,
         "buckets": calibration.get("buckets") or [],
         "policy": {
             "read_only": True,
             "no_search_inputs": True,
+            "background_enrichment_refresh": background_enrichment_refresh,
             "data_rule": "Dashboard reads persisted MCP paper-learning state; it does not place bets or trigger user-query analysis.",
         },
     }
@@ -16068,6 +16995,7 @@ async def auto_learning_daemon(
                     or {}
                 ),
                 "parlay_record_count": (result.get("jingcai_parlay") or {}).get("record_count"),
+                "analysis_market_snapshot_sync": result.get("analysis_market_snapshot_sync"),
                 "market_snapshot_sync": result.get("market_snapshot_sync"),
                 "snapshot_reanalysis": result.get("snapshot_reanalysis"),
                 "settled_count": ((result.get("settlement") or {}).get("settlement") or {}).get("settled_count"),
@@ -16250,11 +17178,7 @@ async def shortlist_value_matches(
             parse_float(learning_policy.get("min_value_edge")) or min_value_edge,
         )
     bounded_window_minutes = max(1, min(int(window_minutes or 60), 24 * 60))
-    window_hours: float | int
-    if bounded_window_minutes % 60 == 0:
-        window_hours = bounded_window_minutes // 60
-    else:
-        window_hours = bounded_window_minutes / 60
+    window_hours = max(1, math.ceil(bounded_window_minutes / 60))
 
     match_list = await list_matches(
         query=query or "",
@@ -16303,9 +17227,12 @@ async def shortlist_value_matches(
     bounded_limit = max(1, int(limit or 30))
     bounded_analysis_limit = max(1, min(bounded_limit, int(analysis_candidate_limit or 30), 100))
     bounded_concurrency = max(1, min(int(analysis_concurrency or 6), 16))
+    configured_timeout = parse_float(analysis_timeout_seconds) or parse_float(
+        os.getenv("FOOTBALL_DATA_SHORTLIST_ANALYSIS_TIMEOUT_SECONDS")
+    ) or 45.0
     bounded_analysis_timeout = max(
         5.0,
-        min(float(analysis_timeout_seconds or os.getenv("FOOTBALL_DATA_SHORTLIST_ANALYSIS_TIMEOUT_SECONDS", "45")), 300.0),
+        min(configured_timeout, 300.0),
     )
     analysis_matches = matches[:bounded_analysis_limit]
 
@@ -16346,6 +17273,7 @@ async def shortlist_value_matches(
                 },
             }
 
+        snapshot_fetched_at = now_utc().isoformat()
         targeted_analysis = _shortlist_analysis_for_target_market(analysis, target_market)
         targeted_analysis = _apply_learning_policy_to_analysis(
             targeted_analysis,
@@ -16353,6 +17281,15 @@ async def shortlist_value_matches(
             learning_policy=learning_policy,
             db_path=db_path,
         )
+        market_snapshots = _analysis_market_snapshots_for_shortlist(
+            targeted_analysis,
+            fetched_at_utc=snapshot_fetched_at,
+        )
+        snapshot_summary = {
+            "provider": "analysis_odds",
+            "generated_snapshot_count": len(market_snapshots),
+            "fetched_at_utc": snapshot_fetched_at,
+        }
         reason = _shortlist_rejection_reason(
             targeted_analysis,
             min_edge=min_edge,
@@ -16379,9 +17316,17 @@ async def shortlist_value_matches(
                     "quality": targeted_analysis.get("quality") or {},
                     "data_completeness": _shortlist_coverage_score(targeted_analysis),
                     "learning_policy": targeted_analysis.get("learning_policy") or learning_policy,
+                    "odds_snapshot_summary": snapshot_summary,
                 },
+                "market_snapshots": market_snapshots,
             }
-        return {"kind": "pick", "payload": _shortlist_pick_from_analysis(targeted_analysis, mode=mode)}
+        pick_payload = _shortlist_pick_from_analysis(targeted_analysis, mode=mode)
+        pick_payload["odds_snapshot_summary"] = snapshot_summary
+        return {
+            "kind": "pick",
+            "payload": pick_payload,
+            "market_snapshots": market_snapshots,
+        }
 
     semaphore = asyncio.Semaphore(bounded_concurrency)
 
@@ -16389,12 +17334,18 @@ async def shortlist_value_matches(
         async with semaphore:
             return await analyze_for_shortlist(match)
 
+    analysis_market_snapshots: list[snapshot_store.MarketSnapshot] = []
     if analysis_matches:
         for result in await asyncio.gather(*(run_limited(match) for match in analysis_matches)):
+            analysis_market_snapshots.extend(result.get("market_snapshots") or [])
             if result.get("kind") == "pick":
                 picks.append(result.get("payload") or {})
             else:
                 rejected.append(result.get("payload") or {})
+    analysis_market_snapshot_sync = _shortlist_snapshot_sync_result(
+        analysis_market_snapshots,
+        db_path=snapshot_store.snapshot_db_path(),
+    )
 
     if mode == "confidence":
         picks.sort(
@@ -16458,6 +17409,7 @@ async def shortlist_value_matches(
         "rejected_count": len(rejected),
         "funnel_report": funnel_report,
         "picks": returned,
+        "analysis_market_snapshot_sync": analysis_market_snapshot_sync,
     }
     log_result = _append_recommendation_log(record, recommendation_log_path)
 
@@ -16490,6 +17442,7 @@ async def shortlist_value_matches(
         "funnel_report": funnel_report,
         "picks": returned,
         "rejected": rejected,
+        "analysis_market_snapshot_sync": analysis_market_snapshot_sync,
         "analysis_input_policy": (
             "The shortlist scans all schedule-anchored fixtures in the time window, then analyze_single_match tries to "
             "resolve usable odds from fixture odds, detail pages, and supplemental sources. Matches without calculable "
@@ -16665,8 +17618,8 @@ async def analyze_single_match(
             str(best.get("away_team") or ""),
             best.get("kickoff_utc"),
         )
-    quality_flags = []
-    quality_warnings = []
+    quality_flags: list[str] = []
+    quality_warnings: list[str] = []
     if not best["time_window"]["in_window"]:
         quality_flags.append(best["time_window"]["reason"])
     if not odds.get("has_valid_numeric_odds"):
@@ -16835,16 +17788,16 @@ async def source_health() -> dict[str, Any]:
 
     try:
         as_of = datetime.now(DEFAULT_USER_TIMEZONE)
-        matches, source = await load_dongqiudi_window(as_of, 24)
+        matches, dongqiudi_source = await load_dongqiudi_window(as_of, 24)
         checks.append(
             {
                 "source": "dongqiudi schedule_list",
                 "required": True,
                 "ok": True,
-                "url": source.get("url") if source else DONGQIUDI_SCHEDULE_URL,
+                "url": dongqiudi_source.get("url") if dongqiudi_source else DONGQIUDI_SCHEDULE_URL,
                 "row_count": len(matches),
                 "rows_with_numeric_odds": sum(1 for row in matches if odds_from_dongqiudi_match(row)["has_valid_numeric_odds"]),
-                "fetched_at_utc": source.get("fetched_at_utc") if source else None,
+                "fetched_at_utc": dongqiudi_source.get("fetched_at_utc") if dongqiudi_source else None,
             }
         )
     except Exception as exc:

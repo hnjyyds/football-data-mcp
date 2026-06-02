@@ -3,15 +3,16 @@ import { Icon } from "../shared/Icon";
 import type { PredictionLedgerRow } from "../../types";
 import { TeamLogo } from "../shared/TeamLogo";
 import { Badge } from "../shared/Badge";
-import { formatOdds, formatPercent } from "../../dashboardModel";
+import { formatOdds, formatPercent, reasonLabel } from "../../dashboardModel";
 import { formatBeijingShort } from "../../formatTime";
 
-type Filter = "all" | "recommendation" | "observation" | "settled" | "open" | "hit" | "miss";
+type Filter = "all" | "recommendation" | "observation" | "reanalysis" | "settled" | "open" | "hit" | "miss";
 
 const FILTERS: Array<{ key: Filter; label: string }> = [
   { key: "all", label: "全部" },
   { key: "recommendation", label: "推荐" },
   { key: "observation", label: "观察" },
+  { key: "reanalysis", label: "待复算" },
   { key: "settled", label: "已结算" },
   { key: "open", label: "未结算" },
   { key: "hit", label: "命中" },
@@ -24,6 +25,10 @@ function applyFilter(rows: PredictionLedgerRow[], filter: Filter): PredictionLed
   switch (filter) {
     case "recommendation": return rows.filter((r) => r.prediction_type === "recommendation" || r.prediction_type?.includes("recommendation"));
     case "observation": return rows.filter((r) => r.prediction_type === "observation" || r.prediction_type?.includes("observation"));
+    case "reanalysis": return rows.filter((r) => {
+      const primaryReason = r.prediction_diagnostic?.primary_reason;
+      return r.rejection_reason === "awaiting_reanalysis_after_snapshot" || primaryReason === "awaiting_reanalysis_after_snapshot";
+    });
     case "settled": return rows.filter((r) => r.settlement_status === "settled");
     case "open": return rows.filter((r) => r.settlement_status === "open");
     case "hit": return rows.filter((r) => r.hit === 1);
@@ -31,6 +36,30 @@ function applyFilter(rows: PredictionLedgerRow[], filter: Filter): PredictionLed
     default: return rows;
   }
 }
+
+function rowReason(row: PredictionLedgerRow): string {
+  return row.prediction_diagnostic?.primary_reason || row.rejection_reason || row.recommendation || "";
+}
+
+function applyReasonFilter(rows: PredictionLedgerRow[], reasonFilter: LedgerReasonFilter | null | undefined): PredictionLedgerRow[] {
+  if (!reasonFilter?.reason && !reasonFilter?.label) return rows;
+  return rows.filter((row) => {
+    const reason = rowReason(row);
+    return (!!reasonFilter.reason && reason === reasonFilter.reason) || reasonLabel(reason) === reasonFilter.label;
+  });
+}
+
+function filterCounts(rows: PredictionLedgerRow[]): Record<Filter, number> {
+  return FILTERS.reduce((acc, item) => {
+    acc[item.key] = applyFilter(rows, item.key).length;
+    return acc;
+  }, {} as Record<Filter, number>);
+}
+
+export type LedgerReasonFilter = {
+  reason?: string;
+  label: string;
+};
 
 function statusLabel(row: PredictionLedgerRow): string {
   if (row.settlement_status === "settled") return row.hit === 1 ? "命中" : "未中";
@@ -58,17 +87,23 @@ export function LedgerTable({
   rows,
   selectedId,
   onSelect,
+  reasonFilter = null,
+  onReasonFilterClear,
 }: {
   rows: PredictionLedgerRow[];
   selectedId?: string | null;
   onSelect?: (id: string) => void;
+  reasonFilter?: LedgerReasonFilter | null;
+  onReasonFilterClear?: () => void;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [collapsed, setCollapsed] = useState(false);
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 20;
 
-  const filtered = applyFilter(rows, filter);
+  const reasonFilteredRows = applyReasonFilter(rows, reasonFilter);
+  const counts = filterCounts(reasonFilteredRows);
+  const filtered = applyFilter(reasonFilteredRows, filter);
   const total = filtered.length;
   const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const totalPages = Math.ceil(total / PAGE_SIZE);
@@ -92,21 +127,36 @@ export function LedgerTable({
       {!collapsed && (
         <>
           {/* Filter bar */}
-          <div className="flex gap-1 px-4 py-2 border-b border-slate-100 dark:border-slate-700/50 overflow-x-auto">
-            {FILTERS.map((f) => (
-              <button
-                key={f.key}
-                type="button"
-                onClick={() => { setFilter(f.key); setPage(0); }}
-                className={`flex-shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                  filter === f.key
-                    ? "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300"
-                    : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
+          <div className="border-b border-slate-100 dark:border-slate-700/50">
+            {reasonFilter?.reason && (
+              <div className="flex flex-wrap items-center gap-2 px-4 pt-2 text-xs">
+                <span className="text-slate-500 dark:text-slate-400">阻断原因筛选</span>
+                <Badge variant="warning">{reasonFilter.label}</Badge>
+                <button
+                  type="button"
+                  onClick={() => { onReasonFilterClear?.(); setPage(0); }}
+                  className="rounded-full px-2 py-0.5 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
+                >
+                  清除阻断筛选
+                </button>
+              </div>
+            )}
+            <div className="flex gap-1 px-4 py-2 overflow-x-auto">
+              {FILTERS.map((f) => (
+                <button
+                  key={f.key}
+                  type="button"
+                  onClick={() => { setFilter(f.key); setPage(0); }}
+                  className={`flex-shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                    filter === f.key
+                      ? "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300"
+                      : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+                  }`}
+                >
+                  {f.label} <span className="tabular-nums">{counts[f.key]}</span>
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* Table */}

@@ -838,6 +838,18 @@ export interface DashboardRecommendationOpportunity {
   settled_signal_count: number;
   no_value_count: number;
   threshold_ready_count: number;
+  model_policy_blocked_count?: number;
+  model_policy_blockers?: Array<{
+    rule_key: string;
+    title: string;
+    detail: string;
+    action: string;
+    target: string;
+    target_key: string;
+    count: number;
+    sample_count: number;
+    roi: number | null;
+  }>;
   reanalysis_backlog_count: number;
   missing_snapshot_count: number;
   gate_thresholds: {
@@ -860,6 +872,18 @@ export interface DashboardRecommendationOpportunity {
     signal_hit_rate?: number | null;
     signal_roi?: number | null;
     min_signal_sample_count?: number;
+    model_policy_blocked_count?: number;
+    model_policy_blockers?: Array<{
+      rule_key: string;
+      title: string;
+      detail: string;
+      action: string;
+      target: string;
+      target_key: string;
+      count: number;
+      sample_count: number;
+      roi: number | null;
+    }>;
     learning_improved: boolean;
     beats_market: boolean;
     prediction_policy: string;
@@ -1138,6 +1162,7 @@ export interface AutoLearningLastResultSummary {
   asian_rejected_count?: number | null;
   asian_rejection_reasons?: Record<string, number>;
   parlay_record_count?: number | null;
+  analysis_market_snapshot_sync?: Record<string, unknown>;
   market_snapshot_sync?: Record<string, unknown>;
   snapshot_reanalysis?: Record<string, unknown>;
   settled_count?: number | null;
@@ -1175,6 +1200,146 @@ export interface LatestValidation {
   validation_seasons?: string[];
 }
 
+export interface ValidationLeagueResult {
+  division: string;
+  league?: string | null;
+  status: "pending" | "running" | "succeeded" | "failed" | "skipped" | "cancelled" | string;
+  cache_hit?: boolean;
+  error?: string | null;
+  started_at_utc?: string | null;
+  updated_at_utc?: string | null;
+  finished_at_utc?: string | null;
+  runtime?: {
+    state?: string | null;
+    is_running?: boolean | null;
+    run_seconds?: number | null;
+    updated_age_seconds?: number | null;
+    heartbeat_age_seconds?: number | null;
+    started_at_utc?: string | null;
+    updated_at_utc?: string | null;
+    finished_at_utc?: string | null;
+  } | null;
+  result?: {
+    selected_config?: Record<string, unknown>;
+    validation_result?: Record<string, unknown>;
+    calibrated_validation_result?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+}
+
+export interface ValidationJobProgress {
+  total_leagues: number;
+  completed_leagues: number;
+  failed_leagues: number;
+  running_leagues: number;
+  pending_leagues: number;
+  cancelled_leagues?: number;
+  processed_leagues?: number;
+  progress_ratio: number;
+  success_ratio?: number;
+}
+
+export interface ValidationJobVerdict {
+  status?: string | null;
+  tone?: KpiCard["tone"] | string | null;
+  title?: string | null;
+  detail?: string | null;
+  next_action?: string | null;
+  blockers?: string[];
+  evidence?: Record<string, unknown>;
+}
+
+export interface ValidationJobFailureLeague {
+  division?: string | null;
+  league?: string | null;
+  status?: string | null;
+  error?: string | null;
+}
+
+export interface ValidationJobFailureSummary {
+  failed_count: number;
+  recoverable: boolean;
+  recoverable_count: number;
+  latest_error?: string | null;
+  category: string;
+  stage: string;
+  severity: "info" | "warning" | "error" | string;
+  title: string;
+  detail: string;
+  next_action: string;
+  failed_leagues: ValidationJobFailureLeague[];
+}
+
+export interface ValidationJobEvent {
+  id?: number | null;
+  event_type: string;
+  severity: "info" | "warning" | "error" | string;
+  message: string;
+  division?: string | null;
+  runner_id?: string | null;
+  metadata?: Record<string, unknown>;
+  created_at_utc?: string | null;
+}
+
+export interface ValidationJobExecutionHealth {
+  state: string;
+  severity: "ok" | "info" | "warning" | "error" | string;
+  title: string;
+  detail: string;
+  next_action: string;
+  is_stale: boolean;
+  age_seconds?: number | null;
+  queue_wait_seconds?: number | null;
+  run_seconds?: number | null;
+  updated_age_seconds?: number | null;
+  heartbeat_age_seconds?: number | null;
+  stale_after_seconds?: number | null;
+}
+
+export interface ValidationJob {
+  job_id: string;
+  method: string;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled" | string;
+  divisions: string[];
+  training_seasons: string[];
+  validation_seasons: string[];
+  config?: Record<string, unknown>;
+  result_summary?: {
+    evaluated_count?: number | null;
+    bet_count?: number | null;
+    roi?: number | null;
+    log_loss_model?: number | null;
+    log_loss_market?: number | null;
+    log_loss_diff?: number | null;
+    brier_diff?: number | null;
+    completed_leagues?: number | null;
+    failed_leagues?: number | null;
+    verdict?: ValidationJobVerdict | null;
+    [key: string]: unknown;
+  };
+  progress: ValidationJobProgress;
+  league_results: ValidationLeagueResult[];
+  events: ValidationJobEvent[];
+  last_error?: string | null;
+  current_runner_id?: string | null;
+  attempt_count?: number;
+  retry_count?: number;
+  last_claim_reason?: string | null;
+  last_retry_at_utc?: string | null;
+  runner_heartbeat_at_utc?: string | null;
+  recovered_at_utc?: string | null;
+  failure_summary?: ValidationJobFailureSummary | null;
+  execution_health?: ValidationJobExecutionHealth | null;
+  queue_backend?: string | null;
+  queue_job_id?: string | null;
+  queued_at_utc?: string | null;
+  queue_status_message?: string | null;
+  created_at_utc?: string | null;
+  started_at_utc?: string | null;
+  updated_at_utc?: string | null;
+  finished_at_utc?: string | null;
+}
+
 export interface CalibrationBucketRow {
   band: string;
   market?: string | null;
@@ -1199,10 +1364,58 @@ export interface SourceHealthEntry {
 
 export type DashboardSourceHealth = Record<string, SourceHealthEntry>;
 
+export interface ProgramCapabilityItem {
+  key: string;
+  title: string;
+  status: Severity | "learning" | "limited" | "ready";
+  available: boolean;
+  current?: number | null;
+  target?: number | null;
+  ratio?: number | null;
+  detail: string;
+  next_action?: string;
+}
+
+export interface DashboardProgramCapabilities {
+  status: "ready" | "learning" | "limited" | string;
+  operating_mode: "paper_learning" | "production_ready" | string;
+  summary: {
+    total_count: number;
+    ready_count: number;
+    warning_count: number;
+    blocked_count: number;
+  };
+  capabilities: ProgramCapabilityItem[];
+}
+
+export interface TaskQueueHealth {
+  backend: "thread" | "arq" | string;
+  status: "ok" | "degraded" | "error" | string;
+  redis_reachable?: boolean | null;
+  redis_host?: string;
+  redis_port?: number;
+  redis_database?: number;
+  queue_name?: string | null;
+  queued_jobs?: number | null;
+  worker_healthy?: boolean | null;
+  worker_health?: string | null;
+  worker_health_ttl_seconds?: number | null;
+  detail?: string;
+  max_jobs?: number;
+  job_timeout_seconds?: number;
+  validation_job_stale_after_seconds?: number;
+}
+
 export interface DashboardSnapshot {
   status: string;
   tool: string;
   generated_at_utc: string;
+  dashboard_cache?: {
+    status?: "fresh" | "stale_refreshing" | string;
+    age_seconds?: number;
+    ttl_seconds?: number;
+    stale_seconds?: number;
+  };
   db_path: string;
   kpis: DashboardKpis;
   prediction_kpis: PredictionKpis;
@@ -1228,13 +1441,18 @@ export interface DashboardSnapshot {
   production_readiness?: DashboardProductionReadiness;
   prediction_accountability?: DashboardPredictionAccountability;
   profitability_forecast?: DashboardProfitabilityForecast;
+  program_capabilities?: DashboardProgramCapabilities;
+  task_queue?: TaskQueueHealth;
   market_breakdown?: DashboardMarketBreakdown;
+  model_failure_diagnostics?: DashboardModelFailureDiagnostics;
   latest_validation?: LatestValidation | null;
+  validation_job?: ValidationJob | null;
   source_health?: DashboardSourceHealth;
   buckets: CalibrationBucketRow[];
   policy: {
     read_only: boolean;
     no_search_inputs: boolean;
+    background_enrichment_refresh?: boolean;
     data_rule: string;
   };
 }
@@ -1279,6 +1497,61 @@ export interface DashboardMarketBreakdown {
   total_settled: number;
   markets: string[];
   leagues: string[];
+}
+
+export interface DashboardModelFailureDriver {
+  category: string;
+  key: string;
+  title: string;
+  detail: string;
+  sample_count: number;
+  hit_rate: number | null;
+  roi: number | null;
+  loss_units: number;
+  severity: Severity | string;
+  evidence: string;
+  action: string;
+}
+
+export interface DashboardModelFailurePolicyRule {
+  key: string;
+  type: string;
+  status: Severity | string;
+  title: string;
+  detail: string;
+  action: string;
+  target: string;
+  target_key: string;
+  driver_category?: string;
+  sample_count: number;
+  roi: number | null;
+  loss_units: number;
+  evidence?: string;
+}
+
+export interface DashboardModelFailureDiagnostics {
+  status: string;
+  severity: Severity;
+  title: string;
+  detail: string;
+  summary: {
+    settled_count: number;
+    hit_rate: number | null;
+    roi: number | null;
+    negative_driver_count: number;
+    driver_count?: number;
+    odds_coverage_ratio: number | null;
+    learned_brier_minus_market?: number | null;
+  };
+  primary_driver?: DashboardModelFailureDriver | null;
+  drivers: DashboardModelFailureDriver[];
+  policy: {
+    formal_recommendation_enabled: boolean;
+    reason: string;
+    rule_count?: number;
+    blocked_rule_count?: number;
+    rules?: DashboardModelFailurePolicyRule[];
+  };
 }
 
 export interface KpiCard {
@@ -1550,6 +1823,45 @@ export interface PredictionQualityView {
     adjustmentDetail: string;
     weightText: string;
     width: string;
+    tone: KpiCard["tone"];
+  }>;
+}
+
+export interface ModelFailureDiagnosticsView {
+  severity: Severity;
+  tone: KpiCard["tone"];
+  title: string;
+  detail: string;
+  primaryText: string;
+  policyText: string;
+  metrics: Array<{
+    label: string;
+    value: string;
+    caption: string;
+    tone: KpiCard["tone"];
+  }>;
+  driverRows: Array<{
+    key: string;
+    categoryText: string;
+    title: string;
+    detail: string;
+    evidence: string;
+    action: string;
+    sampleText: string;
+    roiText: string;
+    lossText: string;
+    tone: KpiCard["tone"];
+  }>;
+  policyRows: Array<{
+    key: string;
+    statusText: string;
+    title: string;
+    detail: string;
+    actionText: string;
+    targetText: string;
+    evidence: string;
+    sampleText: string;
+    roiText: string;
     tone: KpiCard["tone"];
   }>;
 }
@@ -1911,6 +2223,7 @@ export interface DashboardView {
   learningEffectiveness: LearningEffectivenessView;
   backtestCurve: BacktestCurveView;
   predictionQuality: PredictionQualityView;
+  modelFailureDiagnostics: ModelFailureDiagnosticsView;
   adaptiveLearningPlan: AdaptiveLearningPlanView;
   dashboardContract: DashboardContractView;
   productionReadiness: ProductionReadinessView;
@@ -1937,6 +2250,7 @@ export interface RecommendationOpportunityView {
       label: string;
       title: string;
       detail: string;
+      statusText: string;
       tone: KpiCard["tone"];
       progressText: string;
       width: string;

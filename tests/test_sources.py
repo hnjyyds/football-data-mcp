@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from football_data_mcp.sources import (
+    analysis_market_snapshots_from_odds,
     block_reason,
     build_odds_quality_contract,
     merge_odds,
@@ -46,6 +47,23 @@ def test_odds_from_row_extracts_numeric_moneyline():
     odds = odds_from_row(row)
     assert odds["has_valid_numeric_odds"] is True
     assert odds["moneyline_1x2"][0]["home"] == 1.8
+
+
+def test_parse_float_accepts_dirty_source_values():
+    assert sources_module.parse_float(" 1.85 ") == 1.85
+    assert sources_module.parse_float(2) == 2.0
+    assert sources_module.parse_float(2.25) == 2.25
+    assert sources_module.parse_float(None) is None
+    assert sources_module.parse_float("") is None
+    assert sources_module.parse_float(["1.85"]) is None
+    assert sources_module.parse_float("暂停") is None
+
+
+def test_metric_aggregates_ignore_missing_dirty_values():
+    values = [1.8, None, "2.0", "暂停", 2.2]
+
+    assert sources_module.average_metric(values) == 2.0
+    assert sources_module.median_metric(values) == 2.0
 
 
 def test_season_code_for_may_2026():
@@ -3208,6 +3226,27 @@ def test_leisu_market_snapshots_from_odds_normalizes_multi_company_time_series()
     )
     assert away_cover.line == 0.25
     assert away_cover.raw["side"] == "away_cover"
+
+
+def test_analysis_market_snapshots_use_fetch_time_for_fallback_series():
+    odds = odds_from_leisu_odds_payload(_leisu_odds_payload(), match_id="4512919")
+
+    snapshots = analysis_market_snapshots_from_odds(
+        odds,
+        match={
+            "match_id": "4512919",
+            "league": "中乙",
+            "home_team": "大连英博B队",
+            "away_team": "泰安天贶",
+            "kickoff_utc": "2026-05-25T11:00:00+00:00",
+        },
+        fetched_at_utc="2026-05-25T04:05:00+00:00",
+    )
+
+    assert snapshots
+    assert {item.provider for item in snapshots} == {"analysis_odds"}
+    assert {item.source_time_utc for item in snapshots} == {"2026-05-25T04:05:00+00:00"}
+    assert {item.raw["source"] for item in snapshots} == {"analysis_odds"}
 
 
 def test_parse_market_timestamp_accepts_leisu_unix_seconds():

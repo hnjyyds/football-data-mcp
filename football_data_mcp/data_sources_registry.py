@@ -331,10 +331,9 @@ async def fetch_football_data_org_fixtures(
     url = f"{FOOTBALL_DATA_ORG_BASE}/competitions/{competition_code}/matches"
 
     owns_client = client is None
-    if owns_client:
-        client = httpx.AsyncClient(timeout=10.0)
+    active_client = client or httpx.AsyncClient(timeout=10.0)
     try:
-        response = await client.get(url, params=params, headers={"X-Auth-Token": token})
+        response = await active_client.get(url, params=params, headers={"X-Auth-Token": token})
         if response.status_code == 429:
             payload = {
                 "status": "rate_limited",
@@ -345,6 +344,8 @@ async def fetch_football_data_org_fixtures(
             return payload
         response.raise_for_status()
         data = response.json()
+        if not isinstance(data, dict):
+            data = {}
         raw_matches = data.get("matches") or []
         fixtures = [_normalize_fdo_match(m) for m in raw_matches]
         result = {
@@ -373,8 +374,8 @@ async def fetch_football_data_org_fixtures(
             "competition": competition_code,
         }
     finally:
-        if owns_client and client:
-            await client.aclose()
+        if owns_client:
+            await active_client.aclose()
 
 
 async def fetch_all_upcoming_matches(
@@ -406,14 +407,15 @@ async def fetch_all_upcoming_matches(
     url = f"{FOOTBALL_DATA_ORG_BASE}/matches"
 
     owns_client = client is None
-    if owns_client:
-        client = httpx.AsyncClient(timeout=10.0)
+    active_client = client or httpx.AsyncClient(timeout=10.0)
     try:
-        response = await client.get(url, params=params, headers={"X-Auth-Token": token})
+        response = await active_client.get(url, params=params, headers={"X-Auth-Token": token})
         if response.status_code == 429:
             return {"status": "rate_limited", "fixtures": [], "competitions_covered": []}
         response.raise_for_status()
         data = response.json()
+        if not isinstance(data, dict):
+            data = {}
         raw_matches = data.get("matches") or []
         fixtures = [_normalize_fdo_match(m) for m in raw_matches]
         result_set = data.get("resultSet") or {}
@@ -437,8 +439,8 @@ async def fetch_all_upcoming_matches(
             "competitions_covered": [],
         }
     finally:
-        if owns_client and client:
-            await client.aclose()
+        if owns_client:
+            await active_client.aclose()
 
 
 # ─── FDO Enrichment Index ─────────────────────────────────────────────────────

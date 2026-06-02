@@ -32,11 +32,66 @@ export function ProfitabilityPanel({ forecast }: { forecast?: DashboardProfitabi
     );
   }
 
+  const state = forecast.model_state ?? "insufficient_data";
+  if (state === "losing") {
+    return (
+      <section className="card overflow-hidden border-danger-500/30">
+        <div className="px-3 py-2 border-b border-danger-500/20 flex items-center gap-2">
+          <Icon name="error" size={14} className="text-danger-500" />
+          <span className="font-semibold text-ink-900 dark:text-white text-sm">盈利诊断</span>
+          <span className="ml-auto text-2xs font-semibold text-danger-600 dark:text-danger-500">
+            无法证明盈利路径
+          </span>
+        </div>
+        <div className="p-3 space-y-3">
+          <div className="rounded-lg bg-danger-500/10 px-3 py-2 text-xs leading-relaxed text-danger-700 dark:text-danger-500">
+            {forecast.interpretation ?? "当前命中率低于盈亏平衡线，不能通过增加样本来证明盈利，需要先改进模型或数据源。"}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-ink-100 dark:border-ink-800/60">
+            <div>
+              <div className="text-2xs text-ink-500 dark:text-ink-400">命中率</div>
+              <div className="text-sm font-semibold text-danger-600 dark:text-danger-500 tabular-nums">{pct(forecast.observed_hit_rate)}</div>
+            </div>
+            <div>
+              <div className="text-2xs text-ink-500 dark:text-ink-400">盈亏平衡线</div>
+              <div className="text-sm font-semibold text-ink-900 dark:text-white tabular-nums">{pct(forecast.break_even_hit_rate_needed)}</div>
+            </div>
+            <div>
+              <div className="text-2xs text-ink-500 dark:text-ink-400">单笔 ROI</div>
+              <div className="text-sm font-semibold text-danger-600 dark:text-danger-500 tabular-nums">{pct(forecast.implied_roi_per_bet)}</div>
+            </div>
+            <div>
+              <div className="text-2xs text-ink-500 dark:text-ink-400">命中率缺口</div>
+              <div className="text-sm font-semibold text-warning-600 dark:text-warning-500 tabular-nums">{pct(forecast.hit_rate_gap)}</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (state === "marginal_edge") {
+    return (
+      <section className="card overflow-hidden border-warning-500/30">
+        <div className="px-3 py-2 border-b border-warning-500/20 flex items-center gap-2">
+          <Icon name="warn" size={14} className="text-warning-500" />
+          <span className="font-semibold text-ink-900 dark:text-white text-sm">盈利诊断</span>
+          <span className="ml-auto text-2xs font-semibold text-warning-600 dark:text-warning-500">
+            边际过小
+          </span>
+        </div>
+        <div className="p-3 text-xs leading-relaxed text-ink-600 dark:text-ink-300">
+          {forecast.interpretation ?? "当前优势太小，短期内很难统计证明盈利，需要优化候选过滤或模型特征。"}
+        </div>
+      </section>
+    );
+  }
+
   const remaining = forecast.remaining_bets ?? 0;
-  const total = forecast.required_bets_total ?? 1;
+  const total = forecast.required_bets_total ?? Math.max(1, forecast.settled_bets_so_far ?? 0);
   const sofar = forecast.settled_bets_so_far ?? 0;
   const progress = Math.max(0, Math.min(100, (sofar / total) * 100));
-  const isReady = remaining === 0;
+  const isReady = remaining === 0 && total > 0 && sofar >= total && (forecast.implied_roi_per_bet ?? 0) > 0;
 
   return (
     <section className="card overflow-hidden">

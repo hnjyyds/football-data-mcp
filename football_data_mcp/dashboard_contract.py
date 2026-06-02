@@ -434,7 +434,7 @@ def normalize_backtest_curve(raw: Any) -> dict[str, Any]:
     return out
 
 
-_SOURCE_HEALTH_ALIASES = {
+_SOURCE_HEALTH_ALIASES: dict[str, str] = {
     "football_data_co_uk": "football_data",
     "dongqiudi_schedule": "dongqiudi",
     "odds_api": "the_odds_api",
@@ -455,7 +455,8 @@ def normalize_source_health(raw_root: dict[str, Any]) -> DashboardSourceHealth:
     for key, value in health.items():
         if not isinstance(value, dict):
             continue
-        canonical = _SOURCE_HEALTH_ALIASES.get(key, key)
+        raw_key = str(key)
+        canonical = _SOURCE_HEALTH_ALIASES.get(raw_key, raw_key)
         entry: SourceHealthEntry = {
             "status": _as_str_or_none(value.get("status")),
             "error": _as_str_or_none(value.get("error")),

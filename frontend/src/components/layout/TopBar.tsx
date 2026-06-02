@@ -23,16 +23,20 @@ export function TopBar({
   snapshot,
   darkMode,
   onToggleDark,
+  onRefresh,
   refreshing,
   lastRefreshError,
 }: {
   snapshot: DashboardSnapshot | null;
   darkMode: boolean;
   onToggleDark: () => void;
+  onRefresh?: () => void;
   refreshing: boolean;
   lastRefreshError: string | null;
 }) {
   const isCalibrationActive = snapshot?.kpis.live_calibration_active;
+  const cacheStatus = snapshot?.dashboard_cache?.status;
+  const isStaleRefreshing = cacheStatus === "stale_refreshing";
   return (
     <header className="sticky top-0 z-40 bg-white/95 dark:bg-ink-950/95 backdrop-blur-md border-b border-ink-200 dark:border-ink-800">
       <div className="max-w-screen-2xl mx-auto px-3 sm:px-4 h-12 flex items-center gap-2 sm:gap-4">
@@ -70,10 +74,26 @@ export function TopBar({
             <Icon name="clock" size={11} />
             {snapshot ? localTime(snapshot.generated_at_utc) : "—"}
           </span>
-          <span className="flex items-center gap-1 text-2xs text-ink-500 dark:text-ink-400">
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={refreshing || !onRefresh}
+            aria-label="强制刷新看板"
+            title="强制刷新看板"
+            className="flex items-center gap-1 rounded-md px-1 py-0.5 text-2xs text-ink-500 dark:text-ink-400 hover:bg-ink-100 dark:hover:bg-ink-800 hover:text-brand-600 dark:hover:text-brand-400 disabled:cursor-not-allowed disabled:opacity-70"
+          >
             <Icon name="refresh" size={11} className={refreshing ? "animate-spin text-brand-500" : ""} />
             <span className="hidden lg:inline tabular-nums">{snapshot ? relativeTime(snapshot.generated_at_utc) : "—"}</span>
-          </span>
+          </button>
+          {isStaleRefreshing && (
+            <span
+              className="hidden md:flex items-center gap-1 px-2 py-1 rounded-md bg-warning-500/10 text-warning-700 dark:text-warning-500 text-2xs font-medium"
+              title="正在后台刷新 dashboard 快照"
+            >
+              <Icon name="refresh" size={11} className="animate-spin" />
+              快照刷新中
+            </span>
+          )}
         </div>
 
         {/* Dark toggle */}

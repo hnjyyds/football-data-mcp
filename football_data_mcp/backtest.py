@@ -133,7 +133,7 @@ def build_historical_samples(
     division: str = "",
     season: str = "",
 ) -> list[dict[str, Any]]:
-    samples = []
+    samples: list[dict[str, Any]] = []
     for row in rows:
         kickoff = sources.parse_kickoff(row)
         actual = _completed_result(row)
@@ -255,6 +255,92 @@ def _market_decimal_odds(sample: dict[str, Any]) -> dict[str, float]:
         key: float(value)
         for key in ("home", "draw", "away")
         if (value := _parse_float((metrics.get("odds") or {}).get(key))) is not None
+    }
+
+
+def _asian_handicap_market(sample: dict[str, Any]) -> dict[str, Any] | None:
+    contract = (sample.get("odds") or {}).get("quality_contract") or {}
+    asian = contract.get("preferred_asian_handicap") or {}
+    metrics = asian.get("current_metrics") or {}
+    line = _parse_float(metrics.get("line"))
+    probabilities = {
+        key: float(value)
+        for key in ("home_cover", "away_cover")
+        if (value := _parse_float((metrics.get("normalized_probability") or {}).get(key))) is not None
+    }
+    decimal_odds = {
+        key: float(value)
+        for key in ("home_cover", "away_cover")
+        if (value := _parse_float((metrics.get("decimal_odds") or {}).get(key))) is not None and value > 1
+    }
+    if line is None or len(probabilities) < 2 or len(decimal_odds) < 2:
+        return None
+    return {
+        "market": "asian_handicap",
+        "provider": asian.get("provider") or "",
+        "line": line,
+        "probabilities": probabilities,
+        "decimal_odds": decimal_odds,
+    }
+
+
+def _split_asian_handicap_line(line: float) -> list[float]:
+    rounded = round(float(line) * 4) / 4
+    doubled = rounded * 2
+    if abs(doubled - round(doubled)) < 1e-9:
+        return [rounded]
+    lower = math.floor(doubled) / 2
+    upper = math.ceil(doubled) / 2
+    return [lower, upper]
+
+
+def _settle_asian_handicap_bet(
+    *,
+    home_goals: int,
+    away_goals: int,
+    home_line: float,
+    side: str,
+    decimal_odds: float,
+    stake: float = 1.0,
+) -> dict[str, Any]:
+    """Settle one Asian-handicap bet using split stakes for quarter lines."""
+    if side not in {"home_cover", "away_cover"}:
+        raise ValueError(f"unsupported asian handicap side: {side}")
+    side_line = float(home_line) if side == "home_cover" else -float(home_line)
+    goal_diff = int(home_goals) - int(away_goals) if side == "home_cover" else int(away_goals) - int(home_goals)
+    split_lines = _split_asian_handicap_line(side_line)
+    unit_stake = float(stake) / len(split_lines)
+    profit = 0.0
+    for split_line in split_lines:
+        adjusted_margin = goal_diff + split_line
+        if adjusted_margin > 1e-9:
+            profit += (float(decimal_odds) - 1.0) * unit_stake
+        elif adjusted_margin < -1e-9:
+            profit -= unit_stake
+
+    profit = _round(profit) or 0.0
+    max_profit = (float(decimal_odds) - 1.0) * float(stake)
+    if abs(profit - max_profit) < 1e-6:
+        result = "win"
+    elif profit > 0:
+        result = "half_win"
+    elif abs(profit) < 1e-6:
+        result = "push"
+    elif profit > -float(stake):
+        result = "half_loss"
+    else:
+        result = "loss"
+    return {
+        "market": "asian_handicap",
+        "side": side,
+        "home_line": _round(float(home_line), 4),
+        "side_line": _round(side_line, 4),
+        "split_lines": [_round(value, 4) for value in split_lines],
+        "decimal_odds": _round(float(decimal_odds), 4),
+        "stake": float(stake),
+        "profit": profit,
+        "result": result,
+        "hit": profit > 0,
     }
 
 
@@ -383,6 +469,15 @@ def _build_walk_forward_base(
         if not projection.get("available") or not model_probs or not market_probs:
             skipped_unavailable += 1
             continue
+        asian_market = _asian_handicap_market(sample)
+        model_asian = ((projection.get("derived_probabilities") or {}).get("asian_handicap") or {})
+        asian_edges = ((projection.get("market_edges") or {}).get("asian_handicap") or {})
+        asian_market_probabilities = asian_market.get("probabilities") if asian_market else {}
+        asian_market_decimal_odds = asian_market.get("decimal_odds") if asian_market else {}
+        if not isinstance(asian_market_probabilities, dict):
+            asian_market_probabilities = {}
+        if not isinstance(asian_market_decimal_odds, dict):
+            asian_market_decimal_odds = {}
 
         actual = sample["actual"]["result_1x2"]
         model_log_loss = _log_loss(model_probs, actual)
@@ -413,6 +508,29 @@ def _build_walk_forward_base(
                 "market_probabilities_1x2": {key: _round(_parse_float(value)) for key, value in market_probs.items()},
                 "market_decimal_odds_1x2": _market_decimal_odds(sample),
                 "edges_1x2": edges,
+                "asian_handicap_market": {
+                    "market": "asian_handicap",
+                    "provider": asian_market.get("provider"),
+                    "line": asian_market.get("line"),
+                } if asian_market else None,
+                "model_probabilities_asian_handicap": {
+                    key: _round(_parse_float(value))
+                    for key, value in model_asian.items()
+                    if key in {"line", "home_cover", "away_cover"}
+                },
+                "market_probabilities_asian_handicap": {
+                    key: _round(_parse_float(value))
+                    for key, value in asian_market_probabilities.items()
+                },
+                "market_decimal_odds_asian_handicap": {
+                    key: _round(_parse_float(value), 4)
+                    for key, value in asian_market_decimal_odds.items()
+                },
+                "edges_asian_handicap": {
+                    key: _round(_parse_float(value))
+                    for key, value in asian_edges.items()
+                    if key in {"home_cover", "away_cover"}
+                },
                 "actual": sample["actual"],
                 "scores": {
                     "model_log_loss_1x2": _round(model_log_loss),
@@ -437,6 +555,139 @@ def _build_walk_forward_base(
     }
 
 
+def _asian_handicap_validation_for_record(
+    record: dict[str, Any],
+    *,
+    edge_threshold: float,
+    stake: float,
+) -> dict[str, Any]:
+    market = record.get("asian_handicap_market") or {}
+    line = _parse_float(market.get("line"))
+    model_probabilities = {
+        key: _parse_float((record.get("model_probabilities_asian_handicap") or {}).get(key))
+        for key in ("home_cover", "away_cover")
+    }
+    market_probabilities = {
+        key: _parse_float((record.get("market_probabilities_asian_handicap") or {}).get(key))
+        for key in ("home_cover", "away_cover")
+    }
+    decimal_odds = {
+        key: _parse_float((record.get("market_decimal_odds_asian_handicap") or {}).get(key))
+        for key in ("home_cover", "away_cover")
+    }
+    edges: dict[str, float] = {}
+    for key in ("home_cover", "away_cover"):
+        model_probability = model_probabilities.get(key)
+        market_probability = market_probabilities.get(key)
+        if model_probability is None or market_probability is None:
+            continue
+        edge = _round(model_probability - market_probability)
+        if edge is not None:
+            edges[key] = edge
+    available = (
+        line is not None
+        and len(edges) == 2
+        and all(decimal_odds.get(key) is not None and (decimal_odds.get(key) or 0) > 1 for key in ("home_cover", "away_cover"))
+    )
+    if not available:
+        return {
+            "available": False,
+            "market": "asian_handicap",
+            "reason": "asian_handicap_line_probability_or_odds_missing",
+            "selection": {"recommended": False, "side": "", "edge": 0.0},
+        }
+
+    side = max(edges, key=lambda key: edges[key])
+    selected_edge = edges[side]
+    selected_decimal_odds = decimal_odds.get(side)
+    if line is None or selected_decimal_odds is None:
+        return {
+            "available": False,
+            "market": "asian_handicap",
+            "reason": "asian_handicap_selection_odds_missing",
+            "selection": {"recommended": False, "side": "", "edge": 0.0},
+        }
+    recommended = selected_edge >= edge_threshold
+    actual = record.get("actual") or {}
+    settlement = None
+    if recommended:
+        settlement = _settle_asian_handicap_bet(
+            home_goals=int(actual.get("home_goals") or 0),
+            away_goals=int(actual.get("away_goals") or 0),
+            home_line=line,
+            side=side,
+            decimal_odds=selected_decimal_odds,
+            stake=stake,
+        )
+
+    return {
+        "available": True,
+        "market": "asian_handicap",
+        "provider": market.get("provider") or "",
+        "line": _round(line, 4),
+        "model_probabilities": {key: _round(value) for key, value in model_probabilities.items()},
+        "market_probabilities": {key: _round(value) for key, value in market_probabilities.items()},
+        "decimal_odds": {key: _round(value, 4) for key, value in decimal_odds.items()},
+        "edges": edges,
+        "selection": {
+            "recommended": recommended,
+            "side": side if recommended else side,
+            "edge": selected_edge,
+            "decimal_odds": _round(decimal_odds.get(side), 4),
+            "stake": stake if recommended else 0.0,
+        },
+        "settlement": settlement,
+        "policy": "Asian-handicap validation uses the model's derived home_cover/away_cover probabilities and settles only against the same pre-match handicap line.",
+    }
+
+
+def _summarize_asian_handicap_validations(records: list[dict[str, Any]], *, stake: float) -> dict[str, Any]:
+    available_records = [record for record in records if record.get("available")]
+    settled_records = [
+        record
+        for record in available_records
+        if isinstance(record.get("settlement"), dict)
+    ]
+    result_counts: dict[str, int] = {}
+    profit = 0.0
+    for record in settled_records:
+        settlement = record.get("settlement") or {}
+        result = str(settlement.get("result") or "unknown")
+        result_counts[result] = result_counts.get(result, 0) + 1
+        profit += float(settlement.get("profit") or 0.0)
+    bet_count = len(settled_records)
+    hit_count = sum(1 for record in settled_records if (record.get("settlement") or {}).get("hit"))
+    push_count = result_counts.get("push", 0)
+    loss_count = sum(result_counts.get(key, 0) for key in ("half_loss", "loss"))
+    roi = _round(profit / (bet_count * stake) if bet_count and stake else None)
+    if bet_count >= 50:
+        status = "sample_ready"
+    elif bet_count > 0:
+        status = "insufficient_sample"
+    elif available_records:
+        status = "available_but_no_recommendations"
+    else:
+        status = "missing"
+    return {
+        "market": "asian_handicap",
+        "status": status,
+        "available_count": len(available_records),
+        "evaluated_count": len(available_records),
+        "bet_count": bet_count,
+        "hit_count": hit_count,
+        "push_count": push_count,
+        "loss_count": loss_count,
+        "profit": _round(profit),
+        "roi": roi,
+        "result_counts": result_counts,
+        "sample_gate": {
+            "min_bets_for_validation": 50,
+            "passed": bet_count >= 50,
+        },
+        "policy": "This is Asian-handicap paper validation, separate from 1X2 Log Loss/Brier; sample_ready is required before product claims model accuracy on asian_handicap.",
+    }
+
+
 def _walk_forward_result_from_base(
     base: dict[str, Any],
     *,
@@ -450,6 +701,7 @@ def _walk_forward_result_from_base(
     bet_count = 0
     profit = 0.0
     records = []
+    asian_validation_records = []
 
     for base_record in base.get("records") or []:
         scores = base_record.get("scores") or {}
@@ -461,11 +713,12 @@ def _walk_forward_result_from_base(
         edges = base_record.get("edges_1x2") or {}
         selected = max(edges, key=lambda key: edges[key] if edges[key] is not None else -999)
         selected_edge = edges.get(selected) or 0.0
-        decimal_odds = (base_record.get("market_decimal_odds_1x2") or {}).get(selected)
+        decimal_odds = _parse_float((base_record.get("market_decimal_odds_1x2") or {}).get(selected))
         actual = (base_record.get("actual") or {}).get("result_1x2")
-        recommended = selected_edge >= edge_threshold and decimal_odds is not None
+        recommended = False
         bet_profit = 0.0
-        if recommended:
+        if selected_edge >= edge_threshold and decimal_odds is not None:
+            recommended = True
             bet_count += 1
             bet_profit = (decimal_odds - 1.0) * stake if selected == actual else -stake
             profit += bet_profit
@@ -483,6 +736,13 @@ def _walk_forward_result_from_base(
             "stake": stake if recommended else 0.0,
             "profit": _round(bet_profit),
         }
+        asian_validation = _asian_handicap_validation_for_record(
+            base_record,
+            edge_threshold=edge_threshold,
+            stake=stake,
+        )
+        public_record["asian_handicap_validation"] = asian_validation
+        asian_validation_records.append(asian_validation)
         records.append(public_record)
 
     summary = {
@@ -518,6 +778,7 @@ def _walk_forward_result_from_base(
             "model_1x2": _calibration(records, "model_probabilities_1x2"),
             "market_1x2": _calibration(records, "market_probabilities_1x2"),
         },
+        "asian_handicap_validation": _summarize_asian_handicap_validations(asian_validation_records, stake=stake),
         "records": records,
         "agent_contract": {
             "no_future_leakage_rule": "Each record uses only samples with kickoff earlier than the evaluated match for form features.",
@@ -813,9 +1074,9 @@ def _apply_holdout_probability_calibrator_to_record(
 
     total = sum(raw_calibrated.values())
     calibrated_probabilities = (
-        {side: _round(value / total) for side, value in raw_calibrated.items()}
+        {side: _round(value / total) or 0.0 for side, value in raw_calibrated.items()}
         if total > 0
-        else {side: _round(_parse_float(probabilities.get(side))) for side in probabilities}
+        else {side: _round(_parse_float(probabilities.get(side))) or 0.0 for side in probabilities}
     )
     market_probabilities = record.get("market_probabilities_1x2") or {}
     edges = {
@@ -1103,7 +1364,7 @@ def _compact_sweep_result(
     summary = result.get("summary") or {}
     metrics = result.get("metrics") or {}
     betting = result.get("betting") or {}
-    compact = {
+    compact: dict[str, Any] = {
         "division": division,
         "league": sources.LEAGUE_NAMES.get(division, division),
         "season": season,
@@ -1120,11 +1381,10 @@ def _compact_sweep_result(
         "brier_model_minus_market": (metrics.get("delta") or {}).get("brier_model_minus_market"),
     }
     compact["rank_score"] = _sweep_rank_score({"summary": summary, "metrics": metrics, "betting": betting})
-    compact["beats_market_log_loss"] = (
-        compact["log_loss_model_minus_market"] is not None
-        and compact["log_loss_model_minus_market"] < 0
-    )
-    compact["profitable"] = compact["roi"] is not None and compact["roi"] > 0
+    log_loss_delta = _parse_float(compact.get("log_loss_model_minus_market"))
+    roi = _parse_float(compact.get("roi"))
+    compact["beats_market_log_loss"] = log_loss_delta is not None and log_loss_delta < 0
+    compact["profitable"] = roi is not None and roi > 0
     return compact
 
 
@@ -1233,6 +1493,50 @@ def _weighted_average(items: list[tuple[float | None, int]]) -> float | None:
     return _round(weighted_sum / weight_sum)
 
 
+def _aggregate_asian_handicap_validation_summaries(
+    summaries: list[dict[str, Any]],
+    *,
+    stake: float,
+) -> dict[str, Any]:
+    available_count = sum(int(summary.get("available_count") or 0) for summary in summaries)
+    evaluated_count = sum(int(summary.get("evaluated_count") or 0) for summary in summaries)
+    bet_count = sum(int(summary.get("bet_count") or 0) for summary in summaries)
+    hit_count = sum(int(summary.get("hit_count") or 0) for summary in summaries)
+    push_count = sum(int(summary.get("push_count") or 0) for summary in summaries)
+    loss_count = sum(int(summary.get("loss_count") or 0) for summary in summaries)
+    profit = sum(float(summary.get("profit") or 0.0) for summary in summaries)
+    result_counts: dict[str, int] = {}
+    for summary in summaries:
+        for result, count in (summary.get("result_counts") or {}).items():
+            result_counts[str(result)] = result_counts.get(str(result), 0) + int(count or 0)
+    if bet_count >= 50:
+        status = "sample_ready"
+    elif bet_count > 0:
+        status = "insufficient_sample"
+    elif available_count > 0:
+        status = "available_but_no_recommendations"
+    else:
+        status = "missing"
+    return {
+        "market": "asian_handicap",
+        "status": status,
+        "available_count": available_count,
+        "evaluated_count": evaluated_count,
+        "bet_count": bet_count,
+        "hit_count": hit_count,
+        "push_count": push_count,
+        "loss_count": loss_count,
+        "profit": _round(profit),
+        "roi": _round(profit / (bet_count * stake) if bet_count and stake else None),
+        "result_counts": result_counts,
+        "sample_gate": {
+            "min_bets_for_validation": 50,
+            "passed": bet_count >= 50,
+        },
+        "policy": "Aggregated Asian-handicap validation remains separate from 1X2 probability validation.",
+    }
+
+
 def _aggregate_config_results(
     *,
     division: str,
@@ -1286,7 +1590,14 @@ def _aggregate_config_results(
         ]
     )
     roi = _round(profit / (bet_count * stake) if bet_count and stake else None)
-    aggregate = {
+    asian_handicap_validation = _aggregate_asian_handicap_validation_summaries(
+        [
+            result.get("asian_handicap_validation") or {}
+            for result in results
+        ],
+        stake=stake,
+    )
+    aggregate: dict[str, Any] = {
         "division": division,
         "league": sources.LEAGUE_NAMES.get(division, division),
         "seasons": seasons,
@@ -1306,12 +1617,12 @@ def _aggregate_config_results(
         "model_brier_score_1x2": model_brier,
         "market_brier_score_1x2": market_brier,
         "brier_model_minus_market": _round((model_brier or 0) - (market_brier or 0)) if model_brier is not None and market_brier is not None else None,
+        "asian_handicap_validation": asian_handicap_validation,
     }
-    aggregate["beats_market_log_loss"] = (
-        aggregate["log_loss_model_minus_market"] is not None
-        and aggregate["log_loss_model_minus_market"] < 0
-    )
-    aggregate["profitable"] = aggregate["roi"] is not None and aggregate["roi"] > 0
+    aggregate_log_loss_delta = _parse_float(aggregate.get("log_loss_model_minus_market"))
+    aggregate_roi = _parse_float(aggregate.get("roi"))
+    aggregate["beats_market_log_loss"] = aggregate_log_loss_delta is not None and aggregate_log_loss_delta < 0
+    aggregate["profitable"] = aggregate_roi is not None and aggregate_roi > 0
     aggregate["rank_score"] = _sweep_rank_score(
         {
             "summary": {"evaluated_count": evaluated_count},
@@ -1535,9 +1846,9 @@ async def run_holdout_validation(
     edge_thresholds = [float(item) for item in (edge_thresholds or DEFAULT_SWEEP_EDGE_THRESHOLDS)]
     min_training_samples_options = [int(item) for item in (min_training_samples_options or DEFAULT_SWEEP_TRAINING_SAMPLES)]
 
-    source_results = []
-    division_results = []
-    errors = []
+    source_results: list[dict[str, Any]] = []
+    division_results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     training_config_count = 0
     fetched_samples: dict[tuple[str, str], list[dict[str, Any]]] = {}
 

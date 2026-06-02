@@ -318,6 +318,46 @@ def test_snapshot_store_calculates_closing_line_value_from_snapshots(tmp_path):
     assert tracking["records"][0]["clv"]["closing_decimal_odds"] == 1.92
 
 
+def test_snapshot_store_requires_post_prediction_snapshot_for_clv(tmp_path):
+    db_path = tmp_path / "snapshots.sqlite3"
+    snapshot_store.save_market_snapshots(
+        [
+            snapshot_store.MarketSnapshot(
+                provider="analysis_odds",
+                source_key="dongqiudi",
+                event_id="evt_1",
+                league="EPL",
+                home_team="Arsenal",
+                away_team="Chelsea",
+                kickoff_utc="2026-05-23T12:30:00+00:00",
+                bookmaker="Bet365",
+                market_type="h2h",
+                selection="Arsenal",
+                decimal_odds=2.10,
+                line=None,
+                source_time_utc="2026-05-23T11:22:00+00:00",
+                fetched_at_utc="2026-05-23T11:22:00+00:00",
+                raw={"phase": "prediction"},
+            )
+        ],
+        db_path=str(db_path),
+    )
+
+    clv = snapshot_store.closing_line_value_for_pick(
+        home_team="Arsenal",
+        away_team="Chelsea",
+        selection="home",
+        prediction_decimal_odds=2.10,
+        market_type="h2h",
+        kickoff_utc="2026-05-23T12:30:00+00:00",
+        prediction_time_utc="2026-05-23T11:22:00+00:00",
+        db_path=str(db_path),
+    )
+
+    assert clv["status"] == "unavailable"
+    assert clv["reason"] == "post_prediction_closing_snapshots_missing"
+
+
 def test_sync_market_snapshots_degrades_when_the_odds_api_key_missing(monkeypatch, tmp_path):
     monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
     monkeypatch.setenv("FOOTBALL_DATA_SNAPSHOT_DB", str(tmp_path / "snapshots.sqlite3"))

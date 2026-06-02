@@ -132,12 +132,38 @@ class AutoLearningSettings:
         }
 
 
+@dataclass(frozen=True)
+class TaskQueueSettings:
+    backend: Literal["thread", "arq"] = field(default_factory=lambda: _task_queue_backend_from_env())
+    arq_redis_host: str = field(default_factory=lambda: env_str("FOOTBALL_DATA_ARQ_REDIS_HOST", "localhost"))
+    arq_redis_port: int = field(default_factory=lambda: env_int("FOOTBALL_DATA_ARQ_REDIS_PORT", 6379))
+    arq_redis_database: int = field(default_factory=lambda: env_int("FOOTBALL_DATA_ARQ_REDIS_DATABASE", 0))
+    arq_redis_username: str | None = field(default_factory=lambda: env_str("FOOTBALL_DATA_ARQ_REDIS_USERNAME") or None)
+    arq_redis_password: str | None = field(default_factory=lambda: env_str("FOOTBALL_DATA_ARQ_REDIS_PASSWORD") or None)
+    arq_queue_name: str = field(default_factory=lambda: env_str("FOOTBALL_DATA_ARQ_QUEUE_NAME", "football-data-mcp"))
+    arq_job_timeout_seconds: int = field(
+        default_factory=lambda: env_int("FOOTBALL_DATA_ARQ_JOB_TIMEOUT_SECONDS", 3600)
+    )
+    arq_max_jobs: int = field(default_factory=lambda: env_int("FOOTBALL_DATA_ARQ_MAX_JOBS", 1))
+    fallback_to_thread: bool = field(default_factory=lambda: env_bool("FOOTBALL_DATA_ARQ_FALLBACK_TO_THREAD", True))
+    validation_job_stale_after_seconds: int = field(
+        default_factory=lambda: env_int(
+            "FOOTBALL_DATA_VALIDATION_JOB_STALE_AFTER_SECONDS",
+            env_int("FOOTBALL_DATA_ARQ_JOB_TIMEOUT_SECONDS", 3600) + 300,
+        )
+    )
+
+
 def load_server_settings() -> ServerSettings:
     return ServerSettings()
 
 
 def load_auto_learning_settings() -> AutoLearningSettings:
     return AutoLearningSettings()
+
+
+def load_task_queue_settings() -> TaskQueueSettings:
+    return TaskQueueSettings()
 
 
 def _transport_from_env() -> Literal["stdio", "sse", "streamable-http"]:
@@ -149,3 +175,12 @@ def _transport_from_env() -> Literal["stdio", "sse", "streamable-http"]:
     if raw == "streamable-http":
         return "streamable-http"
     raise ValueError(f"Unsupported transport: {raw}")
+
+
+def _task_queue_backend_from_env() -> Literal["thread", "arq"]:
+    raw = env_str("FOOTBALL_DATA_TASK_QUEUE_BACKEND", "thread").lower()
+    if raw == "thread":
+        return "thread"
+    if raw == "arq":
+        return "arq"
+    raise ValueError(f"Unsupported task queue backend: {raw}")

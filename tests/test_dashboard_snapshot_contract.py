@@ -48,3 +48,38 @@ def test_dashboard_snapshot_returns_normalized_contract(monkeypatch, tmp_path):
     assert isinstance(snap["backtest_curve"]["points"], list)
     # source_health is always a dict, even if empty
     assert isinstance(snap["source_health"], dict)
+    assert snap["model_failure_diagnostics"]["status"] == "insufficient_sample"
+    assert isinstance(snap["model_failure_diagnostics"]["drivers"], list)
+
+
+def test_dashboard_snapshot_does_not_trigger_external_enrichment_warmers_by_default(monkeypatch, tmp_path):
+    """Dashboard rendering must stay read-only; external refresh belongs to daemon/jobs."""
+    monkeypatch.delenv("FOOTBALL_DATA_DASHBOARD_BACKGROUND_ENRICHMENT", raising=False)
+
+    def unexpected_warm() -> None:
+        raise AssertionError("dashboard_snapshot must not start external enrichment warmers by default")
+
+    monkeypatch.setattr(sources, "_ensure_fdo_index_warm", unexpected_warm)
+    monkeypatch.setattr(sources, "_ensure_dongqiudi_logo_cache_warm", unexpected_warm)
+
+    snap = sources.dashboard_snapshot(
+        db_path=str(tmp_path / "learning.sqlite3"),
+        market_db_path=str(tmp_path / "snapshots.sqlite3"),
+    )
+
+    assert snap["policy"]["read_only"] is True
+
+
+def test_dashboard_snapshot_can_explicitly_warm_enrichment_indexes(monkeypatch, tmp_path):
+    """Explicit refresh flows may opt in to background enrichment warmers."""
+    calls: list[str] = []
+    monkeypatch.setattr(sources, "_ensure_fdo_index_warm", lambda: calls.append("fdo"))
+    monkeypatch.setattr(sources, "_ensure_dongqiudi_logo_cache_warm", lambda: calls.append("dongqiudi"))
+
+    sources.dashboard_snapshot(
+        db_path=str(tmp_path / "learning.sqlite3"),
+        market_db_path=str(tmp_path / "snapshots.sqlite3"),
+        allow_background_enrichment_refresh=True,
+    )
+
+    assert calls == ["fdo", "dongqiudi"]
