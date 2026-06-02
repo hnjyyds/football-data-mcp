@@ -221,6 +221,7 @@ def test_run_auto_learning_cycle_records_shortlist_and_parlay(monkeypatch, tmp_p
 
     monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
     monkeypatch.setattr(sources_module, "recommend_jingcai_parlay", fake_recommend_jingcai_parlay)
+    monkeypatch.delenv("FOOTBALL_DATA_LARK_WEBHOOK_URL", raising=False)
 
     result = asyncio.run(
         sources_module.run_auto_learning_cycle(
@@ -236,6 +237,8 @@ def test_run_auto_learning_cycle_records_shortlist_and_parlay(monkeypatch, tmp_p
     assert result["saved_record_count"] == 2
     assert result["asian_shortlist"]["record_count"] == 1
     assert result["jingcai_parlay"]["record_count"] == 1
+    assert result["lark_notification"]["status"] == "not_configured"
+    assert result["lark_notification"]["sent_count"] == 0
     records = learning_store.list_recommendation_records(db_path=db_path)
     assert {record["market"] for record in records} == {"asian_handicap", "parlay"}
 

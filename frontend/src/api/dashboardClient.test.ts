@@ -4,6 +4,7 @@ import {
   fetchDashboardSnapshot,
   fetchMatchDetail,
   retryHoldoutValidationJob,
+  sendPredictionToLark,
   startHoldoutValidationJob,
 } from "./dashboardClient";
 
@@ -472,6 +473,45 @@ describe("fetchMatchDetail", () => {
   it("throws schema error on missing record field", async () => {
     mockFetchOnce({ ok: true, status: 200, body: { status: "ok", tool: "dashboard_match_detail" } });
     await expect(fetchMatchDetail("x:1")).rejects.toThrow(/schema|record/i);
+  });
+});
+
+describe("sendPredictionToLark", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("posts the prediction sample to the match Lark endpoint", async () => {
+    mockFetchOnce({
+      ok: true,
+      status: 200,
+      body: {
+        status: "ok",
+        tool: "lark_prediction_notification",
+        sent: true,
+        channel: "lark",
+        ledger_id: "recommendation:2726",
+      },
+    });
+
+    const data = await sendPredictionToLark("recommendation:2726");
+
+    expect(data.sent).toBe(true);
+    expect(data.ledger_id).toBe("recommendation:2726");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "/api/dashboard/match/recommendation%3A2726/lark",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("rejects malformed Lark send responses", async () => {
+    mockFetchOnce({
+      ok: true,
+      status: 200,
+      body: { status: "ok", tool: "lark_prediction_notification", sent: "yes" },
+    });
+
+    await expect(sendPredictionToLark("recommendation:2726")).rejects.toThrow(/sent/);
   });
 });
 

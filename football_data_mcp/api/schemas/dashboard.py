@@ -36,3 +36,13 @@ class DashboardMatchResponse(BaseModel):
 
     status: str | None = None
     tool: str | None = None
+
+
+class DashboardLarkPredictionResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    tool: str
+    sent: bool
+    channel: str
+    ledger_id: str

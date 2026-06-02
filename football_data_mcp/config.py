@@ -154,6 +154,17 @@ class TaskQueueSettings:
     )
 
 
+@dataclass(frozen=True)
+class LarkNotificationSettings:
+    webhook_url: str = field(default_factory=lambda: env_str("FOOTBALL_DATA_LARK_WEBHOOK_URL"))
+    webhook_secret: str = field(default_factory=lambda: env_str("FOOTBALL_DATA_LARK_WEBHOOK_SECRET"))
+    timeout_seconds: float = field(
+        default_factory=lambda: float(env_str("FOOTBALL_DATA_LARK_TIMEOUT_SECONDS", "5") or "5")
+    )
+    auto_push_predictions: bool = field(default_factory=lambda: env_bool("FOOTBALL_DATA_LARK_AUTO_PUSH_PREDICTIONS", True))
+    auto_push_limit: int = field(default_factory=lambda: env_int("FOOTBALL_DATA_LARK_AUTO_PUSH_LIMIT", 20))
+
+
 def load_server_settings() -> ServerSettings:
     return ServerSettings()
 
@@ -164,6 +175,10 @@ def load_auto_learning_settings() -> AutoLearningSettings:
 
 def load_task_queue_settings() -> TaskQueueSettings:
     return TaskQueueSettings()
+
+
+def load_lark_notification_settings() -> LarkNotificationSettings:
+    return LarkNotificationSettings()
 
 
 def _transport_from_env() -> Literal["stdio", "sse", "streamable-http"]:

@@ -14,6 +14,7 @@ import {
   fetchMatchDetail,
   HttpError,
   retryHoldoutValidationJob,
+  sendPredictionToLark,
   startHoldoutValidationJob,
   type StartHoldoutValidationJobRequest,
 } from "./api/dashboardClient";
@@ -906,6 +907,13 @@ export function validationLeagueLogLossDiff(result: Record<string, unknown> | nu
 function readableError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+function readableLarkSendError(err: unknown): string {
+  if (err instanceof HttpError && err.bodyExcerpt.includes("lark_webhook_not_configured")) {
+    return "Lark webhook 未配置，请设置 FOOTBALL_DATA_LARK_WEBHOOK_URL";
+  }
+  return readableError(err);
 }
 
 // ─── Overview section ────────────────────────────────────────────────────────
@@ -2171,6 +2179,7 @@ export function App() {
   const [detail, setDetail] = useState<DashboardMatchDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [larkSendingLedgerId, setLarkSendingLedgerId] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<DashboardSectionKey>(
     () => route.page === "dashboard" ? route.section : "overview",
   );
@@ -2376,6 +2385,19 @@ export function App() {
     }
   }
 
+  async function handleSendPredictionToLark(ledgerId: string) {
+    setLarkSendingLedgerId(ledgerId);
+    try {
+      await sendPredictionToLark(ledgerId);
+      push("预测已发送到 Lark（非推荐发布）", "success");
+    } catch (err) {
+      push(`发送 Lark 失败：${readableLarkSendError(err)}`, "error");
+      reportError(err, { kind: "lark-prediction-send", ledgerId });
+    } finally {
+      setLarkSendingLedgerId(null);
+    }
+  }
+
   async function handleManualDashboardRefresh() {
     const data = await refreshSnapshotOnce("manual-dashboard-refresh", { forceRefresh: true });
     if (data) {
@@ -2404,6 +2426,8 @@ export function App() {
             loading={detailLoading}
             error={detailError}
             onBack={navigateToDashboard}
+            larkSending={larkSendingLedgerId === route.ledgerId}
+            onSendPredictionToLark={() => handleSendPredictionToLark(route.ledgerId)}
           />
         </Suspense>
       ) : (

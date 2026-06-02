@@ -247,6 +247,30 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         ON shadow_prediction_records(run_id, decision, market)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notification_deliveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL,
+            notification_type TEXT NOT NULL,
+            ledger_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            response_json TEXT NOT NULL DEFAULT '{}',
+            created_at_utc TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL,
+            sent_at_utc TEXT,
+            UNIQUE(channel, notification_type, ledger_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_notification_deliveries_status
+        ON notification_deliveries(channel, notification_type, status, updated_at_utc)
+        """
+    )
     conn.commit()
 
 
@@ -1112,6 +1136,149 @@ def list_shadow_prediction_records(
                 (int(limit or 200),),
             ).fetchall()
     return [_decode_shadow_row(row) for row in rows]
+
+
+def list_prediction_ledger_ids_for_run(
+    run_id: str,
+    *,
+    db_path: str | None = None,
+    include_shadow_predictions: bool = True,
+    limit: int = 100,
+) -> list[str]:
+    """Return persisted prediction ledger ids for one auto-learning run."""
+    bounded_limit = max(0, int(limit or 0))
+    if not str(run_id or "").strip() or bounded_limit <= 0:
+        return []
+    ledger_ids: list[str] = []
+    with _connect(db_path) as conn:
+        ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT id FROM recommendation_records
+            WHERE run_id = ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (str(run_id), bounded_limit),
+        ).fetchall()
+        ledger_ids.extend(f"recommendation:{row['id']}" for row in rows)
+        remaining = bounded_limit - len(ledger_ids)
+        if include_shadow_predictions and remaining > 0:
+            shadow_rows = conn.execute(
+                """
+                SELECT id FROM shadow_prediction_records
+                WHERE run_id = ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (str(run_id), remaining),
+            ).fetchall()
+            ledger_ids.extend(f"shadow_prediction:{row['id']}" for row in shadow_rows)
+    return ledger_ids
+
+
+def reserve_notification_delivery(
+    *,
+    channel: str,
+    notification_type: str,
+    ledger_id: str,
+    db_path: str | None = None,
+) -> bool:
+    """Claim one notification delivery; returns False when it was already sent."""
+    now = now_utc_iso()
+    with _connect(db_path) as conn:
+        ensure_schema(conn)
+        cursor = conn.execute(
+            """
+            INSERT INTO notification_deliveries (
+                channel, notification_type, ledger_id, status, attempt_count,
+                last_error, response_json, created_at_utc, updated_at_utc
+            )
+            VALUES (?, ?, ?, 'sending', 1, NULL, '{}', ?, ?)
+            ON CONFLICT(channel, notification_type, ledger_id) DO UPDATE SET
+                status = 'sending',
+                attempt_count = notification_deliveries.attempt_count + 1,
+                last_error = NULL,
+                updated_at_utc = excluded.updated_at_utc
+            WHERE notification_deliveries.status != 'sent'
+            """,
+            (channel, notification_type, ledger_id, now, now),
+        )
+        conn.commit()
+    return cursor.rowcount > 0
+
+
+def complete_notification_delivery(
+    *,
+    channel: str,
+    notification_type: str,
+    ledger_id: str,
+    status: str,
+    response: dict[str, Any] | None = None,
+    error: str | None = None,
+    db_path: str | None = None,
+) -> None:
+    now = now_utc_iso()
+    normalized_status = status if status in {"sent", "failed"} else "failed"
+    with _connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.execute(
+            """
+            UPDATE notification_deliveries
+            SET status = ?,
+                last_error = ?,
+                response_json = ?,
+                updated_at_utc = ?,
+                sent_at_utc = CASE WHEN ? = 'sent' THEN ? ELSE sent_at_utc END
+            WHERE channel = ? AND notification_type = ? AND ledger_id = ?
+            """,
+            (
+                normalized_status,
+                error,
+                json.dumps(response or {}, sort_keys=True, default=str),
+                now,
+                normalized_status,
+                now,
+                channel,
+                notification_type,
+                ledger_id,
+            ),
+        )
+        conn.commit()
+
+
+def list_notification_deliveries(
+    *,
+    db_path: str | None = None,
+    channel: str | None = None,
+    notification_type: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    where: list[str] = []
+    params: list[Any] = []
+    if channel:
+        where.append("channel = ?")
+        params.append(channel)
+    if notification_type:
+        where.append("notification_type = ?")
+        params.append(notification_type)
+    query = "SELECT * FROM notification_deliveries"
+    if where:
+        query += " WHERE " + " AND ".join(where)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, int(limit or 200)))
+    with _connect(db_path) as conn:
+        ensure_schema(conn)
+        rows = conn.execute(query, params).fetchall()
+    deliveries = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["response"] = json.loads(item.get("response_json") or "{}")
+        except json.JSONDecodeError:
+            item["response"] = {}
+        deliveries.append(item)
+    return deliveries
 
 
 def update_open_match_states(states: list[dict[str, Any]], *, db_path: str | None = None) -> dict[str, Any]:

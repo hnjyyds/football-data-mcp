@@ -25,25 +25,43 @@ export function MatchDetailPage({
   loading,
   error,
   onBack,
+  larkSending = false,
+  onSendPredictionToLark,
 }: {
   ledgerId: string;
   detail: DashboardMatchDetail | null;
   loading: boolean;
   error: string | null;
   onBack: () => void;
+  larkSending?: boolean;
+  onSendPredictionToLark?: () => void;
 }) {
   const view = useMemo(() => (detail ? buildMatchDetailView(detail) : null), [detail]);
 
   return (
     <div className="max-w-screen-lg mx-auto px-4 py-4 pb-20 lg:pb-4">
-      <button
-        type="button"
-        onClick={onBack}
-        className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white mb-4 transition-colors"
-      >
-        <Icon name="back" size={16} />
-        返回总览
-      </button>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={onBack}
+          className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"
+        >
+          <Icon name="back" size={16} />
+          返回总览
+        </button>
+        {detail && onSendPredictionToLark && (
+          <button
+            type="button"
+            onClick={onSendPredictionToLark}
+            disabled={larkSending}
+            title="发送预测样本到 Lark；这不是推荐发布"
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-sky-200 dark:border-sky-800 bg-white dark:bg-ink-900 px-3 py-1.5 text-xs font-semibold text-sky-700 dark:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-950/40 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Icon name={larkSending ? "loading" : "send"} size={13} className={larkSending ? "animate-spin" : ""} />
+            发送预测到 Lark
+          </button>
+        )}
+      </div>
 
       {loading && <LoadingSpinner label="读取比赛详情..." />}
       {error && (

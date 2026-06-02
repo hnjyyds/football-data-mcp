@@ -1,4 +1,4 @@
-import type { DashboardMatchDetail, DashboardSnapshot, ValidationJob } from "../types";
+import type { DashboardMatchDetail, DashboardSnapshot, LarkPredictionSendResult, ValidationJob } from "../types";
 
 export class HttpError extends Error {
   readonly status: number;
@@ -451,6 +451,25 @@ async function httpJson<T>(
   return body;
 }
 
+function validateLarkPredictionSendResult(value: unknown): asserts value is LarkPredictionSendResult {
+  const issues: Issues = [];
+  if (!expectObject(value, "root", issues)) throw new SchemaError("root", issues.join("; "));
+  const root = value;
+  expectField(root, "status", "string", "root", issues);
+  expectField(root, "tool", "string", "root", issues);
+  expectField(root, "sent", "boolean", "root", issues);
+  expectField(root, "channel", "string", "root", issues);
+  expectField(root, "ledger_id", "string", "root", issues);
+  expectOptionalField(root, "message_title", "string", "root", issues, { nullable: true });
+  if ("policy" in root && root.policy !== undefined && root.policy !== null) {
+    expectObject(root.policy, "root.policy", issues);
+  }
+  if ("lark_response" in root && root.lark_response !== undefined && root.lark_response !== null) {
+    expectObject(root.lark_response, "root.lark_response", issues);
+  }
+  if (issues.length) throw new SchemaError("root", issues.join("; "));
+}
+
 export function fetchDashboardSnapshot(opts: { signal?: AbortSignal; forceRefresh?: boolean } = {}): Promise<DashboardSnapshot> {
   const { forceRefresh: _forceRefresh, ...requestOpts } = opts;
   return httpJson<DashboardSnapshot>(
@@ -465,6 +484,17 @@ export function fetchMatchDetail(ledgerId: string, opts: { signal?: AbortSignal 
     `/api/dashboard/match/${encodeURIComponent(ledgerId)}`,
     validateMatchDetail,
     { ...opts, notFoundMessage: "当前台账中不存在这场预测" }
+  );
+}
+
+export function sendPredictionToLark(
+  ledgerId: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<LarkPredictionSendResult> {
+  return httpJson<LarkPredictionSendResult>(
+    `/api/dashboard/match/${encodeURIComponent(ledgerId)}/lark`,
+    validateLarkPredictionSendResult,
+    { ...opts, method: "POST" },
   );
 }
 

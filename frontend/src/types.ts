@@ -443,6 +443,17 @@ export interface DashboardMatchDetail {
   policy: DashboardRecordDetail["policy"];
 }
 
+export interface LarkPredictionSendResult {
+  status: string;
+  tool: string;
+  sent: boolean;
+  channel: string;
+  ledger_id: string;
+  message_title?: string | null;
+  policy?: Record<string, unknown>;
+  lark_response?: Record<string, unknown>;
+}
+
 export interface CandidateFilter {
   reason: string;
   count: number;

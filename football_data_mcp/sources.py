@@ -9761,6 +9761,14 @@ async def run_auto_learning_cycle(
         "still_observation_count": 0,
         "failed_count": 0,
     }
+    lark_notification: dict[str, Any] = {
+        "enabled": False,
+        "channel": "lark",
+        "notification_type": "prediction",
+        "status": "not_started",
+        "sent_count": 0,
+        "failed_count": 0,
+    }
 
     if include_asian_shortlist:
         AUTO_LEARNING_STATE["current_step"] = "asian_shortlist"
@@ -9857,6 +9865,29 @@ async def run_auto_learning_cycle(
             "recommended_ticket_count": parlay_result.get("recommended_ticket_count"),
             "recommended_tickets": parlay_result.get("recommended_tickets") or [],
         }
+
+    # Lark 是预测样本的旁路通知，不参与推荐门禁，也不能阻塞学习/回测主流程。
+    AUTO_LEARNING_STATE["current_step"] = "lark_notification"
+    try:
+        from football_data_mcp.services.lark_notification_service import LarkNotificationService
+
+        lark_notification = await LarkNotificationService().send_unsent_predictions_for_run(
+            run_id,
+            db_path=db_path,
+            include_shadow_predictions=include_shadow_predictions,
+        )
+    except Exception as exc:
+        lark_notification = {
+            "enabled": True,
+            "channel": "lark",
+            "notification_type": "prediction",
+            "status": "error",
+            "sent_count": 0,
+            "failed_count": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+            "at_utc": now_utc().isoformat(),
+        }
+    AUTO_LEARNING_STATE["last_lark_notification"] = lark_notification
 
     if include_market_snapshot_sync and require_proxy_for_auto_snapshot and not leisu_proxy_configured:
         market_snapshot_sync = {
@@ -9962,6 +9993,7 @@ async def run_auto_learning_cycle(
         "analysis_market_snapshot_sync": asian_summary.get("analysis_market_snapshot_sync") or {},
         "market_snapshot_sync": market_snapshot_sync,
         "snapshot_reanalysis": snapshot_reanalysis,
+        "lark_notification": lark_notification,
         "settlement": settlement,
         "calibration": calibration,
         "strategy_state": strategy_state,
