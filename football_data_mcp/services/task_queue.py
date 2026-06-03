@@ -22,8 +22,24 @@ class ValidationJobStarter(Protocol):
         ...
 
 
+class OddsSourceSyncJobStarter(Protocol):
+    async def start_oddsportal_snapshot_sync_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> OddsSourceSyncJobStartResult | str:
+        """Start an OddsPortal snapshot sync job and return the execution backend name."""
+        ...
+
+
 @dataclass(slots=True)
 class ValidationJobStartResult:
+    backend: str
+    queue_job_id: str | None = None
+
+
+@dataclass(slots=True)
+class OddsSourceSyncJobStartResult:
     backend: str
     queue_job_id: str | None = None
 
@@ -34,6 +50,14 @@ def validation_job_start_result(value: ValidationJobStartResult | str) -> Valida
     return ValidationJobStartResult(backend=str(value), queue_job_id=None)
 
 
+def odds_source_sync_job_start_result(
+    value: OddsSourceSyncJobStartResult | str,
+) -> OddsSourceSyncJobStartResult:
+    if isinstance(value, OddsSourceSyncJobStartResult):
+        return value
+    return OddsSourceSyncJobStartResult(backend=str(value), queue_job_id=None)
+
+
 @dataclass(slots=True)
 class ThreadValidationJobStarter:
     thread_starter: Callable[[str], None]
@@ -41,6 +65,19 @@ class ThreadValidationJobStarter:
     async def start_holdout_validation_job(self, job_id: str) -> ValidationJobStartResult:
         self.thread_starter(job_id)
         return ValidationJobStartResult(backend="thread", queue_job_id=None)
+
+
+@dataclass(slots=True)
+class ThreadOddsSourceSyncJobStarter:
+    thread_starter: Callable[[str, dict[str, Any]], None]
+
+    async def start_oddsportal_snapshot_sync_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> OddsSourceSyncJobStartResult:
+        self.thread_starter(job_id, _payload_with_job_id(payload, job_id))
+        return OddsSourceSyncJobStartResult(backend="thread", queue_job_id=None)
 
 
 @dataclass(slots=True)
@@ -69,6 +106,35 @@ class ArqValidationJobStarter:
 
 
 @dataclass(slots=True)
+class ArqOddsSourceSyncJobStarter:
+    settings: TaskQueueSettings
+    create_pool: ArqCreatePool | None = None
+
+    async def start_oddsportal_snapshot_sync_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> OddsSourceSyncJobStartResult:
+        redis = await self._create_pool()
+        queue_job_id = f"oddsportal-sync:{job_id}"
+        try:
+            await redis.enqueue_job(
+                "run_oddsportal_snapshot_sync_job",
+                _payload_with_job_id(payload, job_id),
+                _job_id=queue_job_id,
+                _queue_name=self.settings.arq_queue_name,
+            )
+        finally:
+            await _close_redis_pool(redis)
+        return OddsSourceSyncJobStartResult(backend="arq", queue_job_id=queue_job_id)
+
+    async def _create_pool(self) -> Any:
+        if self.create_pool:
+            return await self.create_pool(redis_settings_from_task_queue(self.settings), self.settings.arq_queue_name)
+        return await _create_arq_pool(redis_settings_from_task_queue(self.settings), self.settings.arq_queue_name)
+
+
+@dataclass(slots=True)
 class FallbackValidationJobStarter:
     primary: ValidationJobStarter
     fallback: ValidationJobStarter
@@ -81,6 +147,27 @@ class FallbackValidationJobStarter:
             return validation_job_start_result(await self.fallback.start_holdout_validation_job(job_id))
 
 
+@dataclass(slots=True)
+class FallbackOddsSourceSyncJobStarter:
+    primary: OddsSourceSyncJobStarter
+    fallback: OddsSourceSyncJobStarter
+
+    async def start_oddsportal_snapshot_sync_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> OddsSourceSyncJobStartResult:
+        try:
+            return odds_source_sync_job_start_result(
+                await self.primary.start_oddsportal_snapshot_sync_job(job_id, payload)
+            )
+        except Exception as exc:
+            logger.warning("ARQ enqueue failed for OddsPortal sync job %s; falling back to thread: %s", job_id, exc)
+            return odds_source_sync_job_start_result(
+                await self.fallback.start_oddsportal_snapshot_sync_job(job_id, _payload_with_job_id(payload, job_id))
+            )
+
+
 def build_validation_job_starter(*, thread_starter: Callable[[str], None]) -> ValidationJobStarter:
     settings = load_task_queue_settings()
     thread = ThreadValidationJobStarter(thread_starter=thread_starter)
@@ -89,6 +176,20 @@ def build_validation_job_starter(*, thread_starter: Callable[[str], None]) -> Va
     arq_starter = ArqValidationJobStarter(settings=settings)
     if settings.fallback_to_thread:
         return FallbackValidationJobStarter(primary=arq_starter, fallback=thread)
+    return arq_starter
+
+
+def build_odds_source_sync_job_starter(
+    *,
+    thread_starter: Callable[[str, dict[str, Any]], None],
+) -> OddsSourceSyncJobStarter:
+    settings = load_task_queue_settings()
+    thread = ThreadOddsSourceSyncJobStarter(thread_starter=thread_starter)
+    if settings.backend == "thread":
+        return thread
+    arq_starter = ArqOddsSourceSyncJobStarter(settings=settings)
+    if settings.fallback_to_thread:
+        return FallbackOddsSourceSyncJobStarter(primary=arq_starter, fallback=thread)
     return arq_starter
 
 
@@ -236,6 +337,10 @@ async def _create_arq_pool(redis_settings: Any, queue_name: str) -> Any:
             message="ARQ is configured as the task queue backend but the arq package is not installed.",
         ) from exc
     return await create_pool(redis_settings, default_queue_name=queue_name)
+
+
+def _payload_with_job_id(payload: dict[str, Any], job_id: str) -> dict[str, Any]:
+    return {**payload, "job_id": job_id}
 
 
 async def _close_redis_pool(redis: Any) -> None:

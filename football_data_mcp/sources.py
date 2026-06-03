@@ -29,7 +29,7 @@ import httpx
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
-from football_data_mcp import external_sources, learning_store, model_engine, snapshot_store
+from football_data_mcp import external_sources, learning_store, model_engine, oddsportal_source, snapshot_store
 from football_data_mcp.config import env_bool
 
 
@@ -7155,6 +7155,161 @@ async def sync_leisu_odds_snapshots(
     }
 
 
+_ODDSPORTAL_MARKET_REQUESTS = {
+    "h2h": (1, 2),
+    "asian_handicap": (5, 2),
+    "over_under": (2, 2),
+}
+
+
+async def sync_oddsportal_odds_snapshots(
+    *,
+    event_urls: list[str] | None = None,
+    markets: list[str] | None = None,
+    limit: int = 10,
+    force: bool = False,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """Fetch configured OddsPortal event pages and persist standard market snapshots.
+
+    主要阶段：
+    - 按手动 event URL 执行低频抓取，避免在 API 请求里扫全站；
+    - 每个 URL 写入 odds_source_sync_state，失败后可按 external_id 续跑；
+    - 所有成功市场都落到 market_snapshots，供走势、CLV 和模型读取。
+    """
+
+    started = time.time()
+    if not force and not env_bool("FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED", False):
+        return {
+            "tool": "sync_oddsportal_odds_snapshots",
+            "status": "disabled",
+            "provider": oddsportal_source.ODDSPORTAL_PROVIDER,
+            "job_id": job_id,
+            "saved_snapshot_count": 0,
+            "message": "Set FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED=true or pass force=true to run the experimental scraper.",
+            "policy": {
+                "rate_limit": "Manual/queued low-frequency use only; do not run as per-request scraping.",
+                "source_role": "Fallback odds source when Leisu odds access is blocked or unstable.",
+            },
+        }
+
+    bounded_urls = [url.strip() for url in (event_urls or []) if str(url or "").strip()]
+    bounded_urls = bounded_urls[: max(1, min(int(limit or 10), 20))]
+    selected_markets = [market for market in (markets or ["asian_handicap"]) if market in _ODDSPORTAL_MARKET_REQUESTS]
+    if not bounded_urls:
+        return {
+            "tool": "sync_oddsportal_odds_snapshots",
+            "status": "empty",
+            "provider": oddsportal_source.ODDSPORTAL_PROVIDER,
+            "job_id": job_id,
+            "saved_snapshot_count": 0,
+            "message": "No OddsPortal event URLs were provided.",
+        }
+    if not selected_markets:
+        return {
+            "tool": "sync_oddsportal_odds_snapshots",
+            "status": "empty",
+            "provider": oddsportal_source.ODDSPORTAL_PROVIDER,
+            "job_id": job_id,
+            "saved_snapshot_count": 0,
+            "message": "No supported markets were selected.",
+            "supported_markets": sorted(_ODDSPORTAL_MARKET_REQUESTS),
+        }
+
+    snapshots_to_save: list[snapshot_store.MarketSnapshot] = []
+    results = []
+    for event_url in bounded_urls:
+        snapshot_store.upsert_odds_source_sync_state(
+            source=oddsportal_source.ODDSPORTAL_PROVIDER,
+            scope_key="manual_event_url",
+            external_id=event_url,
+            status="running",
+            cursor={"markets": selected_markets, "job_id": job_id},
+        )
+        event_snapshots: list[snapshot_store.MarketSnapshot] = []
+        market_results = []
+        try:
+            for market_name in selected_markets:
+                betting_type_id, scope_id = _ODDSPORTAL_MARKET_REQUESTS[market_name]
+                result = await oddsportal_source.fetch_oddsportal_event_market_snapshots(
+                    event_url,
+                    betting_type_id=betting_type_id,
+                    scope_id=scope_id,
+                )
+                market_snapshots = result.get("snapshots") or []
+                event_snapshots.extend(market_snapshots)
+                market_results.append(
+                    {
+                        key: value
+                        for key, value in result.items()
+                        if key != "snapshots"
+                    }
+                )
+            snapshots_to_save.extend(event_snapshots)
+            snapshot_store.upsert_odds_source_sync_state(
+                source=oddsportal_source.ODDSPORTAL_PROVIDER,
+                scope_key="manual_event_url",
+                external_id=event_url,
+                status="succeeded" if event_snapshots else "empty",
+                snapshot_count=len(event_snapshots),
+                cursor={"markets": selected_markets, "market_results": market_results, "job_id": job_id},
+            )
+            results.append(
+                {
+                    "event_url": event_url,
+                    "status": "succeeded" if event_snapshots else "empty",
+                    "snapshot_count": len(event_snapshots),
+                    "markets": market_results,
+                }
+            )
+        except Exception as exc:
+            snapshot_store.upsert_odds_source_sync_state(
+                source=oddsportal_source.ODDSPORTAL_PROVIDER,
+                scope_key="manual_event_url",
+                external_id=event_url,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+                cursor={"markets": selected_markets, "job_id": job_id},
+            )
+            results.append(
+                {
+                    "event_url": event_url,
+                    "status": "failed",
+                    "snapshot_count": 0,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+
+    saved_count = snapshot_store.save_market_snapshots(snapshots_to_save)
+    failed_count = sum(1 for item in results if item.get("status") == "failed")
+    status = "ok" if saved_count > 0 and not failed_count else "partial" if snapshots_to_save or results else "empty"
+    if failed_count == len(results):
+        status = "error"
+    return {
+        "tool": "sync_oddsportal_odds_snapshots",
+        "status": status,
+        "provider": oddsportal_source.ODDSPORTAL_PROVIDER,
+        "job_id": job_id,
+        "requested_event_count": len(bounded_urls),
+        "requested_markets": selected_markets,
+        "generated_snapshot_count": len(snapshots_to_save),
+        "saved_snapshot_count": saved_count,
+        "failed_count": failed_count,
+        "events": results,
+        "snapshot_store": {
+            "db_path": snapshot_store.snapshot_db_path(),
+            "provider_counts": snapshot_store.provider_snapshot_counts(),
+            "sync_state": snapshot_store.odds_source_sync_summary(),
+        },
+        "latency_ms": round((time.time() - started) * 1000),
+        "policy": {
+            "storage_rule": "Only decrypted numeric OddsPortal markets are persisted as market_snapshots.",
+            "resume_rule": "Use odds_source_sync_state failed/empty rows to resume specific event URLs.",
+            "fallback_rule": "This source is a fallback for odds coverage; it does not replace fixture or score authority.",
+        },
+    }
+
+
 async def get_match_data_bundle(
     query: str,
     *,
@@ -9710,11 +9865,14 @@ async def run_auto_learning_cycle(
     analysis_timeout_seconds: float = 45.0,
     auto_settle: bool = True,
     include_market_snapshot_sync: bool = False,
+    include_oddsportal_snapshot_sync: bool = False,
     market_snapshot_window_minutes: int | None = 24 * 60,
     market_snapshot_limit: int = 80,
     market_snapshot_concurrency: int = 4,
     market_snapshot_require_quality_gate: bool = True,
     market_snapshot_requires_leisu_proxy: bool | None = None,
+    oddsportal_snapshot_limit: int = 20,
+    oddsportal_target_limit: int = 100,
     include_snapshot_reanalysis: bool = True,
     snapshot_reanalysis_limit: int = 20,
     snapshot_reanalysis_concurrency: int = 4,
@@ -9738,6 +9896,8 @@ async def run_auto_learning_cycle(
     )
     bounded_market_snapshot_limit = max(1, min(int(market_snapshot_limit or 80), 100))
     bounded_market_snapshot_concurrency = max(1, min(int(market_snapshot_concurrency or 4), 10))
+    bounded_oddsportal_snapshot_limit = max(1, min(int(oddsportal_snapshot_limit or 20), 20))
+    bounded_oddsportal_target_limit = max(1, min(int(oddsportal_target_limit or 100), 500))
     require_proxy_for_auto_snapshot = (
         _auto_leisu_snapshot_requires_proxy()
         if market_snapshot_requires_leisu_proxy is None
@@ -9760,6 +9920,13 @@ async def run_auto_learning_cycle(
         "formal_promoted_count": 0,
         "still_observation_count": 0,
         "failed_count": 0,
+    }
+    oddsportal_snapshot_sync: dict[str, Any] = {
+        "enabled": bool(include_oddsportal_snapshot_sync),
+        "provider": "oddsportal_scraper",
+        "status": "disabled" if not include_oddsportal_snapshot_sync else "not_started",
+        "saved_snapshot_count": 0,
+        "queued_event_count": 0,
     }
     lark_notification: dict[str, Any] = {
         "enabled": False,
@@ -9932,6 +10099,79 @@ async def run_auto_learning_cycle(
             }
             AUTO_LEARNING_STATE["last_market_snapshot_sync"] = market_snapshot_sync
 
+    if include_oddsportal_snapshot_sync:
+        AUTO_LEARNING_STATE["current_step"] = "oddsportal_snapshot_sync"
+        scraper_enabled = env_bool("FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED", False)
+        if not scraper_enabled:
+            oddsportal_snapshot_sync = {
+                "enabled": True,
+                "provider": "oddsportal_scraper",
+                "status": "skipped_scraper_disabled",
+                "saved_snapshot_count": 0,
+                "queued_event_count": 0,
+                "reason": "FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED=false",
+                "at_utc": now_utc().isoformat(),
+            }
+        else:
+            try:
+                from football_data_mcp.services.data_source_service import DataSourceService
+
+                data_source_service = DataSourceService()
+                odds_source_status = {}
+                try:
+                    odds_source_status_reader = getattr(data_source_service, "odds_source_status", None)
+                    if callable(odds_source_status_reader):
+                        odds_source_status = odds_source_status_reader()
+                except Exception as status_exc:
+                    odds_source_status = {
+                        "status": "error",
+                        "error": f"{type(status_exc).__name__}: {status_exc}",
+                    }
+                closure = odds_source_status.get("closure") if isinstance(odds_source_status, dict) else None
+                if isinstance(closure, dict) and bool(closure.get("production_ready")):
+                    oddsportal_snapshot_sync = {
+                        "enabled": True,
+                        "provider": "oddsportal_scraper",
+                        "status": "skipped_production_source_fresh",
+                        "saved_snapshot_count": 0,
+                        "queued_event_count": 0,
+                        "reason": closure.get("reason") or "已有新鲜生产赔率源；本轮无需兜底补采。",
+                        "closure": closure,
+                        "at_utc": now_utc().isoformat(),
+                    }
+                else:
+                    oddsportal_snapshot_sync = await data_source_service.start_oddsportal_sync(
+                        event_urls=[],
+                        markets=["asian_handicap"],
+                        limit=bounded_oddsportal_snapshot_limit,
+                        force=True,
+                        auto_discover=True,
+                        discovery_urls=None,
+                        target_limit=bounded_oddsportal_target_limit,
+                        start_background=True,
+                    )
+                    oddsportal_snapshot_sync = {
+                        "enabled": True,
+                        "provider": "oddsportal_scraper",
+                        "queued_event_count": len(
+                            (oddsportal_snapshot_sync.get("payload") or {}).get("event_urls") or []
+                        ),
+                        "closure": closure,
+                        "at_utc": now_utc().isoformat(),
+                        **oddsportal_snapshot_sync,
+                    }
+            except Exception as exc:
+                oddsportal_snapshot_sync = {
+                    "enabled": True,
+                    "provider": "oddsportal_scraper",
+                    "status": "error",
+                    "saved_snapshot_count": 0,
+                    "queued_event_count": 0,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "at_utc": now_utc().isoformat(),
+                }
+        AUTO_LEARNING_STATE["last_oddsportal_snapshot_sync"] = oddsportal_snapshot_sync
+
     if include_snapshot_reanalysis:
         AUTO_LEARNING_STATE["current_step"] = "snapshot_reanalysis"
         try:
@@ -9992,6 +10232,7 @@ async def run_auto_learning_cycle(
         "jingcai_parlay": parlay_summary,
         "analysis_market_snapshot_sync": asian_summary.get("analysis_market_snapshot_sync") or {},
         "market_snapshot_sync": market_snapshot_sync,
+        "oddsportal_snapshot_sync": oddsportal_snapshot_sync,
         "snapshot_reanalysis": snapshot_reanalysis,
         "lark_notification": lark_notification,
         "settlement": settlement,
@@ -16771,6 +17012,11 @@ def dashboard_snapshot(
         task_queue_health = task_queue_health_snapshot()
     except Exception as exc:
         task_queue_health = {"backend": "unknown", "status": "error", "detail": str(exc)}
+    try:
+        from football_data_mcp.services.data_source_service import DataSourceService
+        odds_source_status = DataSourceService().odds_source_status(db_path=market_db_path)
+    except Exception as exc:
+        odds_source_status = {"status": "error", "detail": str(exc), "sources": {}}
     program_capabilities = _dashboard_program_capabilities(
         prediction_kpis=prediction_kpis,
         strategy_state=strategy_state,
@@ -16829,6 +17075,7 @@ def dashboard_snapshot(
         "profitability_forecast": profitability_forecast,
         "program_capabilities": program_capabilities,
         "task_queue": task_queue_health,
+        "odds_source_status": odds_source_status,
         "market_breakdown": market_breakdown,
         "model_failure_diagnostics": model_failure_diagnostics,
         "latest_validation": latest_validation,
@@ -16888,11 +17135,14 @@ async def auto_learning_daemon(
     analysis_concurrency: int = 10,
     analysis_timeout_seconds: float = 45.0,
     include_market_snapshot_sync: bool = True,
+    include_oddsportal_snapshot_sync: bool = False,
     market_snapshot_window_minutes: int = 24 * 60,
     market_snapshot_limit: int = 80,
     market_snapshot_concurrency: int = 4,
     market_snapshot_require_quality_gate: bool = True,
     market_snapshot_requires_leisu_proxy: bool = True,
+    oddsportal_snapshot_limit: int = 20,
+    oddsportal_target_limit: int = 100,
     include_snapshot_reanalysis: bool = True,
     snapshot_reanalysis_limit: int = 20,
     snapshot_reanalysis_concurrency: int = 4,
@@ -16909,6 +17159,8 @@ async def auto_learning_daemon(
     bounded_market_snapshot_window = max(1, min(int(market_snapshot_window_minutes or 24 * 60), 48 * 60))
     bounded_market_snapshot_limit = max(1, min(int(market_snapshot_limit or 80), 100))
     bounded_market_snapshot_concurrency = max(1, min(int(market_snapshot_concurrency or 4), 10))
+    bounded_oddsportal_snapshot_limit = max(1, min(int(oddsportal_snapshot_limit or 20), 20))
+    bounded_oddsportal_target_limit = max(1, min(int(oddsportal_target_limit or 100), 500))
     bounded_snapshot_reanalysis_limit = max(1, min(int(snapshot_reanalysis_limit or 20), 100))
     bounded_snapshot_reanalysis_concurrency = max(1, min(int(snapshot_reanalysis_concurrency or 4), 10))
     bounded_cycle_timeout_seconds = max(1.0, min(float(cycle_timeout_seconds or 300.0), 3600.0))
@@ -16928,11 +17180,14 @@ async def auto_learning_daemon(
             "analysis_concurrency": bounded_analysis_concurrency,
             "analysis_timeout_seconds": bounded_analysis_timeout,
             "market_snapshot_sync_enabled": bool(include_market_snapshot_sync),
+            "oddsportal_snapshot_sync_enabled": bool(include_oddsportal_snapshot_sync),
             "market_snapshot_window_minutes": bounded_market_snapshot_window,
             "market_snapshot_limit": bounded_market_snapshot_limit,
             "market_snapshot_concurrency": bounded_market_snapshot_concurrency,
             "market_snapshot_require_quality_gate": bool(market_snapshot_require_quality_gate),
             "market_snapshot_requires_leisu_proxy": bool(market_snapshot_requires_leisu_proxy),
+            "oddsportal_snapshot_limit": bounded_oddsportal_snapshot_limit,
+            "oddsportal_target_limit": bounded_oddsportal_target_limit,
             "snapshot_reanalysis_enabled": bool(include_snapshot_reanalysis),
             "snapshot_reanalysis_limit": bounded_snapshot_reanalysis_limit,
             "snapshot_reanalysis_concurrency": bounded_snapshot_reanalysis_concurrency,
@@ -16986,11 +17241,14 @@ async def auto_learning_daemon(
                     analysis_concurrency=bounded_analysis_concurrency,
                     analysis_timeout_seconds=bounded_analysis_timeout,
                     include_market_snapshot_sync=include_market_snapshot_sync,
+                    include_oddsportal_snapshot_sync=include_oddsportal_snapshot_sync,
                     market_snapshot_window_minutes=bounded_market_snapshot_window,
                     market_snapshot_limit=bounded_market_snapshot_limit,
                     market_snapshot_concurrency=bounded_market_snapshot_concurrency,
                     market_snapshot_require_quality_gate=market_snapshot_require_quality_gate,
                     market_snapshot_requires_leisu_proxy=market_snapshot_requires_leisu_proxy,
+                    oddsportal_snapshot_limit=bounded_oddsportal_snapshot_limit,
+                    oddsportal_target_limit=bounded_oddsportal_target_limit,
                     include_snapshot_reanalysis=include_snapshot_reanalysis,
                     snapshot_reanalysis_limit=bounded_snapshot_reanalysis_limit,
                     snapshot_reanalysis_concurrency=bounded_snapshot_reanalysis_concurrency,
@@ -17029,6 +17287,7 @@ async def auto_learning_daemon(
                 "parlay_record_count": (result.get("jingcai_parlay") or {}).get("record_count"),
                 "analysis_market_snapshot_sync": result.get("analysis_market_snapshot_sync"),
                 "market_snapshot_sync": result.get("market_snapshot_sync"),
+                "oddsportal_snapshot_sync": result.get("oddsportal_snapshot_sync"),
                 "snapshot_reanalysis": result.get("snapshot_reanalysis"),
                 "settled_count": ((result.get("settlement") or {}).get("settlement") or {}).get("settled_count"),
                 "shadow_settled_count": ((result.get("settlement") or {}).get("shadow_settlement") or {}).get("settled_count"),

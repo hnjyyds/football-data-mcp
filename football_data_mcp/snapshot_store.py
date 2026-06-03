@@ -99,6 +99,35 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_odds_source_sync_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS odds_source_sync_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            snapshot_count INTEGER NOT NULL DEFAULT 0,
+            cursor_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT NOT NULL DEFAULT '',
+            last_started_at_utc TEXT,
+            last_finished_at_utc TEXT,
+            updated_at_utc TEXT NOT NULL,
+            UNIQUE(source, scope_key, external_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_odds_source_sync_state_source_status
+        ON odds_source_sync_state(source, status, updated_at_utc)
+        """
+    )
+    conn.commit()
+
+
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
@@ -1188,6 +1217,144 @@ def provider_snapshot_counts(*, db_path: str | None = None) -> dict[str, Any]:
             """
         ).fetchall()
     return {row["provider"]: dict(row) for row in rows}
+
+
+def upsert_odds_source_sync_state(
+    *,
+    source: str,
+    scope_key: str,
+    external_id: str,
+    status: str,
+    snapshot_count: int = 0,
+    cursor: dict[str, Any] | None = None,
+    error: str = "",
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    source = str(source or "").strip()
+    scope_key = str(scope_key or "").strip()
+    external_id = str(external_id or "").strip()
+    cursor_json = json.dumps(cursor or {}, ensure_ascii=False, sort_keys=True)
+    finished_at = now if status in {"succeeded", "failed", "skipped", "empty"} else None
+    with _connect(db_path) as conn:
+        ensure_schema(conn)
+        ensure_odds_source_sync_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO odds_source_sync_state (
+                source, scope_key, external_id, status, attempt_count, snapshot_count,
+                cursor_json, error, last_started_at_utc, last_finished_at_utc, updated_at_utc
+            )
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source, scope_key, external_id)
+            DO UPDATE SET
+                status = excluded.status,
+                attempt_count = odds_source_sync_state.attempt_count + 1,
+                snapshot_count = excluded.snapshot_count,
+                cursor_json = excluded.cursor_json,
+                error = excluded.error,
+                last_started_at_utc = excluded.last_started_at_utc,
+                last_finished_at_utc = excluded.last_finished_at_utc,
+                updated_at_utc = excluded.updated_at_utc
+            """,
+            (
+                source,
+                scope_key,
+                external_id,
+                status,
+                int(snapshot_count or 0),
+                cursor_json,
+                str(error or ""),
+                now,
+                finished_at,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT * FROM odds_source_sync_state
+            WHERE source = ? AND scope_key = ? AND external_id = ?
+            """,
+            (source, scope_key, external_id),
+        ).fetchone()
+    return _sync_state_row_dict(row)
+
+
+def list_odds_source_sync_state(
+    *,
+    source: str | None = None,
+    status: str | None = None,
+    db_path: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    predicates = []
+    params: list[Any] = []
+    if source:
+        predicates.append("source = ?")
+        params.append(str(source))
+    if status:
+        predicates.append("status = ?")
+        params.append(str(status))
+    where = f"WHERE {' AND '.join(predicates)}" if predicates else ""
+    params.append(max(1, min(int(limit or 100), 1000)))
+    with _connect(db_path) as conn:
+        ensure_schema(conn)
+        ensure_odds_source_sync_schema(conn)
+        rows = conn.execute(
+            f"""
+            SELECT * FROM odds_source_sync_state
+            {where}
+            ORDER BY updated_at_utc DESC, id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    return [_sync_state_row_dict(row) for row in rows]
+
+
+def odds_source_sync_summary(*, db_path: str | None = None) -> dict[str, Any]:
+    rows = list_odds_source_sync_state(db_path=db_path, limit=1000)
+    by_status: dict[str, int] = {}
+    by_source: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        row_status = str(row.get("status") or "unknown")
+        row_source = str(row.get("source") or "unknown")
+        by_status[row_status] = by_status.get(row_status, 0) + 1
+        source_item = by_source.setdefault(
+            row_source,
+            {
+                "source": row_source,
+                "total_count": 0,
+                "by_status": {},
+                "latest_status": row_status,
+                "latest_updated_at_utc": row.get("updated_at_utc"),
+                "snapshot_count": 0,
+            },
+        )
+        source_item["total_count"] += 1
+        source_item["by_status"][row_status] = source_item["by_status"].get(row_status, 0) + 1
+        source_item["snapshot_count"] += int(row.get("snapshot_count") or 0)
+        if str(row.get("updated_at_utc") or "") >= str(source_item.get("latest_updated_at_utc") or ""):
+            source_item["latest_status"] = row_status
+            source_item["latest_updated_at_utc"] = row.get("updated_at_utc")
+    return {
+        "total_count": len(rows),
+        "by_status": by_status,
+        "by_source": by_source,
+        "recent": rows[:20],
+    }
+
+
+def _sync_state_row_dict(row: Any) -> dict[str, Any]:
+    if row is None:
+        return {}
+    item = dict(row)
+    try:
+        item["cursor"] = json.loads(item.pop("cursor_json") or "{}")
+    except (TypeError, ValueError):
+        item["cursor"] = {}
+    return item
 
 
 def market_snapshot_summary(*, db_path: str | None = None, latest_event_limit: int = 8) -> dict[str, Any]:

@@ -204,6 +204,74 @@ describe("fetchDashboardSnapshot", () => {
         validation_job_stale_after_seconds: 3900,
         detail: "ARQ worker 已上报健康检查。",
       },
+      odds_source_status: {
+        status: "ok",
+        closure: {
+          active_source: "oddsportal_scraper",
+          production_ready: true,
+          reason: "雷速不可用或过期，当前使用独立爬虫赔率源兜底。",
+          checked_at_utc: "2026-06-02T05:50:00+00:00",
+          fresh_after_hours: 6,
+          ordered_sources: [
+            {
+              source: "leisu",
+              operational_status: "stale",
+              freshness_status: "stale",
+              snapshot_count: 20,
+              latest_fetched_at_utc: "2026-05-29T04:38:30+00:00",
+              usable_for_analysis: false,
+            },
+            {
+              source: "oddsportal_scraper",
+              operational_status: "available",
+              freshness_status: "fresh",
+              snapshot_count: 8,
+              latest_fetched_at_utc: "2026-06-02T05:30:00+00:00",
+              usable_for_analysis: true,
+            },
+          ],
+        },
+        sources: {
+          oddsportal_scraper: {
+            status: "succeeded",
+            role: "fallback crawler",
+            snapshot_count: 8,
+            operational_status: "available",
+            latest_fetched_at_utc: "2026-06-02T05:30:00+00:00",
+            fresh_after_hours: 6,
+            freshness_status: "fresh",
+            age_hours: 0.333,
+            age_seconds: 1200,
+            usable_for_analysis: true,
+            retryable_url_count: 0,
+            queued_count: 0,
+            running_count: 0,
+            failed_count: 0,
+            empty_count: 0,
+            scraper_enabled: true,
+            auto_sync_enabled: true,
+            discovery_ready: true,
+            configured_discovery_url_count: 1,
+            suggested_discovery_url_count: 1,
+            effective_discovery_url_count: 1,
+            discovery_urls: ["https://www.oddsportal.com/football/japan/j1-league/"],
+            suggested_discovery_urls: ["https://www.oddsportal.com/football/japan/j1-league/"],
+            effective_discovery_urls: ["https://www.oddsportal.com/football/japan/j1-league/"],
+            open_target_count: 3,
+            analysis_target_count: 0,
+            discovery_target_count: 3,
+            discovery_target_source: "open_prediction",
+            last_error: null,
+            next_action: "已有 fallback 快照；继续按需补充新比赛 URL。",
+            sync: {
+              latest_status: "succeeded",
+              attempt_count: 2,
+              snapshot_count: 8,
+              latest_finished_at_utc: "2026-06-02T05:30:00+00:00",
+            },
+          },
+        },
+      },
       validation_job: {
         job_id: "holdout-1",
         method: "holdout_validation_job_v1",
@@ -271,6 +339,12 @@ describe("fetchDashboardSnapshot", () => {
     expect(data.program_capabilities?.summary.ready_count).toBe(1);
     expect(data.program_capabilities?.capabilities[0].key).toBe("continuous_prediction");
     expect(data.task_queue?.backend).toBe("arq");
+    expect(data.odds_source_status?.sources.oddsportal_scraper.retryable_url_count).toBe(0);
+    expect(data.odds_source_status?.sources.oddsportal_scraper.discovery_ready).toBe(true);
+    expect(data.odds_source_status?.sources.oddsportal_scraper.open_target_count).toBe(3);
+    expect(data.odds_source_status?.sources.oddsportal_scraper.discovery_target_source).toBe("open_prediction");
+    expect(data.odds_source_status?.closure?.active_source).toBe("oddsportal_scraper");
+    expect(data.odds_source_status?.closure?.production_ready).toBe(true);
     expect(data.validation_job?.progress.completed_leagues).toBe(1);
     expect(data.validation_job?.queue_backend).toBe("arq");
     expect(data.validation_job?.queue_job_id).toBe("holdout-validation:holdout-1");
@@ -278,6 +352,28 @@ describe("fetchDashboardSnapshot", () => {
     expect(data.validation_job?.attempt_count).toBe(2);
     expect(data.validation_job?.failure_summary?.recoverable_count).toBe(1);
     expect(data.validation_job?.events[0].event_type).toBe("job_claimed");
+  });
+
+  it("rejects malformed odds source operational fields", async () => {
+    const bad = {
+      ...validSnapshot,
+      odds_source_status: {
+        status: "ok",
+        sources: {
+          oddsportal_scraper: {
+            status: "failed",
+            role: "fallback crawler",
+            snapshot_count: 8,
+            operational_status: "retryable",
+            retryable_url_count: "1",
+            discovery_ready: "true",
+            next_action: "调用 resume_failed=true 续跑。",
+          },
+        },
+      },
+    };
+    mockFetchOnce({ ok: true, status: 200, body: bad });
+    await expect(fetchDashboardSnapshot()).rejects.toThrow(/retryable_url_count/);
   });
 
   it("rejects malformed auto_learning_state (must be object)", async () => {

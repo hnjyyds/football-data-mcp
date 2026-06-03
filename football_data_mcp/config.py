@@ -76,6 +76,9 @@ class AutoLearningSettings:
     include_market_snapshot_sync: bool = field(
         default_factory=lambda: env_bool("FOOTBALL_DATA_AUTO_SYNC_LEISU_ODDS", True)
     )
+    include_oddsportal_snapshot_sync: bool = field(
+        default_factory=lambda: env_bool("FOOTBALL_DATA_AUTO_SYNC_ODDSPORTAL_ODDS", True)
+    )
     market_snapshot_window_minutes: int = field(
         default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES", 1440)
     )
@@ -90,6 +93,12 @@ class AutoLearningSettings:
     )
     market_snapshot_requires_leisu_proxy: bool = field(
         default_factory=lambda: env_bool("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRES_LEISU_PROXY", True)
+    )
+    oddsportal_snapshot_limit: int = field(
+        default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_SNAPSHOT_LIMIT", 20)
+    )
+    oddsportal_target_limit: int = field(
+        default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_TARGET_LIMIT", 100)
     )
     include_snapshot_reanalysis: bool = field(
         default_factory=lambda: env_bool("FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REANALYSIS", True)
@@ -119,11 +128,14 @@ class AutoLearningSettings:
             "analysis_timeout_seconds": self.analysis_timeout_seconds,
             "shadow_prediction_limit": self.shadow_prediction_limit,
             "include_market_snapshot_sync": self.include_market_snapshot_sync,
+            "include_oddsportal_snapshot_sync": self.include_oddsportal_snapshot_sync,
             "market_snapshot_window_minutes": self.market_snapshot_window_minutes,
             "market_snapshot_limit": self.market_snapshot_limit,
             "market_snapshot_concurrency": self.market_snapshot_concurrency,
             "market_snapshot_require_quality_gate": self.market_snapshot_require_quality_gate,
             "market_snapshot_requires_leisu_proxy": self.market_snapshot_requires_leisu_proxy,
+            "oddsportal_snapshot_limit": self.oddsportal_snapshot_limit,
+            "oddsportal_target_limit": self.oddsportal_target_limit,
             "include_snapshot_reanalysis": self.include_snapshot_reanalysis,
             "snapshot_reanalysis_limit": self.snapshot_reanalysis_limit,
             "snapshot_reanalysis_concurrency": self.snapshot_reanalysis_concurrency,

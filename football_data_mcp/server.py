@@ -244,6 +244,28 @@ async def sync_leisu_odds_snapshots(
 
 
 @mcp.tool()
+async def sync_oddsportal_odds_snapshots(
+    event_urls: list[str] | None = None,
+    markets: list[str] | None = None,
+    limit: int = 10,
+    force: bool = False,
+) -> dict[str, Any]:
+    """
+    Persist OddsPortal event odds into the shared snapshot store.
+
+    This is an experimental fallback source for cases where Leisu odds are
+    blocked or unstable. It accepts explicit event URLs and writes status for
+    each URL so failed runs can be resumed without scanning from the beginning.
+    """
+    return await sources.sync_oddsportal_odds_snapshots(
+        event_urls=event_urls or [],
+        markets=markets,
+        limit=limit or 10,
+        force=force,
+    )
+
+
+@mcp.tool()
 async def run_auto_learning_cycle(
     query: str = "",
     league: str = "",
@@ -261,10 +283,13 @@ async def run_auto_learning_cycle(
     analysis_concurrency: int = 10,
     analysis_timeout_seconds: float = 45,
     include_market_snapshot_sync: bool = True,
+    include_oddsportal_snapshot_sync: bool = True,
     market_snapshot_limit: int = 80,
     market_snapshot_concurrency: int = 4,
     market_snapshot_window_minutes: int = 24 * 60,
     market_snapshot_requires_leisu_proxy: bool = True,
+    oddsportal_snapshot_limit: int = 20,
+    oddsportal_target_limit: int = 100,
     include_snapshot_reanalysis: bool = True,
     snapshot_reanalysis_limit: int = 20,
     snapshot_reanalysis_concurrency: int = 4,
@@ -295,10 +320,13 @@ async def run_auto_learning_cycle(
         analysis_concurrency=analysis_concurrency or 10,
         analysis_timeout_seconds=analysis_timeout_seconds or 45,
         include_market_snapshot_sync=include_market_snapshot_sync,
+        include_oddsportal_snapshot_sync=include_oddsportal_snapshot_sync,
         market_snapshot_limit=market_snapshot_limit or 80,
         market_snapshot_concurrency=market_snapshot_concurrency or 4,
         market_snapshot_window_minutes=market_snapshot_window_minutes or (24 * 60),
         market_snapshot_requires_leisu_proxy=market_snapshot_requires_leisu_proxy,
+        oddsportal_snapshot_limit=oddsportal_snapshot_limit or 20,
+        oddsportal_target_limit=oddsportal_target_limit or 100,
         include_snapshot_reanalysis=include_snapshot_reanalysis,
         snapshot_reanalysis_limit=snapshot_reanalysis_limit or 20,
         snapshot_reanalysis_concurrency=snapshot_reanalysis_concurrency or 4,

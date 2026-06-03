@@ -140,6 +140,91 @@ function expectValidationExecutionHealth(value: unknown, path: string, issues: I
   }
 }
 
+function expectOddsSourceStatus(value: unknown, path: string, issues: Issues): void {
+  if (!expectObject(value, path, issues)) return;
+  expectField(value, "status", "string", path, issues);
+  if ("closure" in value && value.closure !== undefined && value.closure !== null) {
+    if (expectObject(value.closure, `${path}.closure`, issues)) {
+      expectOptionalField(value.closure, "active_source", "string", `${path}.closure`, issues, { nullable: true });
+      expectField(value.closure, "production_ready", "boolean", `${path}.closure`, issues);
+      expectField(value.closure, "reason", "string", `${path}.closure`, issues);
+      expectField(value.closure, "checked_at_utc", "string", `${path}.closure`, issues);
+      expectField(value.closure, "fresh_after_hours", "number", `${path}.closure`, issues);
+      if (!Array.isArray(value.closure.ordered_sources)) {
+        issues.push(`${path}.closure.ordered_sources must be an array`);
+      } else {
+        value.closure.ordered_sources.forEach((entry, index) => {
+          const entryPath = `${path}.closure.ordered_sources[${index}]`;
+          if (!expectObject(entry, entryPath, issues)) return;
+          expectField(entry, "source", "string", entryPath, issues);
+          expectField(entry, "snapshot_count", "number", entryPath, issues);
+          expectField(entry, "usable_for_analysis", "boolean", entryPath, issues);
+          expectOptionalField(entry, "operational_status", "string", entryPath, issues, { nullable: true });
+          expectOptionalField(entry, "freshness_status", "string", entryPath, issues, { nullable: true });
+          expectOptionalField(entry, "latest_fetched_at_utc", "string", entryPath, issues, { nullable: true });
+        });
+      }
+    }
+  }
+  if (!("sources" in value)) {
+    issues.push(`${path}.sources is required`);
+    return;
+  }
+  if (!expectObject(value.sources, `${path}.sources`, issues)) return;
+  Object.entries(value.sources).forEach(([sourceKey, sourceValue]) => {
+    const sourcePath = `${path}.sources.${sourceKey}`;
+    if (!expectObject(sourceValue, sourcePath, issues)) return;
+    expectField(sourceValue, "status", "string", sourcePath, issues);
+    expectField(sourceValue, "snapshot_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "role", "string", sourcePath, issues);
+    expectOptionalField(sourceValue, "operational_status", "string", sourcePath, issues);
+    expectOptionalField(sourceValue, "latest_fetched_at_utc", "string", sourcePath, issues, { nullable: true });
+    expectOptionalField(sourceValue, "fresh_after_hours", "number", sourcePath, issues, { nullable: true });
+    expectOptionalField(sourceValue, "freshness_status", "string", sourcePath, issues, { nullable: true });
+    expectOptionalField(sourceValue, "age_hours", "number", sourcePath, issues, { nullable: true });
+    expectOptionalField(sourceValue, "age_seconds", "number", sourcePath, issues, { nullable: true });
+    expectOptionalField(sourceValue, "usable_for_analysis", "boolean", sourcePath, issues);
+    expectOptionalField(sourceValue, "retryable_url_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "queued_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "running_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "failed_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "empty_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "scraper_enabled", "boolean", sourcePath, issues);
+    expectOptionalField(sourceValue, "auto_sync_enabled", "boolean", sourcePath, issues);
+    expectOptionalField(sourceValue, "discovery_ready", "boolean", sourcePath, issues);
+    expectOptionalField(sourceValue, "configured_discovery_url_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "suggested_discovery_url_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "effective_discovery_url_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "open_target_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "analysis_target_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "discovery_target_count", "number", sourcePath, issues);
+    expectOptionalField(sourceValue, "discovery_target_source", "string", sourcePath, issues);
+    for (const urlField of ["discovery_urls", "suggested_discovery_urls", "effective_discovery_urls"]) {
+      const urls = sourceValue[urlField];
+      if (urls === undefined) continue;
+      if (!Array.isArray(urls)) {
+        issues.push(`${sourcePath}.${urlField} must be an array`);
+      } else {
+        urls.forEach((url, i) => {
+          if (typeof url !== "string") issues.push(`${sourcePath}.${urlField}[${i}] must be string, got ${typeof url}`);
+        });
+      }
+    }
+    expectOptionalField(sourceValue, "last_error", "string", sourcePath, issues, { nullable: true });
+    expectOptionalField(sourceValue, "next_action", "string", sourcePath, issues);
+    if ("sync" in sourceValue && sourceValue.sync !== undefined && sourceValue.sync !== null) {
+      if (expectObject(sourceValue.sync, `${sourcePath}.sync`, issues)) {
+        expectOptionalField(sourceValue.sync, "latest_status", "string", `${sourcePath}.sync`, issues, { nullable: true });
+        expectOptionalField(sourceValue.sync, "attempt_count", "number", `${sourcePath}.sync`, issues);
+        expectOptionalField(sourceValue.sync, "snapshot_count", "number", `${sourcePath}.sync`, issues);
+        expectOptionalField(sourceValue.sync, "latest_started_at_utc", "string", `${sourcePath}.sync`, issues, { nullable: true });
+        expectOptionalField(sourceValue.sync, "latest_finished_at_utc", "string", `${sourcePath}.sync`, issues, { nullable: true });
+        expectOptionalField(sourceValue.sync, "latest_error", "string", `${sourcePath}.sync`, issues, { nullable: true });
+      }
+    }
+  });
+}
+
 function validateSnapshot(value: unknown): asserts value is DashboardSnapshot {
   const issues: Issues = [];
   if (!expectObject(value, "root", issues)) throw new SchemaError("root", issues.join("; "));
@@ -252,6 +337,10 @@ function validateSnapshot(value: unknown): asserts value is DashboardSnapshot {
       expectOptionalField(root.task_queue, "detail", "string", "root.task_queue", issues);
       expectOptionalField(root.task_queue, "validation_job_stale_after_seconds", "number", "root.task_queue", issues);
     }
+  }
+
+  if ("odds_source_status" in root && root.odds_source_status !== undefined) {
+    expectOddsSourceStatus(root.odds_source_status, "root.odds_source_status", issues);
   }
 
   if ("dashboard_cache" in root && root.dashboard_cache !== undefined) {

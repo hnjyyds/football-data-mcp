@@ -1417,6 +1417,85 @@ export interface TaskQueueHealth {
   validation_job_stale_after_seconds?: number;
 }
 
+export interface OddsSourceSyncState {
+  latest_status?: string | null;
+  attempt_count?: number;
+  snapshot_count?: number;
+  latest_started_at_utc?: string | null;
+  latest_finished_at_utc?: string | null;
+  latest_error?: string | null;
+  [key: string]: unknown;
+}
+
+export interface OddsSourceStatusEntry {
+  status: string;
+  role?: string;
+  snapshot_count: number;
+  operational_status?: string;
+  latest_fetched_at_utc?: string | null;
+  fresh_after_hours?: number | null;
+  freshness_status?: string | null;
+  age_hours?: number | null;
+  age_seconds?: number | null;
+  usable_for_analysis?: boolean;
+  retryable_url_count?: number;
+  queued_count?: number;
+  running_count?: number;
+  failed_count?: number;
+  empty_count?: number;
+  scraper_enabled?: boolean;
+  auto_sync_enabled?: boolean;
+  discovery_ready?: boolean;
+  configured_discovery_url_count?: number;
+  suggested_discovery_url_count?: number;
+  effective_discovery_url_count?: number;
+  discovery_urls?: string[];
+  suggested_discovery_urls?: string[];
+  effective_discovery_urls?: string[];
+  open_target_count?: number;
+  analysis_target_count?: number;
+  discovery_target_count?: number;
+  discovery_target_source?: string;
+  last_error?: string | null;
+  next_action?: string;
+  sync?: OddsSourceSyncState;
+}
+
+export interface OddsSourceClosureEntry {
+  source: string;
+  operational_status?: string | null;
+  freshness_status?: string | null;
+  snapshot_count: number;
+  latest_fetched_at_utc?: string | null;
+  usable_for_analysis: boolean;
+}
+
+export interface OddsSourceClosure {
+  active_source?: string | null;
+  production_ready: boolean;
+  reason: string;
+  checked_at_utc: string;
+  fresh_after_hours: number;
+  ordered_sources: OddsSourceClosureEntry[];
+  [key: string]: unknown;
+}
+
+export interface OddsSourceStatus {
+  status: string;
+  snapshot_summary?: MarketSnapshotSummary | Record<string, unknown>;
+  provider_counts?: Record<string, unknown>;
+  sync_state?: Record<string, unknown>;
+  sources: Record<string, OddsSourceStatusEntry>;
+  closure?: OddsSourceClosure | null;
+  policy?: {
+    read_path?: string;
+    fallback_rule?: string;
+    resume_rule?: string;
+    freshness_rule?: string;
+    [key: string]: unknown;
+  };
+}
+
 export interface DashboardSnapshot {
   status: string;
   tool: string;
@@ -1454,6 +1533,7 @@ export interface DashboardSnapshot {
   profitability_forecast?: DashboardProfitabilityForecast;
   program_capabilities?: DashboardProgramCapabilities;
   task_queue?: TaskQueueHealth;
+  odds_source_status?: OddsSourceStatus;
   market_breakdown?: DashboardMarketBreakdown;
   model_failure_diagnostics?: DashboardModelFailureDiagnostics;
   latest_validation?: LatestValidation | null;

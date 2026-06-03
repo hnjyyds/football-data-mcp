@@ -826,6 +826,112 @@ def test_auto_learning_cycle_skips_background_leisu_sync_without_authorized_prox
     assert sources_module.AUTO_LEARNING_STATE["last_market_snapshot_sync"]["status"] == "skipped_proxy_required"
 
 
+def test_auto_learning_cycle_can_queue_oddsportal_fallback_snapshot_sync(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    calls = []
+    monkeypatch.setenv("FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED", "true")
+
+    async def fake_shortlist_value_matches(**kwargs):
+        return {
+            "status": "ok",
+            "tool": "shortlist_value_matches",
+            "mode": kwargs["mode"],
+            "target_market": kwargs["target_market"],
+            "picks": [],
+            "rejected": [],
+        }
+
+    class FakeDataSourceService:
+        async def start_oddsportal_sync(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "status": "queued",
+                "provider": "oddsportal_scraper",
+                "job_id": "oddsportal-test",
+                "payload": {
+                    "event_urls": ["https://www.oddsportal.com/football/test/#abc"],
+                    "auto_discover": True,
+                },
+            }
+
+    from football_data_mcp.services import data_source_service as data_source_service_module
+
+    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
+    monkeypatch.setattr(data_source_service_module, "DataSourceService", FakeDataSourceService)
+
+    result = asyncio.run(
+        sources_module.run_auto_learning_cycle(
+            db_path=db_path,
+            auto_settle=False,
+            include_market_snapshot_sync=False,
+            include_oddsportal_snapshot_sync=True,
+            oddsportal_snapshot_limit=2,
+            oddsportal_target_limit=25,
+            include_jingcai_parlay=False,
+            include_snapshot_reanalysis=False,
+        )
+    )
+
+    assert calls[0]["auto_discover"] is True
+    assert calls[0]["limit"] == 2
+    assert calls[0]["target_limit"] == 25
+    assert calls[0]["start_background"] is True
+    assert result["oddsportal_snapshot_sync"]["status"] == "queued"
+    assert result["oddsportal_snapshot_sync"]["provider"] == "oddsportal_scraper"
+    assert sources_module.AUTO_LEARNING_STATE["last_oddsportal_snapshot_sync"]["status"] == "queued"
+
+
+def test_auto_learning_cycle_skips_oddsportal_when_production_odds_source_is_fresh(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    calls = []
+    monkeypatch.setenv("FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED", "true")
+
+    async def fake_shortlist_value_matches(**kwargs):
+        return {
+            "status": "ok",
+            "tool": "shortlist_value_matches",
+            "mode": kwargs["mode"],
+            "target_market": kwargs["target_market"],
+            "picks": [],
+            "rejected": [],
+        }
+
+    class FakeDataSourceService:
+        def odds_source_status(self):
+            return {
+                "closure": {
+                    "active_source": "leisu",
+                    "production_ready": True,
+                    "reason": "雷速主赔率源新鲜可用。",
+                }
+            }
+
+        async def start_oddsportal_sync(self, **kwargs):
+            calls.append(kwargs)
+            return {"status": "queued"}
+
+    from football_data_mcp.services import data_source_service as data_source_service_module
+
+    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
+    monkeypatch.setattr(data_source_service_module, "DataSourceService", FakeDataSourceService)
+
+    result = asyncio.run(
+        sources_module.run_auto_learning_cycle(
+            db_path=db_path,
+            auto_settle=False,
+            include_market_snapshot_sync=False,
+            include_oddsportal_snapshot_sync=True,
+            include_jingcai_parlay=False,
+            include_snapshot_reanalysis=False,
+        )
+    )
+
+    assert calls == []
+    assert result["oddsportal_snapshot_sync"]["status"] == "skipped_production_source_fresh"
+    assert result["oddsportal_snapshot_sync"]["queued_event_count"] == 0
+    assert result["oddsportal_snapshot_sync"]["reason"] == "雷速主赔率源新鲜可用。"
+
+
 def test_auto_learning_cycle_records_observation_when_candidate_is_not_publishable(monkeypatch, tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
 
@@ -6161,6 +6267,9 @@ def test_auto_learning_daemon_passes_background_sampling_windows(monkeypatch):
                 market_snapshot_window_minutes=12 * 60,
                 market_snapshot_limit=16,
                 market_snapshot_concurrency=3,
+                include_oddsportal_snapshot_sync=True,
+                oddsportal_snapshot_limit=4,
+                oddsportal_target_limit=40,
                 analysis_timeout_seconds=30,
             )
         )
@@ -6176,12 +6285,18 @@ def test_auto_learning_daemon_passes_background_sampling_windows(monkeypatch):
     assert calls[0]["market_snapshot_limit"] == 16
     assert calls[0]["market_snapshot_concurrency"] == 3
     assert calls[0]["market_snapshot_requires_leisu_proxy"] is True
+    assert calls[0]["include_oddsportal_snapshot_sync"] is True
+    assert calls[0]["oddsportal_snapshot_limit"] == 4
+    assert calls[0]["oddsportal_target_limit"] == 40
     assert sources_module.AUTO_LEARNING_STATE["asian_window_minutes"] == 24 * 60
     assert sources_module.AUTO_LEARNING_STATE["parlay_window_minutes"] == 24 * 60
     assert sources_module.AUTO_LEARNING_STATE["learning_observation_limit"] == 40
     assert sources_module.AUTO_LEARNING_STATE["market_snapshot_sync_enabled"] is True
     assert sources_module.AUTO_LEARNING_STATE["market_snapshot_limit"] == 16
     assert sources_module.AUTO_LEARNING_STATE["market_snapshot_requires_leisu_proxy"] is True
+    assert sources_module.AUTO_LEARNING_STATE["oddsportal_snapshot_sync_enabled"] is True
+    assert sources_module.AUTO_LEARNING_STATE["oddsportal_snapshot_limit"] == 4
+    assert sources_module.AUTO_LEARNING_STATE["oddsportal_target_limit"] == 40
 
 
 def test_auto_learning_daemon_defaults_to_near_kickoff_predictions_and_wide_snapshot_collection(monkeypatch):

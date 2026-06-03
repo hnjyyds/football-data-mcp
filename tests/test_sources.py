@@ -1676,6 +1676,9 @@ def test_auto_learning_config_from_env_supports_background_sampling_windows(monk
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY", "12")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS", "30")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_SHADOW_PREDICTION_LIMIT", "120")
+    monkeypatch.setenv("FOOTBALL_DATA_AUTO_SYNC_ODDSPORTAL_ODDS", "true")
+    monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_SNAPSHOT_LIMIT", "7")
+    monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_TARGET_LIMIT", "77")
 
     config = server._auto_learning_config_from_env()
 
@@ -1691,6 +1694,9 @@ def test_auto_learning_config_from_env_supports_background_sampling_windows(monk
     assert config["analysis_concurrency"] == 12
     assert config["analysis_timeout_seconds"] == 30
     assert config["shadow_prediction_limit"] == 120
+    assert config["include_oddsportal_snapshot_sync"] is True
+    assert config["oddsportal_snapshot_limit"] == 7
+    assert config["oddsportal_target_limit"] == 77
 
 
 def test_auto_learning_config_separates_prediction_window_from_snapshot_collection(monkeypatch):
@@ -1710,6 +1716,9 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
         "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY",
         "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS",
         "FOOTBALL_DATA_AUTO_LEARNING_SHADOW_PREDICTION_LIMIT",
+        "FOOTBALL_DATA_AUTO_SYNC_ODDSPORTAL_ODDS",
+        "FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_SNAPSHOT_LIMIT",
+        "FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_TARGET_LIMIT",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -1723,6 +1732,9 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
     assert config["parlay_window_minutes"] == 10
     assert config["market_snapshot_window_minutes"] == 24 * 60
     assert config["market_snapshot_limit"] == 80
+    assert config["include_oddsportal_snapshot_sync"] is True
+    assert config["oddsportal_snapshot_limit"] == 20
+    assert config["oddsportal_target_limit"] == 100
     assert config["market_snapshot_requires_leisu_proxy"] is True
     assert config["learning_observation_limit"] == 30
     assert config["analysis_candidate_limit"] == 80
@@ -1743,6 +1755,10 @@ def test_docker_compose_auto_learning_defaults_keep_snapshot_history_wide():
     assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES:-1440" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_LIMIT:-80" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_REQUIRES_LEISU_PROXY:-true" in compose_text
+    assert "FOOTBALL_DATA_AUTO_SYNC_ODDSPORTAL_ODDS:-true" in compose_text
+    assert "FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED:-true" in compose_text
+    assert "FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_SNAPSHOT_LIMIT:-20" in compose_text
+    assert "FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_TARGET_LIMIT:-100" in compose_text
 
 
 def test_run_auto_learning_cycle_tool_keeps_snapshot_collection_wide_by_default(monkeypatch):
@@ -1761,6 +1777,9 @@ def test_run_auto_learning_cycle_tool_keeps_snapshot_collection_wide_by_default(
     assert calls[0]["parlay_window_minutes"] == 10
     assert calls[0]["market_snapshot_window_minutes"] == 24 * 60
     assert calls[0]["market_snapshot_requires_leisu_proxy"] is True
+    assert calls[0]["include_oddsportal_snapshot_sync"] is True
+    assert calls[0]["oddsportal_snapshot_limit"] == 20
+    assert calls[0]["oddsportal_target_limit"] == 100
 
 
 def test_shortlist_value_matches_uses_concurrent_fast_analysis_without_repeated_source_probe(monkeypatch):

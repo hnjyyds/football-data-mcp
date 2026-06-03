@@ -3,7 +3,9 @@ import asyncio
 from football_data_mcp import validation_store
 from football_data_mcp.config import TaskQueueSettings
 from football_data_mcp.services.task_queue import (
+    ArqOddsSourceSyncJobStarter,
     ArqValidationJobStarter,
+    FallbackOddsSourceSyncJobStarter,
     FallbackValidationJobStarter,
     task_queue_health_snapshot,
 )
@@ -48,6 +50,54 @@ def test_arq_validation_job_starter_enqueues_holdout_job():
     assert calls[2]["function"] == "aclose"
 
 
+def test_arq_odds_source_sync_job_starter_enqueues_oddsportal_payload():
+    calls: list[dict[str, object]] = []
+
+    class FakeRedis:
+        async def enqueue_job(self, function: str, *args: object, **kwargs: object) -> object:
+            calls.append({"function": function, "args": args, "kwargs": kwargs})
+            return object()
+
+        async def aclose(self) -> None:
+            calls.append({"function": "aclose", "args": (), "kwargs": {}})
+
+    async def fake_create_pool(redis_settings: object, queue_name: str) -> FakeRedis:
+        calls.append({"function": "create_pool", "args": (queue_name,), "kwargs": {}})
+        return FakeRedis()
+
+    settings = TaskQueueSettings(
+        backend="arq",
+        arq_redis_host="redis",
+        arq_queue_name="football-data-test",
+        fallback_to_thread=False,
+    )
+    starter = ArqOddsSourceSyncJobStarter(settings=settings, create_pool=fake_create_pool)
+
+    start_result = asyncio.run(
+        starter.start_oddsportal_snapshot_sync_job(
+            "odds-job-123",
+            {"event_urls": ["https://www.oddsportal.com/football/h2h/example/#abc"], "markets": ["asian_handicap"]},
+        )
+    )
+
+    assert start_result.backend == "arq"
+    assert start_result.queue_job_id == "oddsportal-sync:odds-job-123"
+    assert calls[0] == {"function": "create_pool", "args": ("football-data-test",), "kwargs": {}}
+    assert calls[1]["function"] == "run_oddsportal_snapshot_sync_job"
+    assert calls[1]["args"] == (
+        {
+            "event_urls": ["https://www.oddsportal.com/football/h2h/example/#abc"],
+            "markets": ["asian_handicap"],
+            "job_id": "odds-job-123",
+        },
+    )
+    assert calls[1]["kwargs"] == {
+        "_job_id": "oddsportal-sync:odds-job-123",
+        "_queue_name": "football-data-test",
+    }
+    assert calls[2]["function"] == "aclose"
+
+
 def test_fallback_validation_job_starter_uses_thread_when_arq_enqueue_fails():
     started: list[str] = []
 
@@ -67,6 +117,29 @@ def test_fallback_validation_job_starter_uses_thread_when_arq_enqueue_fails():
     assert start_result.backend == "thread"
     assert start_result.queue_job_id is None
     assert started == ["job-456"]
+
+
+def test_fallback_odds_source_sync_job_starter_uses_thread_when_arq_enqueue_fails():
+    started: list[tuple[str, dict[str, object]]] = []
+
+    class BrokenStarter:
+        async def start_oddsportal_snapshot_sync_job(self, job_id: str, payload: dict[str, object]) -> str:
+            raise RuntimeError(f"redis unavailable for {job_id}")
+
+    class ThreadStarter:
+        async def start_oddsportal_snapshot_sync_job(self, job_id: str, payload: dict[str, object]) -> str:
+            started.append((job_id, payload))
+            return "thread"
+
+    starter = FallbackOddsSourceSyncJobStarter(primary=BrokenStarter(), fallback=ThreadStarter())
+
+    start_result = asyncio.run(
+        starter.start_oddsportal_snapshot_sync_job("odds-job-456", {"markets": ["asian_handicap"]})
+    )
+
+    assert start_result.backend == "thread"
+    assert start_result.queue_job_id is None
+    assert started == [("odds-job-456", {"markets": ["asian_handicap"], "job_id": "odds-job-456"})]
 
 
 def test_task_queue_health_reports_thread_backend():
@@ -225,3 +298,42 @@ def test_arq_worker_entrypoint_runs_validation_job_and_persists_progress(monkeyp
     assert stored["progress"]["completed_leagues"] == 2
     assert stored["result_summary"]["profit"] == 4.8
     assert calls == ["E0", "SP1"]
+
+
+def test_arq_worker_entrypoint_runs_oddsportal_snapshot_sync(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    async def fake_sync_oddsportal_odds_snapshots(**kwargs):
+        calls.append(kwargs)
+        return {
+            "tool": "sync_oddsportal_odds_snapshots",
+            "status": "ok",
+            "saved_snapshot_count": 12,
+        }
+
+    monkeypatch.setattr(
+        "football_data_mcp.workers.arq_worker.sources.sync_oddsportal_odds_snapshots",
+        fake_sync_oddsportal_odds_snapshots,
+    )
+    payload = {
+        "job_id": "odds-job-789",
+        "event_urls": ["https://www.oddsportal.com/football/h2h/example/#abc"],
+        "markets": ["asian_handicap"],
+        "limit": 1,
+        "force": True,
+    }
+
+    completed = asyncio.run(arq_worker.run_oddsportal_snapshot_sync_job({"job_id": "arq-odds-1"}, payload))
+
+    assert completed["status"] == "ok"
+    assert completed["job_id"] == "odds-job-789"
+    assert completed["queue_job_id"] == "arq-odds-1"
+    assert calls == [
+        {
+            "event_urls": ["https://www.oddsportal.com/football/h2h/example/#abc"],
+            "markets": ["asian_handicap"],
+            "limit": 1,
+            "force": True,
+            "job_id": "odds-job-789",
+        }
+    ]
