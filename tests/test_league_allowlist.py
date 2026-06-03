@@ -4,6 +4,7 @@ from __future__ import annotations
 from football_data_mcp.sources import (
     SETTLEMENT_COVERED_LEAGUES_DEFAULT,
     _league_in_allowlist,
+    _match_hard_exclusion_reason,
     _normalize_league_for_match,
 )
 
@@ -89,3 +90,48 @@ def test_default_allowlist_covers_uefa_competitions():
 def test_default_allowlist_covers_brazilian_top_tier():
     for league in ["巴甲", "Brasileirão", "Série A"]:
         assert _league_in_allowlist(league, SETTLEMENT_COVERED_LEAGUES_DEFAULT), f"missing: {league}"
+
+
+def test_hard_exclusion_blocks_noisy_match_categories():
+    cases = [
+        (
+            {"league": "阿后备", "home_team": "河床后备队", "away_team": "博卡后备队"},
+            "excluded_reserve_or_youth_match",
+        ),
+        (
+            {"league": "冰岛U19", "home_team": "青年主队", "away_team": "青年客队"},
+            "excluded_reserve_or_youth_match",
+        ),
+        (
+            {"league": "澳昆女超", "home_team": "布里斯班女足", "away_team": "黄金海岸女足"},
+            "excluded_women_match",
+        ),
+        (
+            {"league": "国际友谊", "home_team": "A队", "away_team": "B队"},
+            "excluded_friendly_match",
+        ),
+        (
+            {"league": "奥地利业余杯", "home_team": "A队", "away_team": "B队"},
+            "excluded_low_tier_or_regional_match",
+        ),
+        (
+            {"league": "澳大利亚足总杯预选赛", "home_team": "A队", "away_team": "B队"},
+            "excluded_low_tier_or_regional_cup",
+        ),
+    ]
+
+    for match, expected_reason in cases:
+        assert _match_hard_exclusion_reason(match) == expected_reason
+
+
+def test_hard_exclusion_keeps_mainstream_leagues_and_cups():
+    for match in [
+        {"league": "英超", "home_team": "阿森纳", "away_team": "切尔西"},
+        {"league": "英冠", "home_team": "利兹联", "away_team": "莱斯特城"},
+        {"league": "中甲", "home_team": "广州豹", "away_team": "深圳青年人"},
+        {"league": "欧冠", "home_team": "皇马", "away_team": "拜仁"},
+        {"league": "英足总杯", "home_team": "曼城", "away_team": "利物浦"},
+        {"league": "Copa Libertadores", "home_team": "Flamengo", "away_team": "River Plate"},
+        {"league": "World Cup", "home_team": "France", "away_team": "Brazil"},
+    ]:
+        assert _match_hard_exclusion_reason(match) is None

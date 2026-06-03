@@ -609,6 +609,7 @@ export type StartHoldoutValidationJobRequest = {
   min_validation_bets?: number;
   min_validation_evaluated?: number;
   historical_rho_min_samples?: number;
+  use_cache?: boolean;
 };
 
 export function startHoldoutValidationJob(

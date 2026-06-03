@@ -318,6 +318,38 @@ def test_snapshot_store_calculates_closing_line_value_from_snapshots(tmp_path):
     assert tracking["records"][0]["clv"]["closing_decimal_odds"] == 1.92
 
 
+def test_snapshot_store_prefers_persisted_clv_tracking_without_querying_snapshots(tmp_path):
+    tracking = snapshot_store.closing_line_value_for_records(
+        [
+            {
+                "id": 9,
+                "record_key": "rec_9",
+                "league": "EPL",
+                "home_team": "Arsenal",
+                "away_team": "Chelsea",
+                "market": "asian_handicap",
+                "selection": "Arsenal -0.5",
+                "selection_key": "home_cover",
+                "decimal_odds": 1.90,
+                "raw": {
+                    "clv_tracking": {
+                        "status": "available",
+                        "clv": 0.025,
+                        "clv_return": 0.025,
+                        "closing_decimal_odds": 1.853659,
+                    }
+                },
+            }
+        ],
+        db_path=str(tmp_path / "missing.sqlite3"),
+    )
+
+    assert tracking["status"] == "ok"
+    assert tracking["available_count"] == 1
+    assert tracking["avg_clv_return"] == 0.025
+    assert tracking["records"][0]["persisted"] is True
+
+
 def test_snapshot_store_requires_post_prediction_snapshot_for_clv(tmp_path):
     db_path = tmp_path / "snapshots.sqlite3"
     snapshot_store.save_market_snapshots(

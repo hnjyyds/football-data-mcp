@@ -282,6 +282,78 @@ def test_settle_learning_recommendations_recomputes_calibration(tmp_path):
     assert result["strategy_state"]["mode"] == "balanced"
 
 
+def test_settle_learning_recommendations_persists_clv_before_calibration(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    market_db_path = str(tmp_path / "snapshots.sqlite3")
+    monkeypatch.setattr(snapshot_store, "snapshot_db_path", lambda: market_db_path)
+    learning_store.save_recommendation_records(
+        [
+            {
+                "run_id": "cycle-clv",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "league": "测试联赛",
+                "home_team": "CLV主队",
+                "away_team": "CLV客队",
+                "kickoff_utc": "2026-06-04T12:30:00+00:00",
+                "market": "asian_handicap",
+                "selection": "CLV主队 -0.5",
+                "selection_key": "home_cover",
+                "line": -0.5,
+                "decimal_odds": 1.9,
+                "model_probability": 0.62,
+                "recommendation": "condition_observe",
+                "created_at_utc": "2026-06-04T11:20:00+00:00",
+            }
+        ],
+        db_path=db_path,
+    )
+    snapshot_store.save_market_snapshots(
+        [
+            snapshot_store.MarketSnapshot(
+                provider="test_closing",
+                source_key="test_league",
+                event_id="evt-clv",
+                league="测试联赛",
+                home_team="CLV主队",
+                away_team="CLV客队",
+                kickoff_utc="2026-06-04T12:30:00+00:00",
+                bookmaker="Pinnacle",
+                market_type="spreads",
+                selection="CLV主队",
+                decimal_odds=1.8,
+                line=-0.5,
+                source_time_utc="2026-06-04T12:20:00+00:00",
+                fetched_at_utc="2026-06-04T12:20:05+00:00",
+                raw={"phase": "closing"},
+            )
+        ],
+        db_path=market_db_path,
+    )
+
+    result = asyncio.run(
+        sources_module.settle_learning_recommendations(
+            results=[{"home_team": "CLV主队", "away_team": "CLV客队", "home_score": 2, "away_score": 0}],
+            auto_fetch=False,
+            db_path=db_path,
+        )
+    )
+
+    expected_clv = round(1.9 / 1.8 - 1.0, 6)
+    assert result["settlement"]["settled_count"] == 1
+    assert result["clv_tracking"]["available_count"] == 1
+    record = learning_store.list_recommendation_records(db_path=db_path, status="settled")[0]
+    assert record["raw"]["closing_line_value"] == expected_clv
+    assert record["raw"]["clv_tracking"]["closing_decimal_odds"] == 1.8
+    broad_bucket = next(
+        bucket
+        for bucket in result["calibration"]["buckets"]
+        if bucket["market"] == "asian_handicap" and bucket["league_bucket"] == "ALL"
+    )
+    assert broad_bucket["raw"]["avg_clv"] == round(expected_clv, 4)
+
+
 def test_dashboard_snapshot_exposes_prediction_accountability_when_formal_recommendations_are_empty(tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
     learning_store.save_recommendation_records(
@@ -930,6 +1002,65 @@ def test_auto_learning_cycle_skips_oddsportal_when_production_odds_source_is_fre
     assert result["oddsportal_snapshot_sync"]["status"] == "skipped_production_source_fresh"
     assert result["oddsportal_snapshot_sync"]["queued_event_count"] == 0
     assert result["oddsportal_snapshot_sync"]["reason"] == "雷速主赔率源新鲜可用。"
+
+
+def test_auto_learning_cycle_continues_oddsportal_when_fallback_source_is_active(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    calls = []
+    monkeypatch.setenv("FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED", "true")
+
+    async def fake_shortlist_value_matches(**kwargs):
+        return {
+            "status": "ok",
+            "tool": "shortlist_value_matches",
+            "mode": kwargs["mode"],
+            "target_market": kwargs["target_market"],
+            "picks": [],
+            "rejected": [],
+        }
+
+    class FakeDataSourceService:
+        def odds_source_status(self):
+            return {
+                "closure": {
+                    "active_source": "oddsportal_scraper",
+                    "production_ready": True,
+                    "reason": "雷速不可用或过期，当前使用独立爬虫赔率源兜底。",
+                }
+            }
+
+        async def start_oddsportal_sync(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "status": "queued",
+                "provider": "oddsportal_scraper",
+                "payload": {
+                    "event_urls": ["https://www.oddsportal.com/football/world/friendly-international/test/#abc"],
+                    "auto_discover": True,
+                },
+            }
+
+    from football_data_mcp.services import data_source_service as data_source_service_module
+
+    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
+    monkeypatch.setattr(data_source_service_module, "DataSourceService", FakeDataSourceService)
+
+    result = asyncio.run(
+        sources_module.run_auto_learning_cycle(
+            db_path=db_path,
+            auto_settle=False,
+            include_market_snapshot_sync=False,
+            include_oddsportal_snapshot_sync=True,
+            include_jingcai_parlay=False,
+            include_snapshot_reanalysis=False,
+        )
+    )
+
+    assert calls
+    assert calls[0]["auto_discover"] is True
+    assert result["oddsportal_snapshot_sync"]["status"] == "queued"
+    assert result["oddsportal_snapshot_sync"]["queued_event_count"] == 1
+    assert result["oddsportal_snapshot_sync"]["closure"]["active_source"] == "oddsportal_scraper"
 
 
 def test_auto_learning_cycle_records_observation_when_candidate_is_not_publishable(monkeypatch, tmp_path):

@@ -195,6 +195,88 @@ def test_oddsportal_matches_chinese_country_alias_targets():
     assert matches[0]["match_score"] >= 0.9
 
 
+def test_oddsportal_matches_current_chinese_international_targets():
+    events = [
+        {
+            "league": "Friendly International",
+            "home_team": "Kyrgyzstan",
+            "away_team": "Kenya",
+            "kickoff_utc": "2026-06-03T12:30:00+00:00",
+            "event_url": "https://www.oddsportal.com/football/world/friendly-international/kyrgyzstan-kenya/#abc",
+        },
+        {
+            "league": "Friendly International",
+            "home_team": "China W",
+            "away_team": "Russia W",
+            "kickoff_utc": "2026-06-03T11:35:00+00:00",
+            "event_url": "https://www.oddsportal.com/football/world/friendly-international/china-w-russia-w/#def",
+        },
+    ]
+    targets = [
+        {
+            "league": "国际友谊",
+            "home_team": "吉尔吉斯斯坦",
+            "away_team": "肯尼亚",
+            "kickoff_utc": "2026-06-03T12:30:00+00:00",
+        },
+        {
+            "league": "国际友谊",
+            "home_team": "中国女足",
+            "away_team": "俄罗斯女足",
+            "kickoff_utc": "2026-06-03T11:35:00+00:00",
+        },
+    ]
+
+    matches = oddsportal_source.match_oddsportal_events_to_targets(events, targets, limit=5)
+
+    assert [match["event_url"] for match in matches] == [
+        "https://www.oddsportal.com/football/world/friendly-international/kyrgyzstan-kenya/#abc",
+        "https://www.oddsportal.com/football/world/friendly-international/china-w-russia-w/#def",
+    ]
+    assert all(match["match_score"] >= 0.9 for match in matches)
+
+
+def test_market_snapshot_coverage_matches_oddsportal_chinese_aliases(tmp_path):
+    db_path = str(tmp_path / "snapshots.sqlite3")
+    snapshot_store.save_market_snapshots(
+        [
+            snapshot_store.MarketSnapshot(
+                provider="oddsportal_scraper",
+                source_key="oddsportal:2Jr7PLmg:5:2",
+                event_id="2Jr7PLmg",
+                league="Friendly International",
+                home_team="Philippines",
+                away_team="Guam",
+                kickoff_utc="2026-06-03T11:30:00+00:00",
+                bookmaker="Example",
+                market_type="asian_handicap",
+                selection="home",
+                decimal_odds=1.91,
+                line=-1.0,
+                source_time_utc="2026-06-03T07:00:00+00:00",
+                fetched_at_utc="2026-06-03T07:10:00+00:00",
+                raw={},
+            )
+        ],
+        db_path=db_path,
+    )
+
+    coverage = snapshot_store.market_snapshot_coverage_for_records(
+        [
+            {
+                "league": "国际友谊",
+                "home_team": "菲律宾",
+                "away_team": "关岛",
+            }
+        ],
+        db_path=db_path,
+    )
+
+    item = coverage[snapshot_store.market_snapshot_match_key("菲律宾", "关岛")]
+    assert item["provider"] == "oddsportal_scraper"
+    assert item["snapshot_count"] == 1
+
+
 def test_oddsportal_recommends_discovery_urls_from_prediction_targets():
     targets = [
         {"league": "England Premier League", "home_team": "Arsenal", "away_team": "Chelsea"},

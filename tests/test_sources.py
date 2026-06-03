@@ -2037,6 +2037,117 @@ def test_shortlist_value_matches_can_analyze_sixty_candidates_and_reports_funnel
     assert result["funnel_report"]["rejection_reasons"]["no_positive_edge"] == 20
 
 
+def test_shortlist_value_matches_hard_excludes_noisy_competitions_before_analysis(monkeypatch):
+    async def fake_list_matches(*args, **kwargs):
+        return {
+            "status": "ok",
+            "time_window_policy": {"as_of": "2026-05-24T10:00:00+08:00", "window_hours": 24},
+            "matches": [
+                {
+                    "match_id": "premier-1",
+                    "home_team": "英超主队",
+                    "away_team": "英超客队",
+                    "league": "英超",
+                    "kickoff_utc_plus_8": "2026-05-24T20:00:00+08:00",
+                },
+                {
+                    "match_id": "reserve-1",
+                    "home_team": "河床后备队",
+                    "away_team": "博卡后备队",
+                    "league": "阿后备",
+                    "kickoff_utc_plus_8": "2026-05-24T20:00:00+08:00",
+                },
+                {
+                    "match_id": "women-1",
+                    "home_team": "布里斯班女足",
+                    "away_team": "黄金海岸女足",
+                    "league": "澳昆女超",
+                    "kickoff_utc_plus_8": "2026-05-24T20:00:00+08:00",
+                },
+                {
+                    "match_id": "friendly-1",
+                    "home_team": "A队",
+                    "away_team": "B队",
+                    "league": "国际友谊",
+                    "kickoff_utc_plus_8": "2026-05-24T20:00:00+08:00",
+                },
+            ],
+            "total_count": 4,
+        }
+
+    analyzed_queries = []
+
+    async def fake_analyze_single_match(query, **kwargs):
+        analyzed_queries.append(query)
+        return {
+            "status": "ok",
+            "agent_brief": {
+                "match": {
+                    "match_id": "premier-1",
+                    "home_team": "英超主队",
+                    "away_team": "英超客队",
+                    "league": "英超",
+                }
+            },
+            "final_decision": {"headline": "立即投注：英超主队", "recommendation": "immediate_bet"},
+            "final_execution_advice": {"headline": "最终执行：立即投注 英超主队", "action": "bet_now"},
+            "best_candidate": {
+                "market": "asian_handicap",
+                "selection": "英超主队 -0.5",
+                "selection_key": "home_cover",
+                "line": -0.5,
+                "recommendation": "immediate_bet",
+                "edge": 0.06,
+                "model_probability": 0.64,
+                "calibrated_probability": 0.64,
+                "stake_level": "small",
+                "decimal_odds": 1.86,
+            },
+            "market_candidates": [],
+            "betting_decision_support": {"blocking_flags": [], "caution_flags": [], "confidence": 0.64},
+            "analysis_pack": {
+                "data_coverage": {
+                    "blocks": {
+                        "moneyline_1x2": True,
+                        "asian_handicap": True,
+                        "over_under": True,
+                        "recent_form": True,
+                    }
+                }
+            },
+            "quality": {"is_bettable_input": True},
+        }
+
+    monkeypatch.setattr(sources_module, "list_matches", fake_list_matches)
+    monkeypatch.setattr(sources_module, "analyze_single_match", fake_analyze_single_match)
+
+    result = asyncio.run(
+        sources_module.shortlist_value_matches(
+            as_of="2026-05-24T10:00:00+08:00",
+            timezone_name="Asia/Shanghai",
+            window_minutes=24 * 60,
+            top_n=5,
+            limit=10,
+            mode="balanced",
+            target_market="asian_handicap",
+            use_learning_policy=False,
+            enforce_settlement_coverage=False,
+        )
+    )
+
+    assert len(analyzed_queries) == 1
+    assert "英超主队" in analyzed_queries[0]
+    assert result["total_candidates"] == 1
+    assert result["analyzed_count"] == 1
+    assert result["eligible_count"] == 1
+    assert result["rejected_count"] == 3
+    assert result["funnel_report"]["rejection_reasons"] == {
+        "excluded_friendly_match": 1,
+        "excluded_reserve_or_youth_match": 1,
+        "excluded_women_match": 1,
+    }
+
+
 def test_shortlist_scans_schedule_candidates_before_odds_gate(monkeypatch):
     list_kwargs = {}
 

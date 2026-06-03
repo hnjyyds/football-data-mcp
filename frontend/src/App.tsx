@@ -609,6 +609,7 @@ const fullLocalTime = formatBeijingFull;
 const QUICK_HOLDOUT_VALIDATION_REQUEST: StartHoldoutValidationJobRequest = {
   resume: false,
   start: true,
+  use_cache: false,
   divisions: ["D1"],
   training_seasons: ["2122"],
   validation_seasons: ["2223"],
@@ -2360,7 +2361,8 @@ export function App() {
   async function handleStartValidationJob() {
     setValidationActionJobId("holdout-new");
     try {
-      await startHoldoutValidationJob({ resume: true, start: true });
+      const freshRun = snapshot?.validation_job?.status === "completed";
+      await startHoldoutValidationJob(freshRun ? { resume: false, start: true, use_cache: false } : { resume: true, start: true });
       push("Holdout 验证已入队", "success");
       await refreshSnapshotOnce("holdout-validation-start-refresh", { forceRefresh: true });
     } catch (err) {

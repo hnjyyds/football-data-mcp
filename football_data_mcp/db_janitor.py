@@ -2,6 +2,9 @@
 Database janitor: periodic cleanup of bad / unsettleable / orphaned data.
 
 Bad data taxonomy (worst → least severe):
+0. HARD_EXCLUDED_COMPETITION: product-level banned categories such as
+   reserve/youth/women/friendlies/lower-tier regional cups. Hard-delete from
+   model inputs because they are intentionally out of scope.
 1. ORPHANED: records with no match_id AND no kickoff_utc — cannot ever be
    matched to anything. Safe to hard-delete.
 2. UNSETTLEABLE_STALE: kickoff >48h ago, still 'open', from leagues that
@@ -16,7 +19,8 @@ The janitor:
 - Always supports dry_run mode (preview without changes)
 - Logs everything for audit
 - Reports per-category counts
-- Won't touch 'settled' records (those are the gold)
+- Won't touch normal 'settled' records (those are the gold)
+- Will delete settled records only when the competition itself is hard-excluded
 - Won't touch the 'strategy_state' table
 
 Periodic run from auto_learning daemon (every 6h by default).
@@ -29,7 +33,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from football_data_mcp import learning_store
+from football_data_mcp import competition_policy, learning_store, snapshot_store
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,7 @@ UNSETTLEABLE_THRESHOLD_HOURS = int(os.getenv("FOOTBALL_DATA_JANITOR_UNSETTLEABLE
 UNSETTLEABLE_ARCHIVE_DAYS = int(os.getenv("FOOTBALL_DATA_JANITOR_UNSETTLEABLE_ARCHIVE_DAYS", "0"))
 DUPLICATE_GRACE_DAYS = int(os.getenv("FOOTBALL_DATA_JANITOR_DUPLICATE_GRACE_DAYS", "7"))
 SHADOW_RETENTION_DAYS = int(os.getenv("FOOTBALL_DATA_JANITOR_SHADOW_RETENTION_DAYS", "90"))
+SQLITE_DELETE_BATCH_SIZE = 500
 
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -152,6 +157,118 @@ def _find_empty_calibration_buckets(conn: sqlite3.Connection) -> list[dict[str, 
     return [dict(r) for r in rows]
 
 
+def _find_hard_excluded_learning_rows(conn: sqlite3.Connection, *, table: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        f"""
+        SELECT id, league, home_team, away_team, match_id, kickoff_utc,
+               kickoff_utc_plus_8, settlement_status, created_at_utc
+        FROM {table}
+        """
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        reason = competition_policy.match_hard_exclusion_reason(item)
+        if reason:
+            item["hard_exclusion_reason"] = reason
+            out.append(item)
+    return out
+
+
+def _find_hard_excluded_snapshot_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, provider, event_id, league, home_team, away_team,
+               kickoff_utc, bookmaker, market_type, fetched_at_utc
+        FROM market_snapshots
+        """
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        reason = competition_policy.match_hard_exclusion_reason(item)
+        if reason:
+            item["hard_exclusion_reason"] = reason
+            out.append(item)
+    return out
+
+
+def _batched(items: list[Any], batch_size: int = SQLITE_DELETE_BATCH_SIZE) -> list[list[Any]]:
+    return [items[index : index + batch_size] for index in range(0, len(items), batch_size)]
+
+
+def _delete_ids(conn: sqlite3.Connection, *, table: str, ids: list[int]) -> int:
+    if not ids:
+        return 0
+    deleted = 0
+    for batch in _batched(ids):
+        placeholders = ",".join("?" for _ in batch)
+        cursor = conn.execute(f"DELETE FROM {table} WHERE id IN ({placeholders})", batch)
+        deleted += max(0, int(cursor.rowcount or 0))
+    return deleted
+
+
+def _delete_notification_deliveries_for_learning_rows(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    ids: list[int],
+) -> int:
+    if not ids:
+        return 0
+    source = "recommendation" if table == "recommendation_records" else "shadow_prediction"
+    ledger_ids = [f"{source}:{row_id}" for row_id in ids]
+    deleted = 0
+    for batch in _batched(ledger_ids):
+        placeholders = ",".join("?" for _ in batch)
+        cursor = conn.execute(
+            f"DELETE FROM notification_deliveries WHERE ledger_id IN ({placeholders})",
+            batch,
+        )
+        deleted += max(0, int(cursor.rowcount or 0))
+    return deleted
+
+
+def _purge_hard_excluded_learning_rows(
+    conn: sqlite3.Connection,
+    report: dict[str, Any],
+    *,
+    dry_run: bool,
+) -> dict[str, int]:
+    deleted_records = 0
+    deleted_deliveries = 0
+    for table in ("recommendation_records", "shadow_prediction_records"):
+        rows = _find_hard_excluded_learning_rows(conn, table=table)
+        report["categories"][f"{table}.hard_excluded_competitions"] = {
+            "action": "hard_delete",
+            "count": len(rows),
+            "by_reason": _group_count(rows, "hard_exclusion_reason"),
+            "leagues": _group_count(rows, "league"),
+            "sample": rows[:3],
+        }
+        report["totals"]["inspected"] += len(rows)
+        if not dry_run and rows:
+            ids = [int(row["id"]) for row in rows]
+            delivery_count = _delete_notification_deliveries_for_learning_rows(
+                conn,
+                table=table,
+                ids=ids,
+            )
+            row_count = _delete_ids(conn, table=table, ids=ids)
+            deleted_records += row_count
+            deleted_deliveries += delivery_count
+            report["totals"]["deleted"] += row_count + delivery_count
+    if deleted_deliveries:
+        report["categories"]["notification_deliveries.hard_excluded_competitions"] = {
+            "action": "hard_delete",
+            "count": deleted_deliveries,
+        }
+    return {
+        "records_deleted": deleted_records,
+        "notification_deliveries_deleted": deleted_deliveries,
+    }
+
+
 def run_janitor(
     *,
     db_path: str | None = None,
@@ -162,6 +279,7 @@ def run_janitor(
 
     Returns a structured report of what was found / removed.
     Categories operated on:
+    - hard_excluded_competitions: HARD DELETE, including settled contaminated rows
     - orphaned (no match_id + no kickoff): HARD DELETE
     - stale_opens (kickoff>48h ago, still open): MARK unsettleable
     - archived_unsettleable (>30d old): HARD DELETE
@@ -185,6 +303,8 @@ def run_janitor(
 
     with _connect(db_path) as conn:
         learning_store.ensure_schema(conn)
+
+        _purge_hard_excluded_learning_rows(conn, report, dry_run=dry_run)
 
         # 1. Orphans - hard delete
         for table in ("recommendation_records", "shadow_prediction_records"):
@@ -299,6 +419,73 @@ def run_janitor(
         report["totals"]["marked"],
         report["totals"]["deleted"],
     )
+    return report
+
+
+def _connect_snapshot(db_path: str | None = None) -> sqlite3.Connection:
+    path = db_path or snapshot_store.snapshot_db_path()
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 10000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    return conn
+
+
+def purge_hard_excluded_competition_records(
+    *,
+    learning_db_path: str | None = None,
+    snapshot_db_path: str | None = None,
+    dry_run: bool = True,
+    recompute_after: bool = True,
+) -> dict[str, Any]:
+    """Purge product-level banned competitions from historical model data.
+
+    This is intentionally stronger than the normal janitor: hard-excluded
+    competitions are out of modeling scope, so even settled rows are removed and
+    calibration/strategy aggregates are rebuilt afterward.
+    """
+    report: dict[str, Any] = {
+        "dry_run": dry_run,
+        "executed_at_utc": _now_utc().isoformat(),
+        "categories": {},
+        "totals": {"inspected": 0, "marked": 0, "deleted": 0},
+        "db_paths": {
+            "learning": learning_db_path or learning_store.learning_db_path(),
+            "snapshots": snapshot_db_path or snapshot_store.snapshot_db_path(),
+        },
+    }
+    learning_result = {"records_deleted": 0, "notification_deliveries_deleted": 0}
+    with _connect(learning_db_path) as conn:
+        learning_store.ensure_schema(conn)
+        learning_result = _purge_hard_excluded_learning_rows(conn, report, dry_run=dry_run)
+        if not dry_run:
+            conn.commit()
+
+    if not dry_run and recompute_after and learning_result["records_deleted"] > 0:
+        report["learning_recompute"] = {
+            "calibration": learning_store.recompute_calibration(db_path=learning_db_path),
+            "strategy_states": learning_store.update_all_market_strategy_states(db_path=learning_db_path),
+        }
+
+    with _connect_snapshot(snapshot_db_path) as conn:
+        snapshot_store.ensure_schema(conn)
+        rows = _find_hard_excluded_snapshot_rows(conn)
+        report["categories"]["market_snapshots.hard_excluded_competitions"] = {
+            "action": "hard_delete",
+            "count": len(rows),
+            "by_reason": _group_count(rows, "hard_exclusion_reason"),
+            "leagues": _group_count(rows, "league"),
+            "sample": rows[:3],
+        }
+        report["totals"]["inspected"] += len(rows)
+        if not dry_run and rows:
+            deleted = _delete_ids(conn, table="market_snapshots", ids=[int(row["id"]) for row in rows])
+            report["totals"]["deleted"] += deleted
+            conn.commit()
+
     return report
 
 

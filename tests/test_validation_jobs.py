@@ -566,6 +566,72 @@ def test_validation_job_service_uses_cache_and_resumes_failed_league(monkeypatch
     assert {row["cache_hit"] for row in completed_again["league_results"]} == {True}
 
 
+def test_validation_job_service_can_bypass_league_cache(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    calls: list[str] = []
+
+    async def fake_holdout(**kwargs):
+        division = kwargs["divisions"][0]
+        calls.append(division)
+        profit = float(len(calls))
+        item = {
+            "division": division,
+            "league": division,
+            "validation_result": {
+                "division": division,
+                "evaluated_count": 10,
+                "bet_count": 5,
+                "profit": profit,
+                "roi": 0.2,
+                "model_log_loss_1x2": 0.5,
+                "market_log_loss_1x2": 0.55,
+                "model_brier_score_1x2": 0.2,
+                "market_brier_score_1x2": 0.24,
+            },
+            "calibrated_validation_result": {
+                "division": division,
+                "evaluated_count": 10,
+                "bet_count": 5,
+                "profit": profit,
+                "roi": 0.2,
+                "model_log_loss_1x2": 0.5,
+                "market_log_loss_1x2": 0.55,
+                "model_brier_score_1x2": 0.2,
+                "market_brier_score_1x2": 0.24,
+            },
+        }
+        return {"status": "ok", "division_results": [item], "holdout_readiness": {"status": "watchlist"}}
+
+    monkeypatch.setattr("football_data_mcp.services.validation_service.backtest.run_holdout_validation", fake_holdout)
+    service = ValidationJobService(db_path=db_path)
+    cached_config = HoldoutValidationJobConfig(
+        divisions=["E0"],
+        training_seasons=["2122"],
+        validation_seasons=["2223"],
+        edge_thresholds=[0.03],
+        min_training_samples_options=[20],
+        max_samples=60,
+    )
+    no_cache_config = HoldoutValidationJobConfig(
+        divisions=["E0"],
+        training_seasons=["2122"],
+        validation_seasons=["2223"],
+        edge_thresholds=[0.03],
+        min_training_samples_options=[20],
+        max_samples=60,
+        use_cache=False,
+    )
+
+    first_job = service.create_or_resume_holdout_job(cached_config)
+    asyncio.run(service.run_holdout_job_inline(first_job["job_id"]))
+    second_job = service.create_or_resume_holdout_job(no_cache_config)
+    completed = asyncio.run(service.run_holdout_job_inline(second_job["job_id"]))
+
+    assert calls == ["E0", "E0"]
+    assert completed["league_results"][0]["cache_hit"] is False
+    assert completed["league_results"][0]["result"]["validation_result"]["profit"] == 2.0
+
+
 def test_validation_job_heartbeat_updates_while_division_blocks_event_loop(monkeypatch, tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
 
@@ -1036,6 +1102,35 @@ def test_validation_job_service_can_start_via_injected_queue(tmp_path):
     assert job["queue_job_id"] == f"queue:{job['job_id']}"
     assert job["queued_at_utc"] is not None
     assert "arq" in job["queue_status_message"].lower()
+
+
+def test_validation_job_async_creation_defaults_to_background_queue(tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    started: list[str] = []
+
+    class FakeStarter:
+        async def start_holdout_validation_job(self, job_id: str):
+            started.append(job_id)
+            from football_data_mcp.services.task_queue import ValidationJobStartResult
+
+            return ValidationJobStartResult(backend="arq", queue_job_id=f"queue:{job_id}")
+
+    service = ValidationJobService(db_path=db_path, job_starter=FakeStarter())
+    config = HoldoutValidationJobConfig(
+        divisions=["E0"],
+        training_seasons=["2122"],
+        validation_seasons=["2223"],
+        edge_thresholds=[0.03],
+        min_training_samples_options=[20],
+        max_samples=10,
+    )
+
+    job = asyncio.run(service.create_or_resume_holdout_job_async(config))
+
+    assert started == [job["job_id"]]
+    assert job["status"] == "pending"
+    assert job["queue_backend"] == "arq"
+    assert job["queue_job_id"] == f"queue:{job['job_id']}"
 
 
 def test_validation_job_claim_metadata_tracks_runner_attempts(tmp_path):

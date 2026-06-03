@@ -34,6 +34,7 @@ class HoldoutValidationJobConfig:
     min_validation_bets: int = 50
     min_validation_evaluated: int = 100
     historical_rho_min_samples: int = 20
+    use_cache: bool = True
 
     def normalized(self) -> "HoldoutValidationJobConfig":
         return HoldoutValidationJobConfig(
@@ -48,6 +49,7 @@ class HoldoutValidationJobConfig:
             min_validation_bets=int(self.min_validation_bets),
             min_validation_evaluated=int(self.min_validation_evaluated),
             historical_rho_min_samples=int(self.historical_rho_min_samples),
+            use_cache=bool(self.use_cache),
         )
 
     def to_store_config(self) -> dict[str, Any]:
@@ -62,6 +64,7 @@ class HoldoutValidationJobConfig:
             "min_validation_bets": normalized.min_validation_bets,
             "min_validation_evaluated": normalized.min_validation_evaluated,
             "historical_rho_min_samples": normalized.historical_rho_min_samples,
+            "use_cache": normalized.use_cache,
             "cache_keys": cache_keys,
         }
 
@@ -140,7 +143,7 @@ class ValidationJobService:
         self,
         config: HoldoutValidationJobConfig | None = None,
         *,
-        start_background: bool = False,
+        start_background: bool = True,
         resume: bool = True,
     ) -> dict[str, Any]:
         job = self.create_or_resume_holdout_job(config, start_background=False, resume=resume)
@@ -238,7 +241,11 @@ class ValidationJobService:
             if existing and existing.get("status") == "succeeded":
                 continue
             cache_key = config.cache_key_for_division(division)
-            cached = validation_store.get_validation_league_cache(cache_key=cache_key, db_path=self._db_path)
+            cached = (
+                validation_store.get_validation_league_cache(cache_key=cache_key, db_path=self._db_path)
+                if config.use_cache
+                else None
+            )
             if cached and isinstance(cached.get("result"), dict):
                 if not self._is_current_runner(job_id, runner_id):
                     return validation_store.get_validation_job(job_id, db_path=self._db_path) or {}
@@ -282,13 +289,14 @@ class ValidationJobService:
                 if not self._is_current_runner(job_id, runner_id):
                     return validation_store.get_validation_job(job_id, db_path=self._db_path) or {}
                 league = str(result.get("league") or division)
-                validation_store.save_validation_league_cache(
-                    cache_key=cache_key,
-                    division=division,
-                    league=league,
-                    result=result,
-                    db_path=self._db_path,
-                )
+                if config.use_cache:
+                    validation_store.save_validation_league_cache(
+                        cache_key=cache_key,
+                        division=division,
+                        league=league,
+                        result=result,
+                        db_path=self._db_path,
+                    )
                 validation_store.upsert_validation_league_result(
                     job_id,
                     division=division,
@@ -419,6 +427,7 @@ class ValidationJobService:
             min_validation_bets=int(config.get("min_validation_bets") or 50),
             min_validation_evaluated=int(config.get("min_validation_evaluated") or 100),
             historical_rho_min_samples=int(config.get("historical_rho_min_samples") or 20),
+            use_cache=bool(config.get("use_cache", True)),
         ).normalized()
 
 

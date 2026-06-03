@@ -74,6 +74,7 @@ async def holdout_validation_jobs_api(request: Request) -> Response:
             min_validation_bets=parsed.min_validation_bets,
             min_validation_evaluated=parsed.min_validation_evaluated,
             historical_rho_min_samples=parsed.historical_rho_min_samples,
+            use_cache=parsed.use_cache,
         )
         job = await _validation_service_factory().create_or_resume_holdout_job_async(
             config,

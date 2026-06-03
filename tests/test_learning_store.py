@@ -82,6 +82,117 @@ def test_learning_store_records_settles_and_recomputes_calibration(tmp_path):
     assert one_x_two_bucket["roi"] == -1.0
 
 
+def test_learning_store_persists_recommendation_clv_tracking(tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    learning_store.save_recommendation_records(
+        [
+            {
+                "run_id": "cycle-clv",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced",
+                "target_market": "asian_handicap",
+                "league": "测试联赛",
+                "home_team": "CLV主队",
+                "away_team": "CLV客队",
+                "market": "asian_handicap",
+                "selection": "CLV主队 -0.25",
+                "selection_key": "home_cover",
+                "line": -0.25,
+                "decimal_odds": 1.95,
+                "model_probability": 0.58,
+                "edge": 0.03,
+                "recommendation": "condition_observe",
+            }
+        ],
+        db_path=db_path,
+    )
+    settlement = learning_store.settle_recommendations(
+        [{"home_team": "CLV主队", "away_team": "CLV客队", "home_score": 2, "away_score": 1}],
+        db_path=db_path,
+    )
+    record_id = settlement["settled_records"][0]["id"]
+
+    summary = learning_store.update_clv_tracking(
+        record_source="recommendation",
+        clv_records=[
+            {
+                "record_id": record_id,
+                "record_key": settlement["settled_records"][0]["record_key"],
+                "status": "available",
+                "clv": {
+                    "status": "available",
+                    "clv_return": 0.041667,
+                    "closing_decimal_odds": 1.872,
+                    "closing_bookmaker_count": 3,
+                },
+            }
+        ],
+        db_path=db_path,
+    )
+
+    assert summary["updated_count"] == 1
+    assert summary["available_count"] == 1
+    record = learning_store.list_recommendation_records(db_path=db_path, status="settled")[0]
+    assert record["raw"]["closing_line_value"] == 0.041667
+    assert record["raw"]["clv_tracking"]["clv"] == 0.041667
+    assert record["raw"]["clv_tracking"]["status"] == "available"
+    assert record["raw"]["clv_tracking"]["closing_decimal_odds"] == 1.872
+
+
+def test_learning_store_persists_shadow_clv_attempts_without_available_price(tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    learning_store.save_shadow_prediction_records(
+        [
+            {
+                "run_id": "shadow-clv",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced",
+                "target_market": "asian_handicap",
+                "decision": "observed",
+                "league": "测试联赛",
+                "home_team": "影子主队",
+                "away_team": "影子客队",
+                "market": "asian_handicap",
+                "selection": "影子主队 -0.25",
+                "selection_key": "home_cover",
+                "line": -0.25,
+                "decimal_odds": 1.92,
+                "model_probability": 0.57,
+                "edge": 0.02,
+            }
+        ],
+        db_path=db_path,
+    )
+    settlement = learning_store.settle_shadow_predictions(
+        [{"home_team": "影子主队", "away_team": "影子客队", "home_score": 0, "away_score": 0}],
+        db_path=db_path,
+    )
+    record_id = settlement["settled_records"][0]["id"]
+
+    summary = learning_store.update_clv_tracking(
+        record_source="shadow_prediction",
+        clv_records=[
+            {
+                "record_id": record_id,
+                "status": "unavailable",
+                "clv": {
+                    "status": "unavailable",
+                    "reason": "post_prediction_closing_snapshots_missing",
+                },
+            }
+        ],
+        db_path=db_path,
+    )
+
+    assert summary["updated_count"] == 1
+    assert summary["available_count"] == 0
+    assert summary["unavailable_count"] == 1
+    record = learning_store.list_shadow_prediction_records(db_path=db_path, status="settled")[0]
+    assert "closing_line_value" not in record["raw"]
+    assert record["raw"]["clv_tracking"]["status"] == "unavailable"
+    assert record["raw"]["clv_tracking"]["reason"] == "post_prediction_closing_snapshots_missing"
+
+
 def test_learning_store_settles_asian_quarter_line_half_win(tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
     learning_store.save_recommendation_records(

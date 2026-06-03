@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from football_data_mcp import db_janitor, learning_store
+from football_data_mcp import db_janitor, learning_store, snapshot_store
 
 
 def _seed_db(db_path: str) -> None:
@@ -225,3 +225,148 @@ def test_report_groups_leagues_for_visibility(tmp_path):
     # Should include league of the stale open
     assert "L2" in stale_info["leagues"]
     assert stale_info["leagues"]["L2"] == 1
+
+
+def test_purge_hard_excluded_competitions_removes_learning_and_snapshot_rows(tmp_path):
+    learning_db_path = str(tmp_path / "learning.sqlite3")
+    snapshot_db_path = str(tmp_path / "snapshots.sqlite3")
+    now = datetime.now(timezone.utc).isoformat()
+
+    with sqlite3.connect(learning_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        learning_store.ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO recommendation_records (
+                record_key, run_id, tool, mode, target_market, match_id, league,
+                home_team, away_team, kickoff_utc, market, selection, decimal_odds,
+                risk_flags_json, caution_flags_json, raw_json, settlement_status,
+                home_score, away_score, hit, payout_multiplier, profit_units,
+                settled_at_utc, created_at_utc
+            ) VALUES (
+                'rec:banned', 'r', 't', 'balanced', 'asian_handicap', 'BANNED-1',
+                '阿后备', '河床后备队', '博卡后备队', ?, 'asian_handicap',
+                '河床后备队 -0.5', 1.85, '[]', '[]', '{}', 'settled',
+                1, 0, 1, 1.85, 0.85, ?, ?
+            )
+            """,
+            (now, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO recommendation_records (
+                record_key, run_id, tool, mode, target_market, match_id, league,
+                home_team, away_team, kickoff_utc, market, selection, decimal_odds,
+                risk_flags_json, caution_flags_json, raw_json, settlement_status,
+                home_score, away_score, hit, payout_multiplier, profit_units,
+                settled_at_utc, created_at_utc
+            ) VALUES (
+                'rec:main', 'r', 't', 'balanced', 'asian_handicap', 'MAIN-1',
+                '英超', '阿森纳', '切尔西', ?, 'asian_handicap',
+                '阿森纳 -0.5', 1.85, '[]', '[]', '{}', 'settled',
+                1, 0, 1, 1.85, 0.85, ?, ?
+            )
+            """,
+            (now, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO shadow_prediction_records (
+                shadow_key, run_id, tool, mode, target_market, decision, match_id,
+                league, home_team, away_team, kickoff_utc, market, selection,
+                quality_json, thresholds_json, raw_json, settlement_status,
+                created_at_utc
+            ) VALUES (
+                'sh:banned', 'r', 't', 'balanced', 'asian_handicap', 'rejected',
+                'BANNED-SH', '澳昆女超', '布里斯班女足', '黄金海岸女足', ?,
+                'asian_handicap', '布里斯班女足 +0.25', '{}', '{}', '{}',
+                'open', ?
+            )
+            """,
+            (now, now),
+        )
+        banned_rec_id = conn.execute(
+            "SELECT id FROM recommendation_records WHERE record_key = 'rec:banned'"
+        ).fetchone()[0]
+        banned_shadow_id = conn.execute(
+            "SELECT id FROM shadow_prediction_records WHERE shadow_key = 'sh:banned'"
+        ).fetchone()[0]
+        for ledger_id in (f"recommendation:{banned_rec_id}", f"shadow_prediction:{banned_shadow_id}"):
+            conn.execute(
+                """
+                INSERT INTO notification_deliveries (
+                    channel, notification_type, ledger_id, status, attempt_count,
+                    response_json, created_at_utc, updated_at_utc, sent_at_utc
+                ) VALUES ('lark', 'prediction', ?, 'sent', 1, '{}', ?, ?, ?)
+                """,
+                (ledger_id, now, now, now),
+            )
+
+    snapshot_store.save_market_snapshots(
+        [
+            snapshot_store.MarketSnapshot(
+                provider="test",
+                source_key="banned",
+                event_id="BANNED-1",
+                league="阿后备",
+                home_team="河床后备队",
+                away_team="博卡后备队",
+                kickoff_utc=now,
+                bookmaker="36*",
+                market_type="asian_handicap",
+                selection="home_cover",
+                decimal_odds=1.85,
+                line=-0.5,
+                source_time_utc=now,
+                fetched_at_utc=now,
+                raw={},
+            ),
+            snapshot_store.MarketSnapshot(
+                provider="test",
+                source_key="main",
+                event_id="MAIN-1",
+                league="英超",
+                home_team="阿森纳",
+                away_team="切尔西",
+                kickoff_utc=now,
+                bookmaker="36*",
+                market_type="asian_handicap",
+                selection="home_cover",
+                decimal_odds=1.85,
+                line=-0.5,
+                source_time_utc=now,
+                fetched_at_utc=now,
+                raw={},
+            ),
+        ],
+        db_path=snapshot_db_path,
+    )
+
+    dry = db_janitor.purge_hard_excluded_competition_records(
+        learning_db_path=learning_db_path,
+        snapshot_db_path=snapshot_db_path,
+        dry_run=True,
+    )
+    assert dry["categories"]["recommendation_records.hard_excluded_competitions"]["count"] == 1
+    assert dry["categories"]["shadow_prediction_records.hard_excluded_competitions"]["count"] == 1
+    assert dry["categories"]["market_snapshots.hard_excluded_competitions"]["count"] == 1
+    assert dry["totals"]["deleted"] == 0
+
+    report = db_janitor.purge_hard_excluded_competition_records(
+        learning_db_path=learning_db_path,
+        snapshot_db_path=snapshot_db_path,
+        dry_run=False,
+    )
+    assert report["categories"]["recommendation_records.hard_excluded_competitions"]["count"] == 1
+    assert report["categories"]["shadow_prediction_records.hard_excluded_competitions"]["count"] == 1
+    assert report["categories"]["market_snapshots.hard_excluded_competitions"]["count"] == 1
+
+    with sqlite3.connect(learning_db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM recommendation_records WHERE league = '阿后备'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM recommendation_records WHERE league = '英超'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM shadow_prediction_records WHERE league = '澳昆女超'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM notification_deliveries").fetchone()[0] == 0
+
+    with sqlite3.connect(snapshot_db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM market_snapshots WHERE league = '阿后备'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM market_snapshots WHERE league = '英超'").fetchone()[0] == 1

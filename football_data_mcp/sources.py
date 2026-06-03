@@ -30,6 +30,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
 from football_data_mcp import external_sources, learning_store, model_engine, oddsportal_source, snapshot_store
+from football_data_mcp.competition_policy import match_hard_exclusion_reason as _match_hard_exclusion_reason
 from football_data_mcp.config import env_bool
 
 
@@ -9304,6 +9305,12 @@ async def settle_learning_recommendations(
     unsettleable = learning_store.mark_unsettleable_stale_records(db_path=db_path)
     settlement = learning_store.settle_recommendations(all_results, db_path=db_path)
     shadow_settlement = learning_store.settle_shadow_predictions(all_results, db_path=db_path)
+    clv_tracking = _persist_clv_tracking_for_settled_records(
+        settlement=settlement,
+        shadow_settlement=shadow_settlement,
+        db_path=db_path,
+    )
+    AUTO_LEARNING_STATE["last_clv_tracking"] = clv_tracking
     calibration = learning_store.recompute_calibration(db_path=db_path)
     strategy_state = learning_store.update_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
     shadow_prediction_metrics = learning_store.shadow_prediction_metrics(db_path=db_path)
@@ -9318,6 +9325,7 @@ async def settle_learning_recommendations(
         "unsettleable_cleanup": unsettleable,
         "settlement": settlement,
         "shadow_settlement": shadow_settlement,
+        "clv_tracking": clv_tracking,
         "calibration": calibration,
         "strategy_state": strategy_state,
         "shadow_prediction_metrics": shadow_prediction_metrics,
@@ -9552,6 +9560,84 @@ def _market_snapshot_sync_summary(result: dict[str, Any]) -> dict[str, Any]:
         "soft_flags": [flag for flag, _count in soft_flags.most_common(5)],
         "db_path": snapshot_store_info.get("db_path") or snapshot_store.snapshot_db_path(),
         "at_utc": now_utc().isoformat(),
+    }
+
+
+def _persist_clv_tracking_for_settled_records(
+    *,
+    settlement: dict[str, Any],
+    shadow_settlement: dict[str, Any],
+    db_path: str | None = None,
+    market_db_path: str | None = None,
+    limit: int = 1000,
+) -> dict[str, Any]:
+    """Compute CLV from persisted odds snapshots and attach it to newly settled learning rows."""
+    bounded_limit = max(1, min(int(limit or 1000), 1000))
+    market_db = market_db_path or snapshot_store.snapshot_db_path()
+
+    def persist_one(record_source: str, records: list[dict[str, Any]]) -> dict[str, Any]:
+        bounded_records = [record for record in records if isinstance(record, dict)][:bounded_limit]
+        if not bounded_records:
+            return {
+                "status": "empty",
+                "record_source": record_source,
+                "record_count": 0,
+                "tracked_count": 0,
+                "available_count": 0,
+                "persisted": {
+                    "updated_count": 0,
+                    "available_count": 0,
+                    "unavailable_count": 0,
+                    "reasons": {},
+                },
+            }
+        tracking = snapshot_store.closing_line_value_for_records(
+            bounded_records,
+            db_path=market_db,
+            limit=bounded_limit,
+            allow_fuzzy_match=True,
+            prefer_persisted=False,
+        )
+        persisted = learning_store.update_clv_tracking(
+            record_source=record_source,
+            clv_records=[item for item in (tracking.get("records") or []) if isinstance(item, dict)],
+            db_path=db_path,
+        )
+        return {
+            "status": tracking.get("status") or "ok",
+            "record_source": record_source,
+            "record_count": len(bounded_records),
+            "tracked_count": int(tracking.get("tracked_count") or 0),
+            "skipped_count": int(tracking.get("skipped_count") or 0),
+            "available_count": int(tracking.get("available_count") or 0),
+            "positive_clv_count": int(tracking.get("positive_clv_count") or 0),
+            "positive_clv_rate": tracking.get("positive_clv_rate"),
+            "avg_clv_return": tracking.get("avg_clv_return"),
+            "persisted": persisted,
+            "truncated_count": max(0, len(records) - len(bounded_records)),
+        }
+
+    recommendation_records = [
+        record for record in (settlement.get("settled_records") or []) if isinstance(record, dict)
+    ]
+    shadow_records = [
+        record for record in (shadow_settlement.get("settled_records") or []) if isinstance(record, dict)
+    ]
+    recommendation = persist_one("recommendation", recommendation_records)
+    shadow = persist_one("shadow_prediction", shadow_records)
+    available_count = int(recommendation.get("available_count") or 0) + int(shadow.get("available_count") or 0)
+    tracked_count = int(recommendation.get("tracked_count") or 0) + int(shadow.get("tracked_count") or 0)
+    return {
+        "status": "ok" if tracked_count else "empty",
+        "tool": "persist_settlement_clv_tracking",
+        "market_db_path": market_db,
+        "record_count": len(recommendation_records) + len(shadow_records),
+        "tracked_count": tracked_count,
+        "available_count": available_count,
+        "coverage_ratio": round(available_count / tracked_count, 6) if tracked_count else None,
+        "recommendation": recommendation,
+        "shadow_prediction": shadow,
+        "rule": "CLV is persisted after settlement, before calibration and strategy recompute.",
     }
 
 
@@ -10128,7 +10214,13 @@ async def run_auto_learning_cycle(
                         "error": f"{type(status_exc).__name__}: {status_exc}",
                     }
                 closure = odds_source_status.get("closure") if isinstance(odds_source_status, dict) else None
-                if isinstance(closure, dict) and bool(closure.get("production_ready")):
+                active_odds_source = str((closure or {}).get("active_source") or "")
+                has_non_fallback_production_source = (
+                    isinstance(closure, dict)
+                    and bool(closure.get("production_ready"))
+                    and active_odds_source != "oddsportal_scraper"
+                )
+                if has_non_fallback_production_source:
                     oddsportal_snapshot_sync = {
                         "enabled": True,
                         "provider": "oddsportal_scraper",
@@ -17501,6 +17593,19 @@ async def shortlist_value_matches(
         except Exception:
             effective_allowlist = SETTLEMENT_COVERED_LEAGUES_DEFAULT
 
+    policy_allowed_matches: list[dict[str, Any]] = []
+    for m in matches:
+        exclusion_reason = _match_hard_exclusion_reason(m)
+        if exclusion_reason:
+            rejected.append({
+                "match": m,
+                "reason": exclusion_reason,
+                "rejected_league": str(m.get("league") or m.get("competition_name") or ""),
+            })
+        else:
+            policy_allowed_matches.append(m)
+    matches = policy_allowed_matches
+
     if effective_allowlist:
         allowed_matches = []
         for m in matches:
@@ -17737,7 +17842,8 @@ async def shortlist_value_matches(
         "analysis_input_policy": (
             "The shortlist scans all schedule-anchored fixtures in the time window, then analyze_single_match tries to "
             "resolve usable odds from fixture odds, detail pages, and supplemental sources. Matches without calculable "
-            "odds are rejected as data-blocked and are not given a betting direction."
+            "odds are rejected as data-blocked and are not given a betting direction. Reserve/youth, women, friendlies, "
+            "and non-mainstream lower-tier/regional cup fixtures are hard-excluded before analysis."
         ),
         "ranking_policy": (
             "MCP lightly lists upcoming matches, concurrently analyzes up to 100 listed candidates, "

@@ -119,6 +119,22 @@ ODDSPORTAL_TEAM_NAME_ALIASES = {
     "罗马尼亚": "Romania",
     "马达加斯加": "Madagascar",
     "摩洛哥": "Morocco",
+    "吉尔吉斯斯坦": "Kyrgyzstan",
+    "肯尼亚": "Kenya",
+    "菲律宾": "Philippines",
+    "关岛": "Guam",
+    "海地": "Haiti",
+    "新西兰": "New Zealand",
+    "威尔士": "Wales",
+    "加纳": "Ghana",
+    "中国女足": "China W",
+    "俄罗斯女足": "Russia W",
+    "坦桑尼亚女足": "Tanzania W",
+    "马拉维女足": "Malawi W",
+    "印度尼西亚女足": "Indonesia W",
+    "新加坡女足": "Singapore W",
+    "缅甸女足": "Myanmar W",
+    "乌兹别克斯坦女足": "Uzbekistan W",
 }
 
 

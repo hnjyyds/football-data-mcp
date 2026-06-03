@@ -19,6 +19,7 @@ class HoldoutValidationJobRequest(BaseModel):
     min_validation_bets: int = 50
     min_validation_evaluated: int = 100
     historical_rho_min_samples: int = 20
+    use_cache: bool = True
     resume: bool = True
     start: bool = True
 
