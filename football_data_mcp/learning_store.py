@@ -1138,6 +1138,135 @@ def list_shadow_prediction_records(
     return [_decode_shadow_row(row) for row in rows]
 
 
+_CLV_RECORD_SOURCE_TABLES = {
+    "recommendation": "recommendation_records",
+    "recommendation_record": "recommendation_records",
+    "recommendation_records": "recommendation_records",
+    "shadow": "shadow_prediction_records",
+    "shadow_prediction": "shadow_prediction_records",
+    "shadow_prediction_record": "shadow_prediction_records",
+    "shadow_prediction_records": "shadow_prediction_records",
+}
+
+
+def _clv_record_source_table(record_source: str) -> str:
+    table = _CLV_RECORD_SOURCE_TABLES.get(str(record_source or "").strip().lower())
+    if not table:
+        raise ValueError(f"unsupported CLV record source: {record_source}")
+    return table
+
+
+def _clv_record_tracking_payload(item: dict[str, Any], *, computed_at_utc: str) -> tuple[dict[str, Any], float | None]:
+    clv_value = item.get("clv")
+    clv: dict[str, Any] = clv_value if isinstance(clv_value, dict) else {}
+    status = str(clv.get("status") or item.get("status") or "unknown").strip() or "unknown"
+    clv_return = parse_float(
+        clv.get("clv_return")
+        if clv.get("clv_return") is not None
+        else clv.get("clv")
+        if clv.get("clv") is not None
+        else item.get("closing_line_value")
+    )
+    payload = {
+        **clv,
+        "status": status,
+        "clv": clv_return,
+        "clv_return": clv_return,
+        "computed_at_utc": computed_at_utc,
+        "source": "market_snapshots",
+        "record_key": item.get("record_key"),
+        "rule": "CLV is computed from persisted pre-kickoff market snapshots after the prediction time.",
+    }
+    reason = clv.get("reason") or item.get("reason")
+    if reason:
+        payload["reason"] = str(reason)
+    return payload, clv_return
+
+
+def update_clv_tracking(
+    *,
+    record_source: str,
+    clv_records: list[dict[str, Any]],
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    """Persist CLV tracking into settled prediction raw_json for calibration and production gates."""
+    table = _clv_record_source_table(record_source)
+    indexed = {
+        str(item.get("record_id")): item
+        for item in clv_records
+        if isinstance(item, dict) and item.get("record_id") is not None
+    }
+    if not indexed:
+        return {
+            "status": "empty",
+            "record_source": record_source,
+            "updated_count": 0,
+            "available_count": 0,
+            "unavailable_count": 0,
+            "missing_record_id_count": len(clv_records),
+            "reasons": {},
+        }
+
+    updated_count = 0
+    available_count = 0
+    unavailable_count = 0
+    reasons: dict[str, int] = {}
+    computed_at = now_utc_iso()
+    placeholders = ",".join("?" for _ in indexed)
+    with _connect(db_path) as conn:
+        ensure_schema(conn)
+        rows = conn.execute(
+            f"""
+            SELECT id, raw_json
+            FROM {table}
+            WHERE id IN ({placeholders})
+            """,
+            tuple(indexed.keys()),
+        ).fetchall()
+        for row in rows:
+            item = indexed.get(str(row["id"]))
+            if not item:
+                continue
+            try:
+                raw = json.loads(row["raw_json"] or "{}")
+            except json.JSONDecodeError:
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+
+            tracking, clv_return = _clv_record_tracking_payload(item, computed_at_utc=computed_at)
+            status = str(tracking.get("status") or "")
+            raw["clv_tracking"] = tracking
+            if status == "available" and clv_return is not None:
+                raw["closing_line_value"] = clv_return
+                available_count += 1
+            else:
+                raw.pop("closing_line_value", None)
+                unavailable_count += 1
+                reason = str(tracking.get("reason") or status or "unknown")
+                reasons[reason] = reasons.get(reason, 0) + 1
+
+            conn.execute(
+                f"UPDATE {table} SET raw_json = ? WHERE id = ?",
+                (_json(raw), row["id"]),
+            )
+            updated_count += 1
+        conn.commit()
+
+    return {
+        "status": "ok" if updated_count else "empty",
+        "record_source": record_source,
+        "table": table,
+        "updated_count": updated_count,
+        "available_count": available_count,
+        "unavailable_count": unavailable_count,
+        "missing_record_id_count": len(clv_records) - len(indexed),
+        "not_found_count": max(0, len(indexed) - updated_count),
+        "reasons": dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "computed_at_utc": computed_at,
+    }
+
+
 def list_prediction_ledger_ids_for_run(
     run_id: str,
     *,
@@ -1523,13 +1652,18 @@ def _avg_clv_for_bucket(records: list[dict[str, Any]]) -> float | None:
     """Extract average closing line value from settled records if available."""
     clv_values = []
     for record in records:
-        raw = record.get("raw") or {}
-        if not isinstance(raw, dict):
+        raw_value = record.get("raw")
+        raw: dict[str, Any] | None = raw_value if isinstance(raw_value, dict) and raw_value else None
+        if raw is None:
             try:
                 raw = json.loads(record.get("raw_json") or "{}")
             except Exception:
                 raw = {}
-        clv = parse_float(raw.get("closing_line_value") or (raw.get("clv_tracking") or {}).get("clv"))
+        if not isinstance(raw, dict):
+            raw = {}
+        tracking_value = raw.get("clv_tracking")
+        tracking: dict[str, Any] = tracking_value if isinstance(tracking_value, dict) else {}
+        clv = parse_float(raw.get("closing_line_value") or tracking.get("clv") or tracking.get("clv_return"))
         if clv is not None:
             clv_values.append(clv)
     return _average(clv_values)
@@ -1990,7 +2124,8 @@ def _compute_avg_clv(conn: sqlite3.Connection, market: str) -> float | None:
     for row in rows:
         try:
             raw = json.loads(row["raw_json"] or "{}")
-            clv = parse_float(raw.get("closing_line_value") or (raw.get("clv_tracking") or {}).get("clv"))
+            tracking = raw.get("clv_tracking") if isinstance(raw.get("clv_tracking"), dict) else {}
+            clv = parse_float(raw.get("closing_line_value") or tracking.get("clv") or tracking.get("clv_return"))
             if clv is not None:
                 clv_values.append(clv)
         except Exception:

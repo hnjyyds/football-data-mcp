@@ -208,13 +208,40 @@ _NORMALIZE_TEAM_TOKEN_RE = re.compile(r"\b(fc|cf|afc|sc|u23|u21)\b")
 _NORMALIZE_TEAM_UNDERSCORE_RE = re.compile(r"_+")
 _NORMALIZE_TEAM_NONWORD_RE = re.compile(r"[^\w]+", flags=re.UNICODE)
 _NORMALIZE_TEAM_WS_RE = re.compile(r"\s+")
+_TEAM_NAME_ALIASES = {
+    # Cross-source coverage needs to match Chinese ledger names against English
+    # odds snapshots from independent crawlers.
+    "比利时": "Belgium",
+    "格鲁吉亚": "Georgia",
+    "克罗地亚": "Croatia",
+    "罗马尼亚": "Romania",
+    "马达加斯加": "Madagascar",
+    "摩洛哥": "Morocco",
+    "吉尔吉斯斯坦": "Kyrgyzstan",
+    "肯尼亚": "Kenya",
+    "菲律宾": "Philippines",
+    "关岛": "Guam",
+    "海地": "Haiti",
+    "新西兰": "New Zealand",
+    "威尔士": "Wales",
+    "加纳": "Ghana",
+    "中国女足": "China W",
+    "俄罗斯女足": "Russia W",
+    "坦桑尼亚女足": "Tanzania W",
+    "马拉维女足": "Malawi W",
+    "印度尼西亚女足": "Indonesia W",
+    "新加坡女足": "Singapore W",
+    "缅甸女足": "Myanmar W",
+    "乌兹别克斯坦女足": "Uzbekistan W",
+}
 
 
 @functools.lru_cache(maxsize=8192)
 def _normalize_team(value: str) -> str:
     if not value:
         return ""
-    value = value.translate(_TEXT_VARIANTS).lower()
+    value = value.translate(_TEXT_VARIANTS).strip().lower()
+    value = _TEAM_NAME_ALIASES.get(value, value).lower()
     value = _NORMALIZE_TEAM_TOKEN_RE.sub(" ", value)
     value = _NORMALIZE_TEAM_UNDERSCORE_RE.sub(" ", value)
     value = _NORMALIZE_TEAM_NONWORD_RE.sub(" ", value)
@@ -1138,6 +1165,71 @@ def _record_selection(record: dict[str, Any]) -> str:
     return str(record.get("selection") or selection_key or "")
 
 
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_raw_json(record: dict[str, Any]) -> dict[str, Any]:
+    raw = record.get("raw")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(str(record.get("raw_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _persisted_clv_tracking_for_record(record: dict[str, Any]) -> dict[str, Any] | None:
+    raw = _record_raw_json(record)
+    tracking_value = raw.get("clv_tracking")
+    clv_return = _float_or_none(raw.get("closing_line_value"))
+    if isinstance(tracking_value, dict):
+        tracking = dict(tracking_value)
+        if tracking.get("clv_return") is None and tracking.get("clv") is not None:
+            tracking["clv_return"] = _float_or_none(tracking.get("clv"))
+        if tracking.get("clv") is None and tracking.get("clv_return") is not None:
+            tracking["clv"] = _float_or_none(tracking.get("clv_return"))
+        if tracking.get("status") is None:
+            tracking["status"] = "available" if tracking.get("clv_return") is not None else "unavailable"
+        return {
+            "record_id": record.get("id"),
+            "record_key": record.get("record_key"),
+            "home_team": record.get("home_team"),
+            "away_team": record.get("away_team"),
+            "market": record.get("market"),
+            "selection": record.get("selection"),
+            "selection_key": record.get("selection_key"),
+            "status": tracking.get("status"),
+            "clv": tracking,
+            "persisted": True,
+        }
+    if clv_return is None:
+        return None
+    tracking = {
+        "status": "available",
+        "method": "persisted_closing_line_value",
+        "clv": clv_return,
+        "clv_return": clv_return,
+        "source": "raw_json",
+    }
+    return {
+        "record_id": record.get("id"),
+        "record_key": record.get("record_key"),
+        "home_team": record.get("home_team"),
+        "away_team": record.get("away_team"),
+        "market": record.get("market"),
+        "selection": record.get("selection"),
+        "selection_key": record.get("selection_key"),
+        "status": "available",
+        "clv": tracking,
+        "persisted": True,
+    }
+
+
 def closing_line_value_for_records(
     records: list[dict[str, Any]],
     *,
@@ -1145,11 +1237,16 @@ def closing_line_value_for_records(
     closing_window_minutes: int = 30,
     limit: int = 100,
     allow_fuzzy_match: bool = True,
+    prefer_persisted: bool = True,
 ) -> dict[str, Any]:
     bounded_records = records[: max(1, min(int(limit or 100), 1000))]
     tracked = []
     skipped_count = 0
     for record in bounded_records:
+        persisted_tracking = _persisted_clv_tracking_for_record(record) if prefer_persisted else None
+        if persisted_tracking:
+            tracked.append(persisted_tracking)
+            continue
         home_team = str(record.get("home_team") or "")
         away_team = str(record.get("away_team") or "")
         prediction_decimal_odds = record.get("decimal_odds")
