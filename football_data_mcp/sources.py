@@ -29,7 +29,14 @@ import httpx
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
-from football_data_mcp import external_sources, learning_store, model_engine, oddsportal_source, snapshot_store
+from football_data_mcp import (
+    external_sources,
+    learning_store,
+    model_engine,
+    odds_feature_engine,
+    oddsportal_source,
+    snapshot_store,
+)
 from football_data_mcp.competition_policy import match_hard_exclusion_reason as _match_hard_exclusion_reason
 from football_data_mcp.config import env_bool
 
@@ -4577,6 +4584,220 @@ def _candidate_market_movement_note(candidate: dict[str, Any], movement: dict[st
     )
 
 
+def _movement_elapsed_hours(movement: dict[str, Any]) -> float | None:
+    first_raw = movement.get("first_observed_at_utc")
+    latest_raw = movement.get("latest_observed_at_utc")
+    if not first_raw or not latest_raw:
+        return None
+    try:
+        first_time = date_parser.parse(str(first_raw))
+        latest_time = date_parser.parse(str(latest_raw))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    seconds = (latest_time - first_time).total_seconds()
+    if seconds <= 0:
+        return None
+    return seconds / 3600
+
+
+def _movement_line_component(candidate: dict[str, Any], movement: dict[str, Any]) -> float:
+    line_delta = parse_float(movement.get("line_delta"))
+    if line_delta is None or line_delta == 0:
+        return 0.0
+    market = _movement_market_key(candidate.get("market"))
+    selection_key = _movement_selection_key(candidate)
+    if market == "asian_handicap":
+        direction = -1.0 if selection_key == "home_cover" else 1.0
+        return _clamp(direction * line_delta * 0.025, -0.015, 0.015)
+    if market == "over_under":
+        direction = 1.0 if selection_key == "over" else -1.0
+        return _clamp(direction * line_delta * 0.015, -0.012, 0.012)
+    return 0.0
+
+
+def _movement_feature_weight(movement: dict[str, Any]) -> float:
+    bookmaker_count = int(parse_float(movement.get("bookmaker_count")) or 0)
+    snapshot_count = int(parse_float(movement.get("snapshot_count")) or 0)
+    latest_spread = parse_float(movement.get("latest_price_spread"))
+    elapsed_hours = _movement_elapsed_hours(movement)
+
+    source_weight = _clamp(0.5 + bookmaker_count * 0.12 + snapshot_count * 0.025, 0.5, 1.0)
+    if elapsed_hours is None:
+        history_weight = 0.85
+    elif elapsed_hours < 0.25:
+        history_weight = 0.7
+    elif elapsed_hours < 1:
+        history_weight = 0.85
+    else:
+        history_weight = 1.0
+    if latest_spread is None:
+        dispersion_weight = 0.95
+    elif latest_spread > 0.25:
+        dispersion_weight = 0.75
+    elif latest_spread > 0.12:
+        dispersion_weight = 0.88
+    else:
+        dispersion_weight = 1.0
+    return round_metric(_clamp(source_weight * history_weight * dispersion_weight, 0.35, 1.0)) or 0.0
+
+
+def _market_movement_has_available_history(market_movement: dict[str, Any] | None, market: str) -> bool:
+    markets = (market_movement or {}).get("markets")
+    if not isinstance(markets, dict):
+        return False
+    market_summary = markets.get(market)
+    if not isinstance(market_summary, dict):
+        return False
+    selections = market_summary.get("selections")
+    if not isinstance(selections, dict):
+        return False
+    return any(
+        isinstance(item, dict) and item.get("status") == "available"
+        for item in selections.values()
+    )
+
+
+def _movement_probability_adjustment(
+    candidate: dict[str, Any],
+    movement: dict[str, Any],
+) -> dict[str, Any]:
+    if _candidate_market_movement_signal(movement) in {"unavailable", "insufficient_history"}:
+        return {
+            "status": "unavailable",
+            "method": "bounded_odds_movement_calibration_v1",
+            "reason": "movement_history_unavailable",
+        }
+    implied_delta = parse_float(movement.get("implied_probability_delta"))
+    if implied_delta is None:
+        return {
+            "status": "unavailable",
+            "method": "bounded_odds_movement_calibration_v1",
+            "reason": "implied_probability_delta_missing",
+        }
+
+    line_component = _movement_line_component(candidate, movement)
+    weight = _movement_feature_weight(movement)
+    raw_adjustment = (implied_delta * 0.38 + line_component) * weight
+    max_adjustment = 0.035
+    adjustment = _clamp(raw_adjustment, -max_adjustment, max_adjustment)
+    if abs(adjustment) < 0.002:
+        status = "small_signal"
+    else:
+        status = "applied"
+
+    elapsed_hours = _movement_elapsed_hours(movement)
+    velocity_per_hour = implied_delta / elapsed_hours if elapsed_hours else None
+    return {
+        "status": status,
+        "method": "bounded_odds_movement_calibration_v1",
+        "adjustment": round_metric(adjustment),
+        "raw_adjustment": round_metric(raw_adjustment),
+        "max_abs_adjustment": max_adjustment,
+        "information_probability_delta": round_metric(implied_delta),
+        "line_component": round_metric(line_component),
+        "feature_weight": weight,
+        "elapsed_hours": round_metric(elapsed_hours, 3) if elapsed_hours is not None else None,
+        "velocity_per_hour": round_metric(velocity_per_hour) if velocity_per_hour is not None else None,
+        "price_value_rule": (
+            "Movement adjusts the model probability only within a small bound; current decimal odds still decide EV, "
+            "so a shortened price can support information while reducing value."
+        ),
+    }
+
+
+def _apply_market_movement_calibration(
+    candidate: dict[str, Any],
+    *,
+    confidence: float,
+    blocking_flags: list[str],
+    caution_flag_count: int = 0,
+) -> dict[str, Any]:
+    movement = candidate.get("market_movement") if isinstance(candidate.get("market_movement"), dict) else {}
+    if not movement:
+        return candidate
+    calibration = _movement_probability_adjustment(candidate, movement)
+    adjustment = parse_float(calibration.get("adjustment"))
+    model_probability = parse_float(candidate.get("model_probability"))
+    if model_probability is None or adjustment is None or calibration.get("status") not in {"applied", "small_signal"}:
+        return {
+            **candidate,
+            "odds_movement_calibration": calibration,
+        }
+
+    adjusted_probability = _clamp(model_probability + adjustment, 0.01, 0.99)
+    value_metrics = _candidate_value_metrics(
+        model_probability=adjusted_probability,
+        market_probability=candidate.get("market_probability"),
+        decimal_odds=candidate.get("decimal_odds"),
+        probability_edge=adjusted_probability - (parse_float(candidate.get("market_probability")) or 0.0),
+    )
+    recommendation = _recommendation_from_edge(value_metrics.get("edge"), confidence, blocking_flags)
+    source = str(candidate.get("probability_source") or "")
+    if "odds-movement" not in source and calibration.get("status") == "applied":
+        source = f"{source} + bounded odds-movement calibration".strip(" +")
+    note = str(candidate.get("market_movement_note") or "")
+    if calibration.get("status") == "applied":
+        note = "{} 走势校准：模型概率{}。".format(
+            note,
+            _edge_text(calibration.get("adjustment")),
+        ).strip()
+
+    return {
+        **candidate,
+        "raw_model_probability": round_metric(model_probability),
+        "model_probability": round_metric(adjusted_probability),
+        "probability_edge": value_metrics.get("probability_edge"),
+        "expected_multiplier": value_metrics.get("expected_multiplier"),
+        "edge": value_metrics.get("edge"),
+        "edge_basis": value_metrics.get("edge_basis"),
+        "recommendation": recommendation,
+        "stake_level": _stake_level(recommendation, confidence, caution_flag_count),
+        "probability_source": source,
+        "edge_source": (
+            f"{candidate.get('edge_source')}+odds_movement_calibration"
+            if calibration.get("status") == "applied" and candidate.get("edge_source")
+            else candidate.get("edge_source")
+        ),
+        "market_movement_note": note,
+        "odds_movement_calibration": {
+            **calibration,
+            "raw_model_probability": round_metric(model_probability),
+            "adjusted_model_probability": round_metric(adjusted_probability),
+        },
+    }
+
+
+def _movement_rank_value_metrics(
+    *,
+    market: str,
+    selection_key: str,
+    model_probability: Any,
+    market_probability: Any,
+    decimal_odds: Any,
+    market_movement: dict[str, Any] | None,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    model_probability_float = parse_float(model_probability)
+    if model_probability_float is None:
+        return fallback
+    movement_candidate = {
+        "market": market,
+        "selection_key": selection_key,
+    }
+    movement = _candidate_market_movement(movement_candidate, market_movement)
+    calibration = _movement_probability_adjustment(movement_candidate, movement)
+    adjustment = parse_float(calibration.get("adjustment"))
+    if adjustment is None or calibration.get("status") not in {"applied", "small_signal"}:
+        return fallback
+    adjusted_probability = _clamp(model_probability_float + adjustment, 0.01, 0.99)
+    return _candidate_value_metrics(
+        model_probability=adjusted_probability,
+        market_probability=market_probability,
+        decimal_odds=decimal_odds,
+        probability_edge=adjusted_probability - (parse_float(market_probability) or 0.0),
+    )
+
+
 def _enrich_candidate_with_market_movement(
     candidate: dict[str, Any],
     market_movement: dict[str, Any] | None,
@@ -4600,6 +4821,7 @@ def _enrich_candidate_with_market_movement(
         "latest_line",
         "line_delta",
         "implied_probability_delta",
+        "latest_price_spread",
         "bookmaker_count",
         "snapshot_count",
         "first_observed_at_utc",
@@ -4612,6 +4834,60 @@ def _enrich_candidate_with_market_movement(
         "market_movement_signal": signal,
         "market_movement_probability_delta": movement.get("implied_probability_delta"),
         "market_movement_note": _candidate_market_movement_note(candidate, movement),
+    }
+
+
+def _candidate_odds_research_note(profile: dict[str, Any]) -> str:
+    if profile.get("status") != "available":
+        return ""
+    no_vig = _percent_text(profile.get("no_vig_probability"))
+    model = _percent_text(profile.get("model_probability"))
+    ev_edge = _edge_text(profile.get("ev_edge"))
+    price_gap = _edge_text(profile.get("price_gap_vs_consensus"))
+    spread = _percent_text(profile.get("price_spread_pct"))
+    verdict = str(profile.get("research_verdict") or "")
+    verdict_label = {
+        "positive_ev_with_market_context": "赔率研究：模型概率高于当前入场要求，且 EV 为正",
+        "thin_positive_ev": "赔率研究：只有薄正 EV，需要等更好价格或更多证据",
+        "price_value_not_probability_edge": "赔率研究：价值主要来自可买价格，不是明显强于市场共识",
+        "market_support_but_price_tight": "赔率研究：盘口支持这个方向，但价格已经变紧",
+        "value_depends_on_bookmaker_price": "赔率研究：公司分歧较大，必须拿到接近最佳价",
+        "no_current_price_value": "赔率研究：当前价格没有正 EV",
+    }.get(verdict, "赔率研究：市场证据已纳入")
+    parts = [verdict_label]
+    if model and no_vig:
+        parts.append(f"模型 {model} vs 去水市场 {no_vig}")
+    if ev_edge:
+        parts.append(f"EV {ev_edge}")
+    if price_gap:
+        parts.append(f"相对共识价 {price_gap}")
+    if spread and (parse_float(profile.get("price_spread_pct")) or 0.0) >= 0.04:
+        parts.append(f"公司价差 {spread}")
+    return "，".join(parts) + "。"
+
+
+def _enrich_candidate_with_odds_research(
+    candidate: dict[str, Any],
+    odds_features: dict[str, Any] | None,
+) -> dict[str, Any]:
+    profile = odds_feature_engine.candidate_odds_profile(candidate, odds_features)
+    if profile.get("status") != "available":
+        return {
+            **candidate,
+            "odds_research_profile": profile,
+        }
+    return {
+        **candidate,
+        "odds_research_profile": profile,
+        "odds_research_note": _candidate_odds_research_note(profile),
+        "no_vig_market_probability": profile.get("no_vig_probability"),
+        "probability_edge_vs_no_vig": profile.get("probability_edge_vs_no_vig"),
+        "fair_decimal_odds_from_model": profile.get("fair_decimal_odds_from_model"),
+        "kelly_fraction_full": profile.get("kelly_fraction_full"),
+        "price_gap_vs_consensus": profile.get("price_gap_vs_consensus"),
+        "best_available_odds": profile.get("best_available_odds"),
+        "price_spread_pct": profile.get("price_spread_pct"),
+        "odds_research_verdict": profile.get("research_verdict"),
     }
 
 
@@ -4691,6 +4967,9 @@ def _build_final_decision(
     market_movement_note = str(best_candidate.get("market_movement_note") or "").strip()
     if market_movement_note:
         rationale.append(market_movement_note)
+    odds_research_note = str(best_candidate.get("odds_research_note") or "").strip()
+    if odds_research_note:
+        rationale.append(odds_research_note)
 
     return {
         "action": action,
@@ -4850,9 +5129,11 @@ def build_betting_decision_support(
     quality_flags: list[str],
     quality_warnings: list[str],
     market_movement: dict[str, Any] | None = None,
+    odds_features: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic betting guardrails so agents do not turn every caution into no-bet."""
     market_movement = market_movement or {}
+    odds_features = odds_features or {}
     blocking_flags: list[str] = []
     caution_flags: list[str] = []
     for flag in quality_flags:
@@ -4933,7 +5214,11 @@ def build_betting_decision_support(
         edge_source = "model_engine"
     else:
         model_1x2 = _adjust_moneyline_probabilities(market_1x2, form)
-        movement_delta = _moneyline_movement_delta(moneyline)
+        movement_delta = (
+            0.0
+            if _market_movement_has_available_history(market_movement, "h2h")
+            else _moneyline_movement_delta(moneyline)
+        )
         model_1x2 = _apply_home_delta(model_1x2, movement_delta)
         probability_source = "MCP market probability plus bounded recent-form and market-movement heuristic"
         edge_source = "bounded_heuristic"
@@ -4961,7 +5246,22 @@ def build_betting_decision_support(
                 decimal_odds=moneyline_decimal_odds.get(key),
                 probability_edge=probability_edge,
             )
-        best_side = max(value_by_side, key=lambda key: parse_float((value_by_side[key] or {}).get("edge")) or -999)
+        ranking_value_by_side = {
+            key: _movement_rank_value_metrics(
+                market="1x2",
+                selection_key=key,
+                model_probability=model_1x2.get(key),
+                market_probability=market_1x2.get(key),
+                decimal_odds=moneyline_decimal_odds.get(key),
+                market_movement=market_movement,
+                fallback=value_by_side.get(key) or {},
+            )
+            for key in ("home", "draw", "away")
+        }
+        best_side = max(
+            ranking_value_by_side,
+            key=lambda key: parse_float((ranking_value_by_side[key] or {}).get("edge")) or -999,
+        )
         value_metrics = value_by_side.get(best_side) or {}
         edge = value_metrics.get("edge")
         recommendation = _recommendation_from_edge(edge, confidence, blocking_flags)
@@ -5093,7 +5393,23 @@ def build_betting_decision_support(
             )
             for key in ("home_cover", "away_cover")
         }
-        best_side = max(value_by_side, key=lambda key: parse_float((value_by_side[key] or {}).get("edge")) or -999)
+        asian_decimal_odds = asian_metrics.get("decimal_odds") or {}
+        ranking_value_by_side = {
+            key: _movement_rank_value_metrics(
+                market="asian_handicap",
+                selection_key=key,
+                model_probability=model_asian.get(key),
+                market_probability=market_asian.get(key),
+                decimal_odds=asian_decimal_odds.get(key),
+                market_movement=market_movement,
+                fallback=value_by_side.get(key) or {},
+            )
+            for key in ("home_cover", "away_cover")
+        }
+        best_side = max(
+            ranking_value_by_side,
+            key=lambda key: parse_float((ranking_value_by_side[key] or {}).get("edge")) or -999,
+        )
         value_metrics = value_by_side.get(best_side) or {}
         edge = value_metrics.get("edge")
         recommendation = _recommendation_from_edge(edge, confidence, blocking_flags)
@@ -5168,7 +5484,23 @@ def build_betting_decision_support(
             )
             for key in ("over", "under")
         }
-        best_side = max(value_by_side, key=lambda key: parse_float((value_by_side[key] or {}).get("edge")) or -999)
+        totals_decimal_odds = totals_metrics.get("decimal_odds") or {}
+        ranking_value_by_side = {
+            key: _movement_rank_value_metrics(
+                market="over_under",
+                selection_key=key,
+                model_probability=totals_model.get(key),
+                market_probability=totals_market.get(key),
+                decimal_odds=totals_decimal_odds.get(key),
+                market_movement=market_movement,
+                fallback=value_by_side.get(key) or {},
+            )
+            for key in ("over", "under")
+        }
+        best_side = max(
+            ranking_value_by_side,
+            key=lambda key: parse_float((ranking_value_by_side[key] or {}).get("edge")) or -999,
+        )
         value_metrics = value_by_side.get(best_side) or {}
         edge = value_metrics.get("edge")
         recommendation = _recommendation_from_edge(edge, confidence, blocking_flags)
@@ -5205,7 +5537,15 @@ def build_betting_decision_support(
 
     if candidates:
         candidates = [
-            _enrich_candidate_with_market_movement(candidate, market_movement)
+            _enrich_candidate_with_odds_research(
+                _apply_market_movement_calibration(
+                    _enrich_candidate_with_market_movement(candidate, market_movement),
+                    confidence=confidence,
+                    blocking_flags=blocking_flags,
+                    caution_flag_count=len(caution_flags),
+                ),
+                odds_features,
+            )
             for candidate in candidates
         ]
 
@@ -5244,6 +5584,12 @@ def build_betting_decision_support(
         movement_signal = str(best_candidate.get("market_movement_signal") or "")
         if movement_signal == "against_selection" and abs(best_movement_delta or 0.0) >= 0.02:
             _append_unique(caution_flags, "market_movement_against_selection")
+        odds_profile = best_candidate.get("odds_research_profile") if isinstance(best_candidate, dict) else {}
+        if isinstance(odds_profile, dict):
+            if (parse_float(odds_profile.get("price_spread_pct")) or 0.0) >= 0.08:
+                _append_unique(caution_flags, "odds_bookmaker_disagreement")
+            if odds_profile.get("research_verdict") == "market_support_but_price_tight":
+                _append_unique(caution_flags, "odds_price_shortened_after_market_support")
     final_decision = _build_final_decision(
         best_candidate,
         blocking_flags=blocking_flags,
@@ -5270,6 +5616,7 @@ def build_betting_decision_support(
         "form_signal": _form_signal(form),
         "model_engine": model_projection,
         "market_movement": market_movement,
+        "odds_features": odds_features,
         "market_candidates": candidates,
         "best_candidate": best_candidate,
         "final_decision": final_decision,
@@ -7345,6 +7692,11 @@ async def get_match_data_bundle(
     rows = snapshot_store.find_market_snapshots(parsed_home, parsed_away, league=league, limit=20000)
     consensus = snapshot_store.build_market_consensus(rows)
     movement = snapshot_store.build_market_movement_summary(rows, home_team=parsed_home, away_team=parsed_away)
+    odds_features = odds_feature_engine.build_odds_feature_summary(
+        rows,
+        home_team=parsed_home,
+        away_team=parsed_away,
+    )
     snapshot_counts = snapshot_store.provider_snapshot_counts()
     provider_health = external_sources.external_provider_health(snapshot_counts)
     odds_status = "snapshot_available" if rows else provider_health["the_odds_api"]["status"]
@@ -7467,6 +7819,7 @@ async def get_match_data_bundle(
         },
         "market_consensus": consensus,
         "market_movement": movement,
+        "odds_features": odds_features,
         "external_context": {
             "sportmonks": sportmonks_context,
             "api_football": api_football_context,
@@ -18067,6 +18420,7 @@ async def analyze_single_match(
         quality_flags=quality_flags,
         quality_warnings=quality_warnings,
         market_movement=data_bundle.get("market_movement") or {},
+        odds_features=data_bundle.get("odds_features") or {},
     )
     analysis_pack = build_analysis_pack(
         match=best,

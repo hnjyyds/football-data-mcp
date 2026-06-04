@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>比赛概率 App 预览</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f2f2f7;
+      --card: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --green: #168a45;
+      --blue: #2563eb;
+      --orange: #d97706;
+      --red: #dc2626;
+      --teal: #0f766e;
+      --purple: #7c3aed;
+      --gray: #71717a;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #d9dde7;
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      display: grid;
+      place-items: start center;
+      padding: 28px 12px;
+    }
+
+    .phone {
+      width: min(100%, 430px);
+      background: #050505;
+      border-radius: 38px;
+      padding: 12px;
+      box-shadow: 0 24px 80px rgba(15, 23, 42, .34);
+    }
+
+    .screen {
+      background: var(--bg);
+      border-radius: 30px;
+      overflow: hidden;
+      min-height: 860px;
+      position: relative;
+    }
+
+    .status-bar {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .status-icons {
+      letter-spacing: 1px;
+      color: #111;
+    }
+
+    .nav {
+      padding: 4px 18px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .nav h1 {
+      font-size: 22px;
+      margin: 0;
+      letter-spacing: 0;
+    }
+
+    .refresh {
+      border: 0;
+      background: rgba(37, 99, 235, .10);
+      color: var(--blue);
+      width: 34px;
+      height: 34px;
+      border-radius: 17px;
+      font-size: 17px;
+    }
+
+    main {
+      padding: 0 14px 88px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid rgba(229, 231, 235, .9);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 0 rgba(255,255,255,.9) inset;
+    }
+
+    .match-title {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .match-title h2 {
+      font-size: 20px;
+      line-height: 1.18;
+      margin: 0 0 6px;
+    }
+
+    .sub {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      border-radius: 999px;
+      padding: 5px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .chip.green { color: var(--green); background: rgba(22, 138, 69, .10); }
+    .chip.blue { color: var(--blue); background: rgba(37, 99, 235, .10); }
+    .chip.orange { color: var(--orange); background: rgba(217, 119, 6, .12); }
+    .chip.gray { color: var(--gray); background: rgba(113, 113, 122, .12); }
+    .chip.purple { color: var(--purple); background: rgba(124, 58, 237, .10); }
+    .chip.teal { color: var(--teal); background: rgba(15, 118, 110, .10); }
+
+    .prob-pills {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .pill {
+      border-radius: 10px;
+      padding: 10px 6px;
+      text-align: center;
+    }
+
+    .pill small {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
+    .pill strong {
+      display: block;
+      font-size: 18px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pill.green { background: rgba(22, 138, 69, .09); color: var(--green); }
+    .pill.blue { background: rgba(37, 99, 235, .09); color: var(--blue); }
+    .pill.orange { background: rgba(217, 119, 6, .10); color: var(--orange); }
+
+    .note {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+      margin-top: 10px;
+    }
+
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 3px;
+      background: #e5e7eb;
+      padding: 3px;
+      border-radius: 10px;
+      margin: 10px 0 12px;
+    }
+
+    .tabs button {
+      border: 0;
+      background: transparent;
+      border-radius: 8px;
+      height: 34px;
+      font-size: 14px;
+      font-weight: 700;
+      color: #4b5563;
+    }
+
+    .tabs button.active {
+      background: #fff;
+      color: #111827;
+      box-shadow: 0 1px 3px rgba(0,0,0,.12);
+    }
+
+    .section-title {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+
+    .num {
+      width: 22px;
+      height: 22px;
+      border-radius: 11px;
+      background: var(--blue);
+      color: white;
+      display: grid;
+      place-items: center;
+      font-size: 12px;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+
+    .section-title h3 {
+      font-size: 16px;
+      margin: 0 0 2px;
+    }
+
+    .section-title p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 9px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .row:first-of-type {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .row-title {
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 2px;
+    }
+
+    .row-detail {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .bars {
+      display: grid;
+      gap: 10px;
+    }
+
+    .bar-row {
+      display: grid;
+      gap: 6px;
+    }
+
+    .bar-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .bar-head span:last-child {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .track {
+      height: 9px;
+      border-radius: 999px;
+      background: #eceff3;
+      overflow: hidden;
+    }
+
+    .fill {
+      height: 100%;
+      border-radius: inherit;
+    }
+
+    .fill.green { background: var(--green); }
+    .fill.blue { background: var(--blue); }
+    .fill.orange { background: var(--orange); }
+    .fill.red { background: var(--red); }
+    .fill.teal { background: var(--teal); }
+    .fill.gray { background: var(--gray); }
+
+    .matrix {
+      display: grid;
+      grid-template-columns: 42px repeat(5, 1fr);
+      gap: 5px;
+      margin-top: 8px;
+    }
+
+    .cell {
+      min-height: 38px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      font-size: 10px;
+      line-height: 1.15;
+      font-weight: 700;
+      color: #111827;
+      padding: 3px;
+    }
+
+    .head {
+      color: var(--muted);
+      background: transparent;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .win { background: rgba(22, 138, 69, .22); }
+    .draw { background: rgba(37, 99, 235, .18); }
+    .loss { background: rgba(220, 38, 38, .18); }
+    .over { background: rgba(15, 118, 110, .22); }
+    .under { background: rgba(113, 113, 122, .14); }
+
+    .mode-panel { display: none; }
+    .mode-panel.active { display: block; }
+
+    .bottom-tabs {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 76px;
+      background: rgba(255, 255, 255, .92);
+      border-top: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      padding-top: 8px;
+      backdrop-filter: blur(16px);
+    }
+
+    .bottom-tabs div {
+      text-align: center;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .bottom-tabs div.active {
+      color: var(--blue);
+    }
+
+    .icon {
+      display: block;
+      font-size: 18px;
+      margin-bottom: 3px;
+    }
+  </style>
+</head>
+<body>
+  <div class="phone">
+    <div class="screen">
+      <div class="status-bar">
+        <span>20:45</span>
+        <span class="status-icons">5G ▰</span>
+      </div>
+      <div class="nav">
+        <h1>比赛分析</h1>
+        <button class="refresh" aria-label="刷新">↻</button>
+      </div>
+      <main>
+        <section class="card">
+          <div class="match-title">
+            <div>
+              <h2>北城 FC vs 海港城</h2>
+              <div class="sub">今晚 20:45 · 英超 · 北城球场</div>
+            </div>
+            <span class="chip green">数据已更新</span>
+          </div>
+          <div class="prob-pills">
+            <div class="pill green"><small>主胜</small><strong>45.6%</strong></div>
+            <div class="pill blue"><small>平局</small><strong>27.1%</strong></div>
+            <div class="pill orange"><small>客胜</small><strong>27.3%</strong></div>
+          </div>
+          <p class="note">小提示：概率不是保证结果，而是根据当前数据算出的可能性。</p>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <span class="chip blue">可信度：中等</span>
+            <span class="chip green">数据质量：良好</span>
+          </div>
+        </section>
+
+        <div class="tabs" role="tablist">
+          <button data-mode="one" role="tab">胜平负</button>
+          <button class="active" data-mode="asian" role="tab">亚盘</button>
+          <button data-mode="total" role="tab">大小球</button>
+        </div>
+
+        <section id="one" class="mode-panel">
+          <div class="card">
+            <div class="section-title">
+              <span class="num">1</span>
+              <div><h3>赔率换算成基础概率</h3><p>去掉庄家利润后的参考概率。</p></div>
+            </div>
+            <div class="bars">
+              <div class="bar-row"><div class="bar-head"><span>主胜基础概率</span><span>45.0%</span></div><div class="track"><div class="fill green" style="width:45%"></div></div></div>
+              <div class="bar-row"><div class="bar-head"><span>平局基础概率</span><span>27.8%</span></div><div class="track"><div class="fill blue" style="width:27.8%"></div></div></div>
+              <div class="bar-row"><div class="bar-head"><span>客胜基础概率</span><span>27.2%</span></div><div class="track"><div class="fill orange" style="width:27.2%"></div></div></div>
+            </div>
+            <p class="note">原始赔率：主胜 2.10，平局 3.40，客胜 3.60。庄家利润约 4.8%。</p>
+          </div>
+        </section>
+
+        <section id="asian" class="mode-panel active">
+          <div class="card">
+            <div class="section-title">
+              <span class="num">1</span>
+              <div><h3>当前亚盘怎么理解</h3><p>亚盘不是只看谁赢球，而是看加上让球后怎么结算。</p></div>
+            </div>
+            <div class="match-title">
+              <div>
+                <h2 style="font-size:18px;margin-bottom:4px">主队 -0.25（让平/半）</h2>
+                <div class="sub">主队方向 · 当前水位 1.92</div>
+              </div>
+              <span class="chip purple">亚盘</span>
+            </div>
+            <p class="note">主队赢球：全赢；双方打平：输半；主队输球：全输。</p>
+          </div>
+
+          <div class="card">
+            <div class="section-title">
+              <span class="num">2</span>
+              <div><h3>赔率变化</h3><p>赔率不是只看当前，还要看从早盘到现在怎么变。</p></div>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+              <span class="chip gray">早盘 09:20</span>
+              <span class="chip blue">当前 20:39</span>
+            </div>
+            <p class="note" style="margin-top:0">主队方向从早盘到当前略微升温，但水位已经变紧，说明市场更认可主队，同时价格不如早盘友好。</p>
+            <div class="row">
+              <div><div class="row-title">主胜欧赔</div><div class="row-detail">2.18 → 2.10 · 主胜隐含概率上升</div></div>
+              <span class="chip green">下降 0.08</span>
+            </div>
+            <div class="row">
+              <div><div class="row-title">客胜欧赔</div><div class="row-detail">3.45 → 3.60 · 客队方向支持变弱</div></div>
+              <span class="chip green">上升 0.15</span>
+            </div>
+            <div class="row">
+              <div><div class="row-title">亚盘主队水位</div><div class="row-detail">-0.25 @ 1.98 → -0.25 @ 1.92</div></div>
+              <span class="chip orange">水位下降</span>
+            </div>
+            <p class="note">小白理解：同一个方向越热，赔率/水位通常越不划算。赔率变化是强信号，但不能单独决定结论。</p>
+          </div>
+
+          <div class="card">
+            <div class="section-title">
+              <span class="num">3</span>
+              <div><h3>亚盘打出概率</h3><p>从比分概率图按盘口规则加总。</p></div>
+            </div>
+            <div class="bars">
+              <div class="bar-row"><div class="bar-head"><span>全赢</span><span>45.6%</span></div><div class="track"><div class="fill green" style="width:45.6%"></div></div></div>
+              <div class="bar-row"><div class="bar-head"><span>赢半</span><span>0.0%</span></div><div class="track"><div class="fill green" style="width:2%"></div></div></div>
+              <div class="bar-row"><div class="bar-head"><span>走水</span><span>0.0%</span></div><div class="track"><div class="fill blue" style="width:2%"></div></div></div>
+              <div class="bar-row"><div class="bar-head"><span>输半</span><span>27.1%</span></div><div class="track"><div class="fill orange" style="width:27.1%"></div></div></div>
+              <div class="bar-row"><div class="bar-head"><span>全输</span><span>27.3%</span></div><div class="track"><div class="fill red" style="width:27.3%"></div></div></div>
+            </div>
+            <p class="note">不亏概率：45.6%。这里的不亏包含全赢、赢半和走水。</p>
+          </div>
+
+          <div class="card">
+            <div class="section-title">
+              <span class="num">4</span>
+              <div><h3>亚盘比分图</h3><p>绿色是主队方向赢盘，红色是输盘，蓝色是走水。</p></div>
+            </div>
+            <div class="matrix">
+              <div class="cell head">主\客</div><div class="cell head">0</div><div class="cell head">1</div><div class="cell head">2</div><div class="cell head">3</div><div class="cell head">4+</div>
+              <div class="cell head">0</div><div class="cell loss">0-0<br>7.1%</div><div class="cell loss">0-1<br>7.7%</div><div class="cell loss">0-2<br>4.1%</div><div class="cell loss">0-3<br>1.5%</div><div class="cell loss">0-4+<br>0.5%</div>
+              <div class="cell head">1</div><div class="cell win">1-0<br>10.8%</div><div class="cell loss">1-1<br>11.6%</div><div class="cell loss">1-2<br>6.3%</div><div class="cell loss">1-3<br>2.3%</div><div class="cell loss">1-4+<br>0.8%</div>
+              <div class="cell head">2</div><div class="cell win">2-0<br>8.2%</div><div class="cell win">2-1<br>8.8%</div><div class="cell loss">2-2<br>4.8%</div><div class="cell loss">2-3<br>1.7%</div><div class="cell loss">2-4+<br>0.6%</div>
+              <div class="cell head">3</div><div class="cell win">3-0<br>4.2%</div><div class="cell win">3-1<br>4.5%</div><div class="cell win">3-2<br>2.4%</div><div class="cell loss">3-3<br>0.9%</div><div class="cell loss">3-4+<br>0.3%</div>
+              <div class="cell head">4+</div><div class="cell win">4+-0<br>2.0%</div><div class="cell win">4+-1<br>2.1%</div><div class="cell win">4+-2<br>1.1%</div><div class="cell win">4+-3<br>0.4%</div><div class="cell loss">4+-4+<br>0.1%</div>
+            </div>
+            <p class="note">读法：每个格子是一种比分。把符合盘口规则的格子概率相加，就得到亚盘概率。</p>
+          </div>
+
+          <div class="card">
+            <div class="section-title">
+              <span class="num">5</span>
+              <div><h3>价格参考</h3><p>只评价价格，不给保证结论。</p></div>
+            </div>
+            <div class="row">
+              <div><div class="row-title">当前水位</div><div class="row-detail">主队 -0.25</div></div>
+              <strong>1.92</strong>
+            </div>
+            <p class="note">模型认为主队方向价格偏紧，适合继续观察盘口变化。</p>
+          </div>
+        </section>
+
+        <section id="total" class="mode-panel">
+          <div class="card">
+            <div class="section-title">
+              <span class="num">1</span>
+              <div><h3>当前大小球</h3><p>看两队总进球是否超过盘口线。</p></div>
+            </div>
+            <div class="bars">
+              <div class="bar-row"><div class="bar-head"><span>大 2.5 球概率</span><span>51.8%</span></div><div class="track"><div class="fill teal" style="width:51.8%"></div></div></div>
+              <div class="bar-row"><div class="bar-head"><span>小 2.5 球概率</span><span>48.2%</span></div><div class="track"><div class="fill gray" style="width:48.2%"></div></div></div>
+            </div>
+            <p class="note">大小球同样来自比分概率图：总进球超过 2.5 算大球，否则算小球。</p>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-title">
+            <span class="num">✓</span>
+            <div><h3>历史校准</h3><p>检查模型过去说得准不准。</p></div>
+          </div>
+          <div class="prob-pills">
+            <div class="pill blue"><small>相似区间</small><strong>45-50%</strong></div>
+            <div class="pill green"><small>实际主胜率</small><strong>46.8%</strong></div>
+            <div class="pill orange"><small>样本</small><strong>312场</strong></div>
+          </div>
+          <p class="note">历史上模型给出类似概率时，实际发生率接近模型输出。</p>
+        </section>
+      </main>
+
+      <nav class="bottom-tabs">
+        <div><span class="icon">☀︎</span>今日</div>
+        <div class="active"><span class="icon">⚽︎</span>比赛</div>
+        <div><span class="icon">▤</span>资讯</div>
+        <div><span class="icon">⌁</span>模型</div>
+      </nav>
+    </div>
+  </div>
+
+  <script>
+    const buttons = document.querySelectorAll(".tabs button");
+    const panels = document.querySelectorAll(".mode-panel");
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const mode = button.dataset.mode;
+        buttons.forEach((item) => item.classList.toggle("active", item === button));
+        panels.forEach((panel) => panel.classList.toggle("active", panel.id === mode));
+      });
+    });
+  </script>
+</body>
+</html>

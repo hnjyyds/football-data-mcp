@@ -1085,6 +1085,168 @@ def test_decision_support_uses_expected_value_not_no_vig_probability_edge(monkey
     assert support["best_candidate"]["recommendation"] == "no_bet"
 
 
+def test_decision_support_calibrates_asian_candidate_with_odds_movement(monkeypatch):
+    odds = {
+        "quality_contract": {
+            "supported_markets": {
+                "moneyline_1x2": False,
+                "asian_handicap": True,
+                "over_under": False,
+            },
+            "preferred_asian_handicap": {
+                "provider": "平均值",
+                "current_metrics": {
+                    "available": True,
+                    "line": -0.25,
+                    "normalized_probability": {
+                        "home_cover": 0.48,
+                        "away_cover": 0.52,
+                    },
+                    "decimal_odds": {
+                        "home_cover": 2.15,
+                        "away_cover": 1.86,
+                    },
+                },
+            },
+        },
+    }
+
+    def fake_projection(**kwargs):
+        return {
+            "available": True,
+            "version": "test",
+            "method": "test",
+            "derived_probabilities": {
+                "1x2": {"home": 0.43, "draw": 0.29, "away": 0.28},
+                "asian_handicap": {"line": -0.25, "home_cover": 0.46, "away_cover": 0.54},
+            },
+            "market_edges": {
+                "1x2": {},
+                "asian_handicap": {"home_cover": -0.02, "away_cover": 0.02},
+            },
+            "probability_source": "test projection",
+            "scoreline_distribution": [],
+        }
+
+    monkeypatch.setattr(sources_module.model_engine, "build_model_projection", fake_projection)
+
+    support = sources_module.build_betting_decision_support(
+        match={
+            "home_team": "主队",
+            "away_team": "客队",
+            "time_window": {"as_of": "2026-05-24T13:00:00+08:00", "kickoff": "2026-05-24T16:00:00+08:00"},
+        },
+        odds=odds,
+        form={"available": False},
+        match_context=None,
+        quality_flags=[],
+        quality_warnings=[],
+        market_movement={
+            "status": "available",
+            "markets": {
+                "asian_handicap": {
+                    "selections": {
+                        "home_cover": {
+                            "status": "available",
+                            "direction": "shortening",
+                            "direction_label": "升温",
+                            "opening_decimal_odds": 1.98,
+                            "latest_decimal_odds": 1.88,
+                            "odds_delta": -0.10,
+                            "opening_line": -0.25,
+                            "latest_line": -0.5,
+                            "line_delta": -0.25,
+                            "implied_probability_delta": 0.026864,
+                            "latest_price_spread": 0.05,
+                            "bookmaker_count": 2,
+                            "snapshot_count": 4,
+                            "first_observed_at_utc": "2026-05-24T03:00:00+00:00",
+                            "latest_observed_at_utc": "2026-05-24T05:00:00+00:00",
+                        }
+                    }
+                }
+            },
+        },
+    )
+
+    candidate = next(item for item in support["market_candidates"] if item["market"] == "asian_handicap")
+    assert candidate["selection"] == "主队 -0.25"
+    assert candidate["raw_model_probability"] == 0.46
+    assert candidate["model_probability"] > candidate["raw_model_probability"]
+    assert candidate["odds_movement_calibration"]["status"] == "applied"
+    assert candidate["odds_movement_calibration"]["line_component"] > 0
+    assert candidate["edge_source"] == "model_engine+odds_movement_calibration"
+    assert "bounded odds-movement calibration" in candidate["probability_source"]
+
+
+def test_decision_support_enriches_candidate_with_odds_research_profile(monkeypatch):
+    odds = sources_module.odds_from_sporttery_fixture(
+        {
+            "source": {"fetched_at_utc": "2026-05-24T05:13:18+00:00"},
+            "official_odds": {"HAD": {"home": 1.95, "draw": 3.40, "away": 4.20}},
+        }
+    )
+    odds = sources_module.with_odds_quality_contract(odds, {"fetched_at_utc": "2026-05-24T05:13:18+00:00"})
+
+    def fake_projection(**kwargs):
+        return {
+            "available": True,
+            "version": "test",
+            "method": "test",
+            "derived_probabilities": {"1x2": {"home": 0.56, "draw": 0.25, "away": 0.19}},
+            "market_edges": {"1x2": {"home": 0.04, "draw": -0.02, "away": -0.02}},
+            "expected_goals": {"home": 1.5, "away": 0.9, "total": 2.4},
+            "model_quality": {"feature_coverage": {"moneyline_1x2": True}},
+            "probability_source": "test projection",
+        }
+
+    monkeypatch.setattr(sources_module.model_engine, "build_model_projection", fake_projection)
+
+    support = sources_module.build_betting_decision_support(
+        match={
+            "home_team": "主队",
+            "away_team": "客队",
+            "time_window": {"as_of": "2026-05-24T13:00:00+08:00", "kickoff": "2026-05-24T16:00:00+08:00"},
+        },
+        odds=odds,
+        form={"available": True},
+        match_context=None,
+        quality_flags=[],
+        quality_warnings=[],
+        odds_features={
+            "status": "available",
+            "devig_method": "power",
+            "markets": {
+                "h2h": {
+                    "selections": {
+                        "home": {
+                            "status": "available",
+                            "current_decimal_odds": 1.92,
+                            "best_decimal_odds": 1.98,
+                            "worst_decimal_odds": 1.90,
+                            "price_spread": 0.08,
+                            "price_spread_pct": 0.0417,
+                            "no_vig_probability": 0.51,
+                            "no_vig_method": "power",
+                            "bookmaker_count": 3,
+                            "devig_sample_count": 3,
+                            "implied_probability_delta": 0.012,
+                        }
+                    }
+                }
+            },
+        },
+    )
+
+    candidate = support["market_candidates"][0]
+    assert candidate["odds_research_profile"]["status"] == "available"
+    assert candidate["no_vig_market_probability"] == 0.51
+    assert candidate["probability_edge_vs_no_vig"] == 0.05
+    assert candidate["kelly_fraction_full"] > 0
+    assert "赔率研究" in candidate["odds_research_note"]
+    assert any("赔率研究" in item for item in support["final_decision"]["rationale"])
+
+
 def test_sporttery_hhad_is_structured_as_official_let_goal_not_asian_handicap():
     odds = sources_module.odds_from_sporttery_fixture(
         {

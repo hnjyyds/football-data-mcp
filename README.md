@@ -34,6 +34,18 @@ MCP endpoint:
 http://127.0.0.1:8910/mcp
 ```
 
+Mobile API / PWA / iOS:
+
+- The repo now also exposes a compact mobile facade for the PWA at `/mobile` and the personal iOS client in [`ios/FootballProbabilityApp`](./ios/FootballProbabilityApp).
+- Current mobile endpoints:
+  - `GET /api/mobile/matches`
+  - `GET /api/mobile/analysis`
+- The mobile facade is intentionally smaller than `/api/dashboard`; it is for match browsing and single-match explanation, not for operating the whole learning loop.
+- Every mobile response must keep the product in research mode:
+  - `modelReadiness` tells the client whether latest holdout validation is `not_ready`, `watchlist`, `paper_trade_only`, or better.
+  - `oddsSourceHealth` tells the client whether fresh independent odds currently come from `leisu`, a fallback such as `oddsportal_scraper`, or no production-ready source at all.
+- Clients should not present the output as production automation when `modelReadiness.productionApproved=false`, and should visually warn when `oddsSourceHealth.status != "healthy"`.
+
 Tools:
 
 - `source_health`
