@@ -68,6 +68,7 @@ class DataSourceService:
         betexplorer_state = (sync_state.get("by_source") or {}).get("betexplorer_scraper") or {}
         leisu_state = (sync_state.get("by_source") or {}).get("leisu") or {}
         oddsportal_readiness = self._oddsportal_discovery_readiness()
+        betexplorer_readiness = self._betexplorer_discovery_readiness()
         fresh_after_hours = _odds_source_fresh_hours()
         betexplorer_fields = _betexplorer_operational_fields(
             provider_counts,
@@ -124,6 +125,7 @@ class DataSourceService:
                 "role": "structured fallback odds crawler for sparse 1X2/AH/O-U snapshots",
                 "snapshot_count": (provider_counts.get("betexplorer_scraper") or {}).get("snapshot_count", 0),
                 "sync": betexplorer_state,
+                **betexplorer_readiness,
                 **betexplorer_fields,
             },
             "the_odds_api": {
@@ -176,6 +178,31 @@ class DataSourceService:
             "effective_discovery_url_count": effective_count,
             "discovery_urls": configured_urls[:8],
             "suggested_discovery_urls": suggested_urls[:8],
+            "effective_discovery_urls": effective_urls[:8],
+            "open_target_count": target_info["open_target_count"],
+            "analysis_target_count": target_info["analysis_target_count"],
+            "discovery_target_count": discovery_target_count,
+            "discovery_target_source": target_info["source"],
+        }
+
+    def _betexplorer_discovery_readiness(self) -> dict[str, Any]:
+        configured_urls = _configured_betexplorer_discovery_urls()
+        target_info = self._oddsportal_discovery_targets(limit=100)
+        targets = target_info["targets"]
+        effective_urls = _betexplorer_discovery_urls(None, targets=targets)
+        configured_count = len(configured_urls)
+        effective_count = len(effective_urls)
+        discovery_target_count = len(targets)
+        discovery_ready = effective_count > 0 and discovery_target_count > 0
+        return {
+            "scraper_enabled": True,
+            "auto_sync_enabled": True,
+            "discovery_ready": discovery_ready,
+            "configured_discovery_url_count": configured_count,
+            "suggested_discovery_url_count": effective_count,
+            "effective_discovery_url_count": effective_count,
+            "discovery_urls": configured_urls[:8],
+            "suggested_discovery_urls": effective_urls[:8],
             "effective_discovery_urls": effective_urls[:8],
             "open_target_count": target_info["open_target_count"],
             "analysis_target_count": target_info["analysis_target_count"],
@@ -295,14 +322,38 @@ class DataSourceService:
         markets: list[str] | None = None,
         limit: int = 10,
         force: bool = False,
+        auto_discover: bool = False,
+        discovery_urls: list[str] | None = None,
+        target_limit: int = 50,
     ) -> dict[str, Any]:
-        return await self._repository.sync_betexplorer_odds_snapshots(
-            event_urls=[str(url).strip() for url in (event_urls or []) if str(url or "").strip()],
+        selected_urls = [str(url).strip() for url in (event_urls or []) if str(url or "").strip()]
+        bounded_limit = max(1, min(int(limit or 10), 20))
+        discovery_result: dict[str, Any] | None = None
+        if not selected_urls and auto_discover:
+            target_info = self._oddsportal_discovery_targets(limit=max(1, min(int(target_limit or 50), 500)))
+            targets = target_info["targets"]
+            selected_discovery_urls = _betexplorer_discovery_urls(discovery_urls, targets=targets)
+            discovery_result = await self._repository.discover_betexplorer_event_urls(
+                targets=targets,
+                discovery_urls=selected_discovery_urls,
+                limit=bounded_limit,
+            )
+            selected_urls = [
+                str(url).strip()
+                for url in (discovery_result.get("event_urls") or [])
+                if str(url or "").strip()
+            ]
+        result = await self._repository.sync_betexplorer_odds_snapshots(
+            event_urls=selected_urls,
             markets=[str(market).strip() for market in (markets or ["h2h"]) if str(market).strip()],
-            limit=max(1, min(int(limit or 10), 20)),
+            limit=bounded_limit,
             force=bool(force),
             job_id=f"betexplorer-{uuid.uuid4().hex[:12]}",
         )
+        if discovery_result is not None:
+            result["discovery_result"] = discovery_result
+            result["auto_discover"] = True
+        return result
 
     def start_oddsportal_background_runner(self, job_id: str, payload: dict[str, Any]) -> None:
         with _RUNNING_ODDS_SOURCE_JOBS_LOCK:
@@ -715,6 +766,33 @@ def _configured_oddsportal_discovery_urls() -> list[str]:
     ]
 
 
+def _betexplorer_discovery_urls(
+    discovery_urls: list[str] | None,
+    *,
+    targets: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    configured = _configured_betexplorer_discovery_urls()
+    selected = [str(url).strip() for url in (discovery_urls or configured) if str(url or "").strip()]
+    if not selected:
+        selected = ["https://www.betexplorer.com/football/"]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for url in selected:
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+    return deduped[:20]
+
+
+def _configured_betexplorer_discovery_urls() -> list[str]:
+    return [
+        value.strip()
+        for value in os.getenv("FOOTBALL_DATA_BETEXPLORER_DISCOVERY_URLS", "").split(",")
+        if value.strip()
+    ]
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name, "true" if default else "false").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -827,7 +905,7 @@ def _leisu_operational_fields(
         next_action = "雷速赔率同步仍在执行；若长期停滞，检查代理和访问凭据。"
     else:
         operational_status = "needs_access"
-        next_action = "雷速无可用赔率快照；配置 LEISU_ODDS_PROXY_URL/COOKIE，或继续由 oddsportal_scraper 补位。"
+        next_action = "雷速无可用赔率快照；配置 LEISU_ODDS_PROXY_URL/COOKIE，或继续由 betexplorer_scraper / oddsportal_scraper 补位。"
     return {
         "operational_status": operational_status,
         "failed_count": failed_count,
@@ -886,7 +964,7 @@ def _odds_source_closure(
     fresh_after_hours: float,
 ) -> dict[str, Any]:
     # 这里把“源是否有历史数据”翻译成产品可理解的当前可用性。
-    ordered_names = ["leisu", "oddsportal_scraper", "the_odds_api", "analysis_odds"]
+    ordered_names = ["leisu", "betexplorer_scraper", "oddsportal_scraper", "the_odds_api", "analysis_odds"]
     ordered_sources = []
     for name in ordered_names:
         item = sources.get(name) or {}
@@ -904,6 +982,10 @@ def _odds_source_closure(
         active_source = "leisu"
         production_ready = True
         reason = "雷速主赔率源新鲜可用。"
+    elif bool((sources.get("betexplorer_scraper") or {}).get("usable_for_analysis")):
+        active_source = "betexplorer_scraper"
+        production_ready = True
+        reason = "雷速不可用或过期，当前优先使用 BetExplorer 稀疏快照兜底。"
     elif bool((sources.get("oddsportal_scraper") or {}).get("usable_for_analysis")):
         active_source = "oddsportal_scraper"
         production_ready = True

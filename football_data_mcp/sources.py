@@ -10657,6 +10657,13 @@ async def run_auto_learning_cycle(
         "saved_snapshot_count": 0,
         "queued_event_count": 0,
     }
+    betexplorer_snapshot_sync: dict[str, Any] = {
+        "enabled": bool(include_oddsportal_snapshot_sync),
+        "provider": "betexplorer_scraper",
+        "status": "disabled" if not include_oddsportal_snapshot_sync else "not_started",
+        "saved_snapshot_count": 0,
+        "queued_event_count": 0,
+    }
     closing_snapshot_tracking: dict[str, Any] = {
         "enabled": True,
         "status": "not_started",
@@ -10835,6 +10842,70 @@ async def run_auto_learning_cycle(
             AUTO_LEARNING_STATE["last_market_snapshot_sync"] = market_snapshot_sync
 
     if include_oddsportal_snapshot_sync:
+        AUTO_LEARNING_STATE["current_step"] = "betexplorer_snapshot_sync"
+        try:
+            from football_data_mcp.services.data_source_service import DataSourceService
+
+            data_source_service = DataSourceService()
+            odds_source_status = {}
+            try:
+                odds_source_status_reader = getattr(data_source_service, "odds_source_status", None)
+                if callable(odds_source_status_reader):
+                    odds_source_status = odds_source_status_reader()
+            except Exception as status_exc:
+                odds_source_status = {
+                    "status": "error",
+                    "error": f"{type(status_exc).__name__}: {status_exc}",
+                }
+            closure = odds_source_status.get("closure") if isinstance(odds_source_status, dict) else None
+            active_odds_source = str((closure or {}).get("active_source") or "")
+            has_non_fallback_production_source = (
+                isinstance(closure, dict)
+                and bool(closure.get("production_ready"))
+                and active_odds_source not in {"oddsportal_scraper", "betexplorer_scraper"}
+            )
+            if has_non_fallback_production_source:
+                betexplorer_snapshot_sync = {
+                    "enabled": True,
+                    "provider": "betexplorer_scraper",
+                    "status": "skipped_production_source_fresh",
+                    "saved_snapshot_count": 0,
+                    "queued_event_count": 0,
+                    "reason": closure.get("reason") or "已有新鲜生产赔率源；本轮无需 BetExplorer 兜底补采。",
+                    "closure": closure,
+                    "at_utc": now_utc().isoformat(),
+                }
+            else:
+                betexplorer_snapshot_sync = await data_source_service.start_betexplorer_sync(
+                    event_urls=[],
+                    markets=["h2h"],
+                    limit=bounded_oddsportal_snapshot_limit,
+                    force=True,
+                    auto_discover=True,
+                    discovery_urls=None,
+                    target_limit=bounded_oddsportal_target_limit,
+                )
+                betexplorer_snapshot_sync = {
+                    "enabled": True,
+                    "provider": "betexplorer_scraper",
+                    "queued_event_count": len(
+                        ((betexplorer_snapshot_sync.get("discovery_result") or {}).get("event_urls") or [])
+                    ),
+                    **betexplorer_snapshot_sync,
+                }
+        except Exception as exc:
+            betexplorer_snapshot_sync = {
+                "enabled": True,
+                "provider": "betexplorer_scraper",
+                "status": "error",
+                "saved_snapshot_count": 0,
+                "queued_event_count": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+                "at_utc": now_utc().isoformat(),
+            }
+        AUTO_LEARNING_STATE["last_betexplorer_snapshot_sync"] = betexplorer_snapshot_sync
+
+    if include_oddsportal_snapshot_sync:
         AUTO_LEARNING_STATE["current_step"] = "oddsportal_snapshot_sync"
         scraper_enabled = env_bool("FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED", False)
         if not scraper_enabled:
@@ -10867,7 +10938,7 @@ async def run_auto_learning_cycle(
                 has_non_fallback_production_source = (
                     isinstance(closure, dict)
                     and bool(closure.get("production_ready"))
-                    and active_odds_source != "oddsportal_scraper"
+                    and active_odds_source not in {"oddsportal_scraper", "betexplorer_scraper"}
                 )
                 if has_non_fallback_production_source:
                     oddsportal_snapshot_sync = {
@@ -10994,6 +11065,7 @@ async def run_auto_learning_cycle(
         "analysis_market_snapshot_sync": asian_summary.get("analysis_market_snapshot_sync") or {},
         "market_snapshot_sync": market_snapshot_sync,
         "oddsportal_snapshot_sync": oddsportal_snapshot_sync,
+        "betexplorer_snapshot_sync": betexplorer_snapshot_sync,
         "closing_snapshot_tracking": closing_snapshot_tracking,
         "snapshot_reanalysis": snapshot_reanalysis,
         "lark_notification": lark_notification,
