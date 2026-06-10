@@ -1175,6 +1175,7 @@ def _clv_record_tracking_payload(item: dict[str, Any], *, computed_at_utc: str) 
         "computed_at_utc": computed_at_utc,
         "source": "market_snapshots",
         "record_key": item.get("record_key"),
+        "evaluation_evidence": item.get("evaluation_evidence") if isinstance(item.get("evaluation_evidence"), dict) else {},
         "rule": "CLV is computed from persisted pre-kickoff market snapshots after the prediction time.",
     }
     reason = clv.get("reason") or item.get("reason")
@@ -1273,23 +1274,42 @@ def list_prediction_ledger_ids_for_run(
     db_path: str | None = None,
     include_shadow_predictions: bool = True,
     limit: int = 100,
+    recommendation_allowlist: tuple[str, ...] | list[str] | None = None,
 ) -> list[str]:
     """Return persisted prediction ledger ids for one auto-learning run."""
     bounded_limit = max(0, int(limit or 0))
     if not str(run_id or "").strip() or bounded_limit <= 0:
         return []
     ledger_ids: list[str] = []
+    allowed_recommendations = tuple(
+        str(item).strip()
+        for item in (recommendation_allowlist or ())
+        if str(item).strip()
+    )
     with _connect(db_path) as conn:
         ensure_schema(conn)
-        rows = conn.execute(
-            """
-            SELECT id FROM recommendation_records
-            WHERE run_id = ?
-            ORDER BY id ASC
-            LIMIT ?
-            """,
-            (str(run_id), bounded_limit),
-        ).fetchall()
+        if allowed_recommendations:
+            placeholders = ",".join("?" for _ in allowed_recommendations)
+            rows = conn.execute(
+                f"""
+                SELECT id FROM recommendation_records
+                WHERE run_id = ?
+                  AND recommendation IN ({placeholders})
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (str(run_id), *allowed_recommendations, bounded_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id FROM recommendation_records
+                WHERE run_id = ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (str(run_id), bounded_limit),
+            ).fetchall()
         ledger_ids.extend(f"recommendation:{row['id']}" for row in rows)
         remaining = bounded_limit - len(ledger_ids)
         if include_shadow_predictions and remaining > 0:
@@ -1952,7 +1972,7 @@ def _strategy_global_bucket(conn: sqlite3.Connection, market: str, mode: str) ->
                 lower(mode) = ?
                 OR (
                     lower(mode) = ?
-                    AND recommendation IN ('immediate_bet', 'condition_observe')
+                    AND recommendation IN ('condition_observe')
                 )
           )
         ORDER BY settled_at_utc DESC
@@ -1980,7 +2000,7 @@ def _strategy_global_bucket(conn: sqlite3.Connection, market: str, mode: str) ->
         WHERE settlement_status = 'settled'
           AND market = ?
           AND lower(mode) = ?
-          AND recommendation NOT IN ('immediate_bet', 'condition_observe')
+          AND recommendation NOT IN ('condition_observe')
         """,
         (market, observation_mode),
     ).fetchone()["count"]
@@ -2004,12 +2024,12 @@ def _strategy_global_bucket(conn: sqlite3.Connection, market: str, mode: str) ->
             "hit_count": hit_count,
             "bucket_scope": "strategy_actionable_global",
             "included_modes": [item for item in [mode, observation_mode] if item],
-            "included_observation_recommendations": ["immediate_bet", "condition_observe"],
+            "included_observation_recommendations": ["condition_observe"],
             "ignored_observation_count": int(ignored_observation_count or 0),
             "rolling_window_size": STRATEGY_ROLLING_WINDOW_SIZE,
             "sample_policy": (
                 f"Strategy thresholds use the most recent {STRATEGY_ROLLING_WINDOW_SIZE} settled "
-                "actionable rows (formal strategy + condition_observe / immediate_bet observations). "
+                "actionable rows (formal strategy + condition_observe observations). "
                 "Older samples are excluded so threshold tuning tracks current model behavior, not "
                 "early-batch noise. No-value observations remain in calibration buckets but do not "
                 "tune strategy ROI."
@@ -2226,13 +2246,18 @@ def build_record_from_pick(
     mode: str,
     target_market: str,
 ) -> dict[str, Any]:
+    raw = dict(pick)
+    prediction_snapshot = _prediction_snapshot_evidence(pick)
+    if prediction_snapshot:
+        raw["prediction_snapshot"] = prediction_snapshot
+        raw["closing_evaluation_status"] = "awaiting_closing_snapshot"
     return {
         **pick,
         "run_id": run_id,
         "tool": tool,
         "mode": mode,
         "target_market": target_market,
-        "raw": pick,
+        "raw": raw,
     }
 
 
@@ -2250,6 +2275,55 @@ def build_records_from_shortlist(result: dict[str, Any], *, run_id: str | None =
         for pick in result.get("picks") or []
         if _is_near_kickoff_learning_sample(pick, default_as_of=generated_at)
     ]
+
+
+def _prediction_snapshot_evidence(item: dict[str, Any]) -> dict[str, Any]:
+    best = item.get("best_candidate") or {}
+    match = item.get("match") or {}
+    summary = item.get("odds_snapshot_summary") if isinstance(item.get("odds_snapshot_summary"), dict) else {}
+    decimal_odds = parse_float(best.get("decimal_odds"))
+    if not summary and decimal_odds is None:
+        return {}
+    return {
+        "provider": str(summary.get("provider") or ""),
+        "generated_snapshot_count": int(summary.get("generated_snapshot_count") or 0),
+        "fetched_at_utc": str(summary.get("fetched_at_utc") or ""),
+        "match_id": str(match.get("match_id") or ""),
+        "market": str(best.get("market") or ""),
+        "selection": str(best.get("selection") or ""),
+        "selection_key": str(best.get("selection_key") or ""),
+        "line": best.get("line"),
+        "decimal_odds": decimal_odds,
+        "model_probability": parse_float(best.get("model_probability")),
+        "calibrated_probability": parse_float(best.get("calibrated_probability")),
+    }
+
+
+def _observation_or_shadow_record_payload(
+    item: dict[str, Any],
+    *,
+    run_id: str,
+    tool: str,
+    mode: str,
+    target_market: str,
+    raw_kind: str,
+    extra_raw: dict[str, Any],
+) -> dict[str, Any]:
+    best = item.get("best_candidate") or {}
+    raw = {"kind": raw_kind, **extra_raw, **item}
+    prediction_snapshot = _prediction_snapshot_evidence(item)
+    if prediction_snapshot:
+        raw["prediction_snapshot"] = prediction_snapshot
+        raw["closing_evaluation_status"] = "awaiting_closing_snapshot"
+    return {
+        "match": item.get("match") or {},
+        "best_candidate": best,
+        "run_id": run_id,
+        "tool": tool,
+        "mode": mode,
+        "target_market": target_market,
+        "raw": raw,
+    }
 
 
 def build_learning_observation_records_from_shortlist(
@@ -2277,14 +2351,16 @@ def build_learning_observation_records_from_shortlist(
             continue
         records.append(
             {
-                "match": item.get("match") or {},
-                "best_candidate": best,
-                "run_id": resolved_run_id,
-                "tool": str(result.get("tool") or "shortlist_value_matches"),
-                "mode": f"{str(result.get('mode') or '')}_observation".strip("_"),
-                "target_market": target_market,
+                **_observation_or_shadow_record_payload(
+                    item,
+                    run_id=resolved_run_id,
+                    tool=str(result.get("tool") or "shortlist_value_matches"),
+                    mode=f"{str(result.get('mode') or '')}_observation".strip("_"),
+                    target_market=target_market,
+                    raw_kind="learning_observation",
+                    extra_raw={},
+                ),
                 "caution_flags": item.get("caution_flags") or [],
-                "raw": {"kind": "learning_observation", **item},
             }
         )
         if len(records) >= max(0, int(limit or 0)):
@@ -2328,25 +2404,25 @@ def build_shadow_prediction_records_from_shortlist(
         match = item.get("match") or {}
         records.append(
             {
-                "match": match,
-                "best_candidate": best,
-                "run_id": resolved_run_id,
-                "tool": str(result.get("tool") or "shortlist_value_matches"),
-                "mode": str(result.get("mode") or ""),
-                "target_market": str(result.get("target_market") or ""),
+                **_observation_or_shadow_record_payload(
+                    item,
+                    run_id=resolved_run_id,
+                    tool=str(result.get("tool") or "shortlist_value_matches"),
+                    mode=str(result.get("mode") or ""),
+                    target_market=str(result.get("target_market") or ""),
+                    raw_kind="shadow_prediction",
+                    extra_raw={
+                        "decision": decision,
+                        "rejection_reason": rejection_reason,
+                        "source_tool": str(result.get("tool") or "shortlist_value_matches"),
+                    },
+                ),
                 "decision": decision,
                 "rejection_reason": rejection_reason,
                 "quality": item.get("quality") or {},
                 "thresholds": thresholds,
                 "selection_confidence": item.get("selection_confidence") or {},
                 "settlement_status": _shadow_settlement_status({"best_candidate": best}, best),
-                "raw": {
-                    "kind": "shadow_prediction",
-                    "decision": decision,
-                    "rejection_reason": rejection_reason,
-                    "source_tool": str(result.get("tool") or "shortlist_value_matches"),
-                    **item,
-                },
             }
         )
         if len(records) >= bounded_limit:

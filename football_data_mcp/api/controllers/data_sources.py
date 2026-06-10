@@ -11,8 +11,12 @@ from football_data_mcp.api.controllers._helpers import api_error_response, heade
 from football_data_mcp.api.registry import SupportsCustomRoute
 from football_data_mcp.api.schemas.common import success_json
 from football_data_mcp.api.schemas.data_sources import (
+    BetExplorerSyncRequest,
+    BetExplorerSyncResponse,
     FdoMatchesQuery,
     FdoMatchesResponse,
+    LeisuSessionRefreshRequest,
+    LeisuSessionRefreshResponse,
     OddsPortalSyncRequest,
     OddsPortalSyncResponse,
     OddsSourceStatusResponse,
@@ -31,6 +35,8 @@ def register(mcp: SupportsCustomRoute) -> list[dict[str, object]]:
         ("/api/sources/probe", ["GET", "OPTIONS"], sources_probe_api),
         ("/api/sources/odds/status", ["GET", "OPTIONS"], odds_source_status_api),
         ("/api/sources/odds/oddsportal/sync", ["POST", "OPTIONS"], oddsportal_sync_api),
+        ("/api/sources/odds/betexplorer/sync", ["POST", "OPTIONS"], betexplorer_sync_api),
+        ("/api/sources/odds/leisu/session/refresh", ["POST", "OPTIONS"], leisu_session_refresh_api),
     ]
     for path, methods, handler in routes:
         mcp.custom_route(path, methods=methods, include_in_schema=False)(handler)
@@ -109,5 +115,70 @@ async def oddsportal_sync_api(request: Request) -> Response:
             start_background=parsed.start,
         )
         return success_json(OddsPortalSyncResponse.model_validate(result), headers=headers)
+    except Exception as exc:
+        return api_error_response(exc, headers=headers)
+
+
+async def betexplorer_sync_api(request: Request) -> Response:
+    headers = headers_for(request, allow_methods="POST, OPTIONS")
+    if request.method == "OPTIONS":
+        return options_response(headers)
+    try:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError as exc:
+            raise RequestValidationAppError(
+                code="invalid_json_body",
+                message="Request body must be valid JSON.",
+                details={"reason": str(exc)},
+            ) from exc
+        try:
+            parsed = BetExplorerSyncRequest.model_validate(payload or {})
+        except ValidationError as exc:
+            raise RequestValidationAppError(
+                code="request_validation_failed",
+                message="Request body did not match the BetExplorer sync schema.",
+                details={"errors": exc.errors()},
+            ) from exc
+        result = await DataSourceService().start_betexplorer_sync(
+            event_urls=parsed.event_urls,
+            markets=parsed.markets,
+            limit=parsed.limit,
+            force=parsed.force,
+        )
+        return success_json(BetExplorerSyncResponse.model_validate(result), headers=headers)
+    except Exception as exc:
+        return api_error_response(exc, headers=headers)
+
+
+async def leisu_session_refresh_api(request: Request) -> Response:
+    headers = headers_for(request, allow_methods="POST, OPTIONS")
+    if request.method == "OPTIONS":
+        return options_response(headers)
+    try:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError as exc:
+            raise RequestValidationAppError(
+                code="invalid_json_body",
+                message="Request body must be valid JSON.",
+                details={"reason": str(exc)},
+            ) from exc
+        try:
+            parsed = LeisuSessionRefreshRequest.model_validate(payload or {})
+        except ValidationError as exc:
+            raise RequestValidationAppError(
+                code="request_validation_failed",
+                message="Request body did not match the Leisu session refresh schema.",
+                details={"errors": exc.errors()},
+            ) from exc
+        result = await DataSourceService().start_leisu_session_refresh(
+            match_id=parsed.match_id,
+            url=parsed.url,
+            profile_dir=parsed.profile_dir,
+            headless=parsed.headless,
+            start_background=parsed.start,
+        )
+        return success_json(LeisuSessionRefreshResponse.model_validate(result), headers=headers)
     except Exception as exc:
         return api_error_response(exc, headers=headers)

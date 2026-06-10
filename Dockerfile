@@ -11,11 +11,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir pytest ruff mypy pyright
 
 COPY football_data_mcp ./football_data_mcp
-COPY pyproject.toml ./
+COPY tests ./tests
+COPY scripts ./scripts
 
 EXPOSE 8910
 

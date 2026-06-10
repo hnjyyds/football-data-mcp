@@ -1674,6 +1674,47 @@ def test_shortlist_balanced_mode_requires_confidence_and_fair_odds(monkeypatch):
     ]
 
 
+def test_recommendation_from_edge_downgrades_high_odds_even_with_high_edge():
+    recommendation = sources_module._recommendation_from_edge(
+        0.08,
+        0.62,
+        [],
+        market="1x2",
+        decimal_odds=2.0,
+        calibrated_probability=0.58,
+    )
+
+    assert recommendation == "condition_observe"
+
+
+def test_recommendation_from_edge_downgrades_asian_pickem_even_with_high_edge():
+    recommendation = sources_module._recommendation_from_edge(
+        0.08,
+        0.62,
+        [],
+        market="asian_handicap",
+        decimal_odds=1.9,
+        line=0.0,
+        calibrated_probability=0.58,
+    )
+
+    assert recommendation == "condition_observe"
+
+
+def test_recommendation_from_edge_downgrades_low_calibrated_probability_even_with_high_edge():
+    recommendation = sources_module._recommendation_from_edge(
+        0.08,
+        0.62,
+        [],
+        market="over_under",
+        decimal_odds=1.9,
+        line=2.5,
+        calibrated_probability=0.54,
+    )
+
+    assert recommendation == "condition_observe"
+
+
 def test_shortlist_balanced_mode_rejects_immature_high_risk_formal_picks(monkeypatch):
     async def fake_list_matches(*args, **kwargs):
         return {

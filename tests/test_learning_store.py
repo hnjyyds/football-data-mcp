@@ -115,14 +115,33 @@ def test_learning_store_persists_recommendation_clv_tracking(tmp_path):
     summary = learning_store.update_clv_tracking(
         record_source="recommendation",
         clv_records=[
-            {
-                "record_id": record_id,
-                "record_key": settlement["settled_records"][0]["record_key"],
-                "status": "available",
-                "clv": {
+                {
+                    "record_id": record_id,
+                    "record_key": settlement["settled_records"][0]["record_key"],
                     "status": "available",
-                    "clv_return": 0.041667,
-                    "closing_decimal_odds": 1.872,
+                    "evaluation_evidence": {
+                        "prediction": {
+                            "decimal_odds": 1.95,
+                            "time_utc": settlement["settled_records"][0]["created_at_utc"],
+                            "market": "asian_handicap",
+                            "selection": "CLV主队 -0.25",
+                            "line": -0.25,
+                        },
+                        "closing": {
+                            "status": "available",
+                            "decimal_odds": 1.872,
+                            "bookmaker_count": 3,
+                        },
+                        "outcome": {
+                            "home_score": 2,
+                            "away_score": 1,
+                            "hit": 1,
+                        },
+                    },
+                    "clv": {
+                        "status": "available",
+                        "clv_return": 0.041667,
+                        "closing_decimal_odds": 1.872,
                     "closing_bookmaker_count": 3,
                 },
             }
@@ -137,6 +156,9 @@ def test_learning_store_persists_recommendation_clv_tracking(tmp_path):
     assert record["raw"]["clv_tracking"]["clv"] == 0.041667
     assert record["raw"]["clv_tracking"]["status"] == "available"
     assert record["raw"]["clv_tracking"]["closing_decimal_odds"] == 1.872
+    assert record["raw"]["clv_tracking"]["evaluation_evidence"]["prediction"]["decimal_odds"] == 1.95
+    assert record["raw"]["clv_tracking"]["evaluation_evidence"]["closing"]["decimal_odds"] == 1.872
+    assert record["raw"]["clv_tracking"]["evaluation_evidence"]["outcome"]["home_score"] == 2
 
 
 def test_learning_store_persists_shadow_clv_attempts_without_available_price(tmp_path):
@@ -527,6 +549,8 @@ def test_build_shadow_prediction_records_from_shortlist_includes_picks_and_rejec
     assert [record["decision"] for record in records] == ["accepted", "rejected"]
     assert records[0]["thresholds"]["min_calibrated_probability"] == 0.58
     assert records[0]["raw"]["kind"] == "shadow_prediction"
+    assert records[0]["raw"]["prediction_snapshot"]["decimal_odds"] == 1.88
+    assert records[0]["raw"]["closing_evaluation_status"] == "awaiting_closing_snapshot"
     assert records[1]["rejection_reason"] == "calibrated_probability_below_threshold"
     assert records[1]["settlement_status"] == "open"
 
@@ -722,11 +746,10 @@ def test_update_strategy_state_ignores_no_value_observations_but_keeps_calibrati
     state = learning_store.update_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
 
     assert broad_market_bucket["sample_count"] == 40
-    assert state["status"] == "live_calibration_active"
-    assert state["active"] is True
-    assert state["sample_count"] == 20
-    assert state["hit_rate"] == 1.0
-    assert state["roi"] == 0.8
-    assert state["min_calibrated_probability"] < 0.60  # base default was raised from 0.58 to 0.60
-    assert state["raw"]["source_bucket"]["raw"]["ignored_observation_count"] == 20
-    assert state["raw"]["source_bucket"]["raw"]["bucket_scope"] == "strategy_actionable_global"
+    assert state["status"] == "collecting_samples"
+    assert state["active"] is False
+    assert state["sample_count"] == 0
+    assert state["hit_rate"] is None
+    assert state["roi"] is None
+    assert state["min_calibrated_probability"] == 0.58
+    assert state["raw"].get("source_bucket") is None

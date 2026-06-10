@@ -102,6 +102,34 @@ def test_lark_notification_service_auto_pushes_new_run_predictions_once(tmp_path
                 "target_market": "asian_handicap",
                 "match": {
                     "league": "测试联赛",
+                    "home_team": "主队强推",
+                    "away_team": "客队强推",
+                    "kickoff_utc_plus_8": "06/02 20:00",
+                },
+                "best_candidate": {
+                    "market": "asian_handicap",
+                    "selection": "主队强推 -0.5",
+                    "selection_key": "home_cover",
+                    "line": -0.5,
+                    "decimal_odds": 1.88,
+                    "model_probability": 0.60,
+                    "calibrated_probability": 0.58,
+                    "market_probability": 0.51,
+                    "edge": 0.06,
+                    "expected_multiplier": 1.128,
+                    "recommendation": "immediate_bet",
+                },
+                "selection_confidence": {"calibrated_probability": 0.58},
+                "risk_flags": [],
+                "caution_flags": [],
+            },
+            {
+                "run_id": run_id,
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "match": {
+                    "league": "测试联赛",
                     "home_team": "主队",
                     "away_team": "客队",
                     "kickoff_utc_plus_8": "06/02 20:00",
@@ -152,6 +180,7 @@ def test_lark_notification_service_auto_pushes_new_run_predictions_once(tmp_path
     )
 
     assert first["status"] == "sent"
+    assert first["candidate_count"] == 1
     assert first["sent_count"] == 1
     assert second["status"] == "skipped_all_duplicates"
     assert second["skipped_duplicate_count"] == 1

@@ -135,3 +135,40 @@ class OddsPortalSyncResponse(BaseModel):
     job_id: str | None = None
     backend: str | None = None
     queue_job_id: str | None = None
+
+
+class BetExplorerSyncRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_urls: list[str] = Field(default_factory=list)
+    markets: list[str] = Field(default_factory=lambda: ["h2h"])
+    limit: int = Field(default=10, ge=1, le=20)
+    force: bool = False
+
+
+class BetExplorerSyncResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    provider: str | None = None
+    job_id: str | None = None
+
+
+class LeisuSessionRefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    match_id: str = ""
+    url: str = ""
+    profile_dir: str = ""
+    headless: bool = False
+    start: bool = True
+
+
+class LeisuSessionRefreshResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    provider: str | None = None
+    job_id: str | None = None
+    backend: str | None = None
+    queue_job_id: str | None = None

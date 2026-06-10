@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from football_data_mcp import data_sources_registry
+from football_data_mcp import betexplorer_source
 from football_data_mcp import learning_store
 from football_data_mcp import oddsportal_source
 from football_data_mcp import snapshot_store
@@ -173,6 +174,19 @@ class DataSourceRepository:
             limit=limit,
         )
 
+    async def discover_betexplorer_event_urls(
+        self,
+        *,
+        targets: list[dict[str, Any]],
+        discovery_urls: list[str],
+        limit: int,
+    ) -> dict[str, Any]:
+        return await betexplorer_source.discover_betexplorer_event_urls(
+            targets=targets,
+            discovery_urls=discovery_urls,
+            limit=limit,
+        )
+
     async def sync_oddsportal_odds_snapshots(
         self,
         *,
@@ -185,6 +199,25 @@ class DataSourceRepository:
         from football_data_mcp import sources
 
         return await sources.sync_oddsportal_odds_snapshots(
+            event_urls=event_urls,
+            markets=markets,
+            limit=limit,
+            force=force,
+            job_id=job_id,
+        )
+
+    async def sync_betexplorer_odds_snapshots(
+        self,
+        *,
+        event_urls: list[str],
+        markets: list[str],
+        limit: int,
+        force: bool,
+        job_id: str,
+    ) -> dict[str, Any]:
+        from football_data_mcp import sources
+
+        return await sources.sync_betexplorer_odds_snapshots(
             event_urls=event_urls,
             markets=markets,
             limit=limit,

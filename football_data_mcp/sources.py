@@ -30,6 +30,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
 from football_data_mcp import (
+    betexplorer_source,
     external_sources,
     learning_store,
     model_engine,
@@ -4421,14 +4422,35 @@ def _over_under_model_probabilities(line: float, form: dict[str, Any]) -> dict[s
     return {"over": round_metric(over) or 0, "under": round_metric(1 - over) or 0}
 
 
-def _recommendation_from_edge(edge: float | None, confidence: float, blocking_flags: list[str]) -> str:
+def _recommendation_from_edge(
+    edge: float | None,
+    confidence: float,
+    blocking_flags: list[str],
+    *,
+    market: str = "",
+    decimal_odds: Any = None,
+    line: Any = None,
+    calibrated_probability: Any = None,
+) -> str:
     if blocking_flags:
         return "no_bet"
     if edge is None:
         return "no_value"
-    if edge >= 0.035 and confidence >= 0.52:
-        return "immediate_bet"
     if edge >= 0.006:
+        can_immediately_bet = edge >= 0.035 and confidence >= 0.52
+        normalized_market = str(market or "").strip().lower()
+        decimal_odds_float = parse_float(decimal_odds)
+        calibrated_probability_float = parse_float(calibrated_probability)
+        line_float = parse_float(line)
+        if can_immediately_bet:
+            if decimal_odds_float is None or decimal_odds_float >= 2.0:
+                can_immediately_bet = False
+            if calibrated_probability_float is None or calibrated_probability_float < 0.55:
+                can_immediately_bet = False
+            if normalized_market == "asian_handicap" and line_float == 0.0:
+                can_immediately_bet = False
+        if can_immediately_bet:
+            return "immediate_bet"
         return "condition_observe"
     return "no_value"
 
@@ -4731,7 +4753,15 @@ def _apply_market_movement_calibration(
         decimal_odds=candidate.get("decimal_odds"),
         probability_edge=adjusted_probability - (parse_float(candidate.get("market_probability")) or 0.0),
     )
-    recommendation = _recommendation_from_edge(value_metrics.get("edge"), confidence, blocking_flags)
+    recommendation = _recommendation_from_edge(
+        value_metrics.get("edge"),
+        confidence,
+        blocking_flags,
+        market=str(candidate.get("market") or ""),
+        decimal_odds=candidate.get("decimal_odds"),
+        line=candidate.get("line"),
+        calibrated_probability=adjusted_probability,
+    )
     source = str(candidate.get("probability_source") or "")
     if "odds-movement" not in source and calibration.get("status") == "applied":
         source = f"{source} + bounded odds-movement calibration".strip(" +")
@@ -5264,7 +5294,14 @@ def build_betting_decision_support(
         )
         value_metrics = value_by_side.get(best_side) or {}
         edge = value_metrics.get("edge")
-        recommendation = _recommendation_from_edge(edge, confidence, blocking_flags)
+        recommendation = _recommendation_from_edge(
+            edge,
+            confidence,
+            blocking_flags,
+            market="1x2",
+            decimal_odds=parse_float(moneyline_decimal_odds.get(best_side)),
+            calibrated_probability=model_1x2.get(best_side),
+        )
         candidates.append(
             {
                 "market": "1x2",
@@ -5317,7 +5354,15 @@ def build_betting_decision_support(
         )
         hhad_value_metrics = hhad_value_by_side.get(hhad_best_side) or {}
         hhad_edge = hhad_value_metrics.get("edge")
-        hhad_recommendation = _recommendation_from_edge(hhad_edge, confidence, blocking_flags)
+        hhad_recommendation = _recommendation_from_edge(
+            hhad_edge,
+            confidence,
+            blocking_flags,
+            market="jingcai_hhad",
+            decimal_odds=parse_float((official_hhad.get("current") or {}).get(hhad_best_side)),
+            line=hhad_goal_line,
+            calibrated_probability=hhad_model.get(hhad_best_side),
+        )
         hhad_selection_labels = {
             "home": f"{match.get('home_team') or '主队'}({hhad_goal_line:+g}) 让胜",
             "draw": f"{match.get('home_team') or '主队'}({hhad_goal_line:+g}) 让平",
@@ -5412,12 +5457,20 @@ def build_betting_decision_support(
         )
         value_metrics = value_by_side.get(best_side) or {}
         edge = value_metrics.get("edge")
-        recommendation = _recommendation_from_edge(edge, confidence, blocking_flags)
+        decimal_odds = (asian_metrics.get("decimal_odds") or {}).get(best_side)
         side_label = match.get("home_team") if best_side == "home_cover" else match.get("away_team")
         if not side_label:
             side_label = "主队" if best_side == "home_cover" else "客队"
         handicap = line if best_side == "home_cover" else -line
-        decimal_odds = (asian_metrics.get("decimal_odds") or {}).get(best_side)
+        recommendation = _recommendation_from_edge(
+            edge,
+            confidence,
+            blocking_flags,
+            market="asian_handicap",
+            decimal_odds=parse_float(decimal_odds),
+            line=handicap,
+            calibrated_probability=model_asian.get(best_side),
+        )
         candidates.append(
             {
                 "market": "asian_handicap",
@@ -5503,7 +5556,15 @@ def build_betting_decision_support(
         )
         value_metrics = value_by_side.get(best_side) or {}
         edge = value_metrics.get("edge")
-        recommendation = _recommendation_from_edge(edge, confidence, blocking_flags)
+        recommendation = _recommendation_from_edge(
+            edge,
+            confidence,
+            blocking_flags,
+            market="over_under",
+            decimal_odds=parse_float(decimal_odds),
+            line=totals_line,
+            calibrated_probability=totals_model.get(best_side),
+        )
         labels = {"over": "大球", "under": "小球"}
         decimal_odds = (totals_metrics.get("decimal_odds") or {}).get(best_side)
         candidates.append(
@@ -7358,7 +7419,7 @@ async def sync_leisu_odds_snapshots(
     concurrency: int = 4,
     require_quality_gate: bool = True,
 ) -> dict[str, Any]:
-    """Probe accessible Leisu odds pages and persist multi-company time-series snapshots."""
+    """Probe accessible Leisu odds pages and persist multi-company sparse snapshots."""
 
     started = time.time()
     as_of_dt = parse_as_of(as_of, timezone_name)
@@ -7509,6 +7570,12 @@ _ODDSPORTAL_MARKET_REQUESTS = {
     "over_under": (2, 2),
 }
 
+_BETEXPLORER_MARKET_REQUESTS = {
+    "h2h": "1x2",
+    "asian_handicap": "asian_handicap",
+    "over_under": "over_under",
+}
+
 
 async def sync_oddsportal_odds_snapshots(
     *,
@@ -7654,6 +7721,132 @@ async def sync_oddsportal_odds_snapshots(
             "storage_rule": "Only decrypted numeric OddsPortal markets are persisted as market_snapshots.",
             "resume_rule": "Use odds_source_sync_state failed/empty rows to resume specific event URLs.",
             "fallback_rule": "This source is a fallback for odds coverage; it does not replace fixture or score authority.",
+        },
+    }
+
+
+async def sync_betexplorer_odds_snapshots(
+    *,
+    event_urls: list[str] | None = None,
+    markets: list[str] | None = None,
+    limit: int = 10,
+    force: bool = False,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """Fetch explicit BetExplorer event pages and persist sparse best-odds snapshots."""
+
+    started = time.time()
+    bounded_urls = [url.strip() for url in (event_urls or []) if str(url or "").strip()]
+    bounded_urls = bounded_urls[: max(1, min(int(limit or 10), 20))]
+    selected_markets = [market for market in (markets or ["h2h"]) if market in _BETEXPLORER_MARKET_REQUESTS]
+    if not bounded_urls:
+        return {
+            "tool": "sync_betexplorer_odds_snapshots",
+            "status": "empty",
+            "provider": betexplorer_source.BETEXPLORER_PROVIDER,
+            "job_id": job_id,
+            "saved_snapshot_count": 0,
+            "message": "No BetExplorer event URLs were provided.",
+        }
+    if not selected_markets:
+        return {
+            "tool": "sync_betexplorer_odds_snapshots",
+            "status": "empty",
+            "provider": betexplorer_source.BETEXPLORER_PROVIDER,
+            "job_id": job_id,
+            "saved_snapshot_count": 0,
+            "message": "No supported markets were selected.",
+            "supported_markets": sorted(_BETEXPLORER_MARKET_REQUESTS),
+        }
+
+    snapshots_to_save: list[snapshot_store.MarketSnapshot] = []
+    results = []
+    for event_url in bounded_urls:
+        snapshot_store.upsert_odds_source_sync_state(
+            source=betexplorer_source.BETEXPLORER_PROVIDER,
+            scope_key="manual_event_url",
+            external_id=event_url,
+            status="running",
+            cursor={"markets": selected_markets, "job_id": job_id},
+        )
+        event_snapshots: list[snapshot_store.MarketSnapshot] = []
+        market_results = []
+        try:
+            for market_name in selected_markets:
+                result = await betexplorer_source.fetch_betexplorer_event_market_snapshots(
+                    event_url,
+                    market_type=_BETEXPLORER_MARKET_REQUESTS[market_name],
+                )
+                market_snapshots = result.get("snapshots") or []
+                event_snapshots.extend(market_snapshots)
+                market_results.append(
+                    {
+                        key: value
+                        for key, value in result.items()
+                        if key not in {"snapshots", "odds_html", "raw_payload"}
+                    }
+                )
+            snapshots_to_save.extend(event_snapshots)
+            snapshot_store.upsert_odds_source_sync_state(
+                source=betexplorer_source.BETEXPLORER_PROVIDER,
+                scope_key="manual_event_url",
+                external_id=event_url,
+                status="succeeded" if event_snapshots else "empty",
+                snapshot_count=len(event_snapshots),
+                cursor={"markets": selected_markets, "market_results": market_results, "job_id": job_id},
+            )
+            results.append(
+                {
+                    "event_url": event_url,
+                    "status": "succeeded" if event_snapshots else "empty",
+                    "snapshot_count": len(event_snapshots),
+                    "markets": market_results,
+                }
+            )
+        except Exception as exc:
+            snapshot_store.upsert_odds_source_sync_state(
+                source=betexplorer_source.BETEXPLORER_PROVIDER,
+                scope_key="manual_event_url",
+                external_id=event_url,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+                cursor={"markets": selected_markets, "job_id": job_id},
+            )
+            results.append(
+                {
+                    "event_url": event_url,
+                    "status": "failed",
+                    "snapshot_count": 0,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+
+    saved_count = snapshot_store.save_market_snapshots(snapshots_to_save)
+    failed_count = sum(1 for item in results if item.get("status") == "failed")
+    status = "ok" if saved_count > 0 and not failed_count else "partial" if snapshots_to_save or results else "empty"
+    if failed_count == len(results):
+        status = "error"
+    return {
+        "tool": "sync_betexplorer_odds_snapshots",
+        "status": status,
+        "provider": betexplorer_source.BETEXPLORER_PROVIDER,
+        "job_id": job_id,
+        "requested_event_count": len(bounded_urls),
+        "requested_markets": selected_markets,
+        "generated_snapshot_count": len(snapshots_to_save),
+        "saved_snapshot_count": saved_count,
+        "failed_count": failed_count,
+        "events": results,
+        "snapshot_store": {
+            "db_path": snapshot_store.snapshot_db_path(),
+            "provider_counts": snapshot_store.provider_snapshot_counts(),
+            "sync_state": snapshot_store.odds_source_sync_summary(),
+        },
+        "latency_ms": round((time.time() - started) * 1000),
+        "policy": {
+            "storage_rule": "Only parsed BetExplorer best-odds rows are persisted as sparse market_snapshots.",
+            "resume_rule": "Use odds_source_sync_state failed/empty rows to resume specific event URLs.",
+            "fallback_rule": "This source is a low-frequency fallback for sparse anchor snapshots; it is not yet a primary source.",
         },
     }
 
@@ -7833,7 +8026,7 @@ async def get_match_data_bundle(
             "do_not_invent_missing_fields": True,
             "no_snapshot_rule": "If matching_snapshot_count is 0, say the paid-source snapshot layer has no local data yet and fall back to existing single-match MCP fields.",
             "consensus_rule": "Use market_consensus for multi-bookmaker price spread; do not calculate odds from raw rows unless a required field is absent from consensus.",
-            "movement_rule": "Use market_movement as opening-to-latest market evidence when status is available; otherwise say the analysis is current-price only.",
+            "movement_rule": "Use market_movement as sparse anchor evidence (opening / latest and, when available, decision / closing); otherwise say the analysis is current-price only.",
         },
     }
 
@@ -8784,7 +8977,15 @@ def _sporttery_pick_from_analysis(
                 parse_float(item.get("model_probability")) or 0.0,
             ),
         )
-        recommendation = _recommendation_from_edge(parse_float(best.get("edge")), confidence, blocking_flags)
+        recommendation = _recommendation_from_edge(
+            parse_float(best.get("edge")),
+            confidence,
+            blocking_flags,
+            market=str(best.get("market") or ""),
+            decimal_odds=best.get("decimal_odds"),
+            line=best.get("line"),
+            calibrated_probability=best.get("calibrated_probability"),
+        )
         best_edge = parse_float(best.get("edge"))
         if best_edge is None or best_edge < min_edge:
             return None, "official_had_ev_below_threshold"
@@ -9654,10 +9855,10 @@ async def settle_learning_recommendations(
     all_results = supplied_results + list(fetched.get("results") or []) + list(match_state_refresh.get("results") or [])
     # 1) Tag postponed/cancelled events first (excludes them from KPIs cleanly)
     postponed_cleanup = learning_store.mark_postponed_records(db_path=db_path)
-    # 2) Then mark records past kickoff with no score available as unsettleable
-    unsettleable = learning_store.mark_unsettleable_stale_records(db_path=db_path)
     settlement = learning_store.settle_recommendations(all_results, db_path=db_path)
     shadow_settlement = learning_store.settle_shadow_predictions(all_results, db_path=db_path)
+    # 2) After applying any supplied/fetched results, mark remaining stale open rows as unsettleable.
+    unsettleable = learning_store.mark_unsettleable_stale_records(db_path=db_path)
     clv_tracking = _persist_clv_tracking_for_settled_records(
         settlement=settlement,
         shadow_settlement=shadow_settlement,
@@ -9991,6 +10192,95 @@ def _persist_clv_tracking_for_settled_records(
         "recommendation": recommendation,
         "shadow_prediction": shadow,
         "rule": "CLV is persisted after settlement, before calibration and strategy recompute.",
+    }
+
+
+def _capture_pending_closing_snapshots(
+    *,
+    db_path: str | None = None,
+    market_db_path: str | None = None,
+    recommendation_limit: int = 500,
+    shadow_limit: int = 500,
+) -> dict[str, Any]:
+    """Attach closing-side evidence to open prediction rows before settlement arrives."""
+    market_db = market_db_path or snapshot_store.snapshot_db_path()
+    open_recommendations = learning_store.list_recommendation_records(
+        db_path=db_path,
+        status="open",
+        limit=max(1, min(int(recommendation_limit or 500), 1000)),
+    )
+    open_shadows = learning_store.list_shadow_prediction_records(
+        db_path=db_path,
+        status="open",
+        limit=max(1, min(int(shadow_limit or 500), 1000)),
+    )
+
+    def capture_one(record_source: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            return {
+                "status": "empty",
+                "record_source": record_source,
+                "record_count": 0,
+                "tracked_count": 0,
+                "available_count": 0,
+                "persisted": {"updated_count": 0, "available_count": 0, "unavailable_count": 0, "reasons": {}},
+            }
+        tracking = snapshot_store.closing_line_value_for_records(
+            rows,
+            db_path=market_db,
+            limit=len(rows),
+            allow_fuzzy_match=True,
+            prefer_persisted=False,
+        )
+        persisted = learning_store.update_clv_tracking(
+            record_source=record_source,
+            clv_records=[item for item in (tracking.get("records") or []) if isinstance(item, dict)],
+            db_path=db_path,
+        )
+        tracked_count = int(tracking.get("tracked_count") or 0)
+        available_count = int(tracking.get("available_count") or 0)
+        return {
+            "status": (
+                "ok"
+                if tracked_count and available_count == tracked_count
+                else "partial"
+                if available_count > 0
+                else "waiting"
+                if tracked_count > 0
+                else "empty"
+            ),
+            "record_source": record_source,
+            "record_count": len(rows),
+            "tracked_count": tracked_count,
+            "available_count": available_count,
+            "positive_clv_count": int(tracking.get("positive_clv_count") or 0),
+            "avg_clv_return": tracking.get("avg_clv_return"),
+            "persisted": persisted,
+        }
+
+    recommendation = capture_one("recommendation", open_recommendations)
+    shadow_prediction = capture_one("shadow_prediction", open_shadows)
+    tracked_count = int(recommendation.get("tracked_count") or 0) + int(shadow_prediction.get("tracked_count") or 0)
+    available_count = int(recommendation.get("available_count") or 0) + int(shadow_prediction.get("available_count") or 0)
+    return {
+        "status": (
+            "ok"
+            if tracked_count and available_count == tracked_count
+            else "partial"
+            if available_count > 0
+            else "waiting"
+            if tracked_count > 0
+            else "empty"
+        ),
+        "tool": "capture_pending_closing_snapshots",
+        "market_db_path": market_db,
+        "tracked_count": tracked_count,
+        "available_count": available_count,
+        "coverage_ratio": round(available_count / tracked_count, 6) if tracked_count else None,
+        "recommendation": recommendation,
+        "shadow_prediction": shadow_prediction,
+        "rule": "Open predictions first persist decision snapshots; later loops keep trying to attach pre-kickoff closing evidence from market_snapshots before settlement.",
+        "at_utc": now_utc().isoformat(),
     }
 
 
@@ -10367,6 +10657,12 @@ async def run_auto_learning_cycle(
         "saved_snapshot_count": 0,
         "queued_event_count": 0,
     }
+    closing_snapshot_tracking: dict[str, Any] = {
+        "enabled": True,
+        "status": "not_started",
+        "tracked_count": 0,
+        "available_count": 0,
+    }
     lark_notification: dict[str, Any] = {
         "enabled": False,
         "channel": "lark",
@@ -10617,6 +10913,26 @@ async def run_auto_learning_cycle(
                 }
         AUTO_LEARNING_STATE["last_oddsportal_snapshot_sync"] = oddsportal_snapshot_sync
 
+    AUTO_LEARNING_STATE["current_step"] = "closing_snapshot_tracking"
+    try:
+        closing_snapshot_tracking = {
+            "enabled": True,
+            **_capture_pending_closing_snapshots(
+                db_path=db_path,
+                market_db_path=snapshot_store.snapshot_db_path(),
+            ),
+        }
+    except Exception as exc:
+        closing_snapshot_tracking = {
+            "enabled": True,
+            "status": "error",
+            "tracked_count": 0,
+            "available_count": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+            "at_utc": now_utc().isoformat(),
+        }
+    AUTO_LEARNING_STATE["last_closing_snapshot_tracking"] = closing_snapshot_tracking
+
     if include_snapshot_reanalysis:
         AUTO_LEARNING_STATE["current_step"] = "snapshot_reanalysis"
         try:
@@ -10678,6 +10994,7 @@ async def run_auto_learning_cycle(
         "analysis_market_snapshot_sync": asian_summary.get("analysis_market_snapshot_sync") or {},
         "market_snapshot_sync": market_snapshot_sync,
         "oddsportal_snapshot_sync": oddsportal_snapshot_sync,
+        "closing_snapshot_tracking": closing_snapshot_tracking,
         "snapshot_reanalysis": snapshot_reanalysis,
         "lark_notification": lark_notification,
         "settlement": settlement,
@@ -11177,6 +11494,43 @@ def _dashboard_settlement_row(record: dict[str, Any]) -> dict[str, Any]:
         }
     )
     return row
+
+
+def _dashboard_settlement_match_identity(record: dict[str, Any]) -> str:
+    match_id = str(record.get("match_id") or "").strip()
+    if match_id:
+        return match_id
+    return "|".join(
+        str(record.get(key) or "")
+        for key in ("league", "home_team", "away_team", "kickoff_utc_plus_8", "kickoff_utc")
+    )
+
+
+def _dashboard_recent_settlement_records(records: list[dict[str, Any]], *, limit: int = 12) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        grouped.setdefault(_dashboard_settlement_match_identity(record), []).append(record)
+
+    def rank(record: dict[str, Any]) -> tuple[int, int, float, str]:
+        prediction_type = _dashboard_prediction_type(record, source="recommendation")
+        recommendation = str(record.get("recommendation") or "")
+        edge = abs(parse_float(record.get("edge")) or 0.0)
+        return (
+            2 if prediction_type == "recommendation" else 1,
+            2 if recommendation == "immediate_bet" else 1 if recommendation == "condition_observe" else 0,
+            edge,
+            str(record.get("created_at_utc") or ""),
+        )
+
+    selected = [max(group, key=rank) for group in grouped.values()]
+    selected.sort(
+        key=lambda record: (
+            str(record.get("settled_at_utc") or ""),
+            str(record.get("created_at_utc") or ""),
+        ),
+        reverse=True,
+    )
+    return selected[: max(1, min(int(limit or 12), 50))]
 
 
 def _dashboard_prediction_identity(record: dict[str, Any]) -> str:
@@ -12965,7 +13319,12 @@ def _dashboard_learning_deployment_verdict(
 
 
 def _dashboard_learning_effectiveness(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    settled_rows = [row for row in rows if row.get("settlement_status") == "settled"]
+    settled_rows = [
+        row
+        for row in rows
+        if row.get("settlement_status") == "settled"
+        and str(row.get("recommendation") or "") == "condition_observe"
+    ]
     model_quality = _dashboard_probability_quality(settled_rows, "model_probability")
     learned_quality = _dashboard_probability_quality(settled_rows, "learned_probability")
     market_quality = _dashboard_probability_quality(settled_rows, "market_probability")
@@ -13461,12 +13820,6 @@ def _dashboard_recommendation_release_gate(
         title = "候选尚未过线"
         detail = f"当前纸面信号 {paper_signal_count} 场，但没有候选同时满足概率、边际和赔率门槛。"
         severity = "warning"
-    elif missing_snapshot_count > 0:
-        status = "paper_only_snapshot_missing"
-        formal_enabled = False
-        title = "等待赔率快照补齐"
-        detail = f"{missing_snapshot_count} 场纸面信号缺少多公司赔率快照，继续预测并等待复算。"
-        severity = "warning"
     elif effectiveness and not beats_market:
         status = "paper_only_not_beating_market"
         formal_enabled = False
@@ -13807,8 +14160,13 @@ def _dashboard_recommendation_opportunity(
         title = "暂无预测样本"
         detail = "自动学习循环还没有写入预测样本。"
 
+    visible_signal_rows = [
+        row
+        for row in eligible_signal_rows
+        if str(row.get("recommendation") or "") == "condition_observe"
+    ]
     candidates = sorted(
-        eligible_signal_rows,
+        visible_signal_rows,
         key=lambda row: (
             1 if _dashboard_row_threshold_ready(row) else 0,
             parse_float(row.get("edge")) or -999.0,
@@ -14409,6 +14767,7 @@ def _dashboard_production_readiness(
         and positive_clv_rate is not None
         and positive_clv_rate >= 0.55
     )
+    clv_negative_guard = bool(clv_required and avg_clv_return is not None and avg_clv_return < 0)
     is_empty_loop = total_predictions <= 0
     production_ready = bool(
         total_predictions > 0
@@ -14416,9 +14775,9 @@ def _dashboard_production_readiness(
         and learning_improved
         and beats_market
         and (roi is not None and roi >= 0)
-        and (not clv_required or clv_ready)
         and formal_enabled
         and not shadow_walk_blocked
+        and not clv_negative_guard
         and contract_ok
     )
 
@@ -14501,30 +14860,29 @@ def _dashboard_production_readiness(
             clv_status = "ok"
             clv_title = "CLV 验证通过 — 强信号"
         elif avg_clv_return is not None and avg_clv_return < 0:
-            clv_status = "blocked"
+            clv_status = "warning"
             clv_title = "平均 CLV 为负"
         elif clv_available_count < 30:
             clv_status = "warning"
             clv_title = "CLV 样本积累中"
         elif avg_clv_return is None or avg_clv_return < 0.005:
-            clv_status = "blocked"
-            clv_title = "CLV 边际不足 — 模型可能没有真实优势"
+            clv_status = "warning"
+            clv_title = "CLV 边际不足 — 继续观察"
         else:
-            clv_status = "blocked"
+            clv_status = "warning"
             clv_title = "正 CLV 比例不足 55%"
         gates.append(
             gate(
                 "closing_line_value",
-                "CLV 收盘线价值（强信号）",
+                "CLV 收盘线价值（审计项）",
                 clv_status,
                 clv_title,
                 (
                     f"已对齐 {clv_available_count}/{clv_tracked_count} 条收盘价；"
                     f"平均 CLV {_percent_text(avg_clv_return) or '暂无'}，"
                     f"正 CLV 比例 {_percent_text(positive_clv_rate) or '暂无'}。"
-                    "CLV 是统计上最早出现的模型质量信号；生产发布至少需要 20 条可计算 CLV，"
-                    "当前强信号闸门要求 ≥30 条样本、"
-                    "平均 CLV ≥ +0.5%、正 CLV 比例 ≥ 55%。"
+                    "CLV 继续作为强审计信号保留，但当前不再因为历史收盘价覆盖不足而单独阻断推荐发布；"
+                    "它主要用于后续复盘、风险提示和模型质量确认。"
                 ),
                 current=clv_available_count,
                 target=30,
@@ -14969,10 +15327,10 @@ def _dashboard_model_failure_action_policy(
                 _dashboard_model_failure_policy_rule(
                     key=f"require_market_snapshots:{driver_key}",
                     rule_type="require_market_snapshots",
-                    status="blocked",
-                    title="正式推荐前必须补齐赔率快照",
-                    detail="缺少多公司同盘口快照时，只允许纸面预测和回测，不升级正式推荐。",
-                    action="require_snapshot_before_formal_recommendation",
+                    status="warning",
+                    title="继续补赔率快照",
+                    detail="缺少多公司同盘口快照会降低复盘与 CLV 质量，但不再单独阻断正式推荐。",
+                    action="continue_collect_sparse_snapshots",
                     target="market_snapshot_coverage",
                     target_key=driver_key,
                     driver=driver,
@@ -16802,6 +17160,13 @@ def _dashboard_match_odds_snapshot(
         }
         for row in rows[:200]
     ]
+    sparse_summary = snapshot_store.build_market_movement_summary(
+        rows,
+        home_team=str(record.get("home_team") or ""),
+        away_team=str(record.get("away_team") or ""),
+        kickoff_utc=str(record.get("kickoff_utc") or ""),
+        reference_time_utc=str(record.get("created_at_utc") or ""),
+    )
     return {
         "snapshot_count": len(rows),
         "bookmaker_count": len(bookmakers),
@@ -16812,11 +17177,8 @@ def _dashboard_match_odds_snapshot(
         "latest_rows": latest_rows,
         "resolution": resolution,
         "consensus": snapshot_store.build_market_consensus(rows) if rows else {},
-        "movement": snapshot_store.build_market_movement_summary(
-            rows,
-            home_team=str(record.get("home_team") or ""),
-            away_team=str(record.get("away_team") or ""),
-        ),
+        "sparse_summary": sparse_summary,
+        "movement": sparse_summary,
     }
 
 
@@ -17312,7 +17674,8 @@ def dashboard_snapshot(
         else:
             asian_picks.append(record)
     record_counts = calibration.get("record_counts") or {}
-    recent_settlements = [_dashboard_settlement_row(record) for record in settled_records[:12]]
+    recent_settlement_records = _dashboard_recent_settlement_records(settled_records, limit=12)
+    recent_settlements = [_dashboard_settlement_row(record) for record in recent_settlement_records]
     _ledger_limit = max(bounded_limit, 2000)
     full_prediction_source_records = _dashboard_prediction_source_records(
         db_path=db_path,
@@ -17972,6 +18335,26 @@ async def shortlist_value_matches(
                     "rejected_league": m_league,
                 })
         matches = allowed_matches
+
+    try:
+        from football_data_mcp import league_strategy
+        blocked_leagues = set((league_strategy.compute_league_breakdown(db_path=db_path) or {}).get("effective_blocked_leagues") or [])
+    except Exception:
+        blocked_leagues = set()
+
+    if blocked_leagues:
+        filtered_matches = []
+        for m in matches:
+            m_league = str(m.get("league") or m.get("competition_name") or "")
+            if m_league in blocked_leagues:
+                rejected.append({
+                    "match": m,
+                    "reason": "league_consistently_losing",
+                    "rejected_league": m_league,
+                })
+            else:
+                filtered_matches.append(m)
+        matches = filtered_matches
 
     bounded_limit = max(1, int(limit or 30))
     bounded_analysis_limit = max(1, min(bounded_limit, int(analysis_candidate_limit or 30), 100))

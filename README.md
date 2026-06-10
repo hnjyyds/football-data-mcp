@@ -2,16 +2,45 @@
 
 Standalone MCP service for single-match football analysis.
 
+Reference modeling principles:
+
+- [`docs/reference-modeling-principles.md`](./docs/reference-modeling-principles.md)
+
 Primary numeric odds source:
 
 - `https://www.football-data.co.uk/fixtures.csv`
 
 The service also probes public football pages such as OddsPortal, ScoreBat, Soccerway, Flashscore mobile, and Sky Sports. These are used as corroborating schedule/context sources when parseable. Football-Data remains the strongest numeric odds source because it returns concrete bookmaker, max, and average odds through ordinary HTTP requests.
 
+Free candidate odds sites worth evaluating next for sparse fallback snapshots:
+
+- `BetExplorer`
+- `7M`
+- `Titan007 / 球探新球`
+- `Goaloo`
+
+Current recommendation:
+
+- Prefer `BetExplorer` first when validating a new free fallback odds site: its public football routes and match detail URLs are the most explicit among the current candidates.
+- Then try `7M` as an Asian-market-oriented fallback source when you are willing to traverse its score pages into deeper match detail routes.
+- Treat `Titan007 / 球探新球` as a later candidate only if connectivity is stable from the current network path.
+- Treat `Goaloo` as a later experiment for now: public routes currently return `200` with empty bodies in this environment, so it is not the best first integration target.
+- Treat `Nowgoal`, `AiScore`, `Oddspedia`, `FootballAnt`, and similar Cloudflare / WAF-heavy sites as browser-session fallback candidates only, not as the next default source.
+- Keep the acquisition model conservative: sparse anchor snapshots (`opening`, `decision`, `latest`, `closing`), low-frequency serial fetches, persistent browser sessions only when necessary, and multi-source fallback rather than one high-frequency scraper.
+
+BetExplorer integration status:
+
+- Match discovery is already viable from public football listing pages.
+- Match detail pages expose stable market-tab URLs for `1x2`, `over-under`, and `asian-handicap`.
+- The actual odds table is not present in the first HTML response; current reverse-engineering indicates the next step should read the site AJAX chain around:
+  - `/gres/ajax/betting-type-tabs.php`
+  - `/gres/ajax/match-content.php`
+- This means BetExplorer should be integrated as a low-frequency structured fallback only after those AJAX responses are normalized into sparse `market_snapshots`.
+
 Run locally:
 
 ```bash
-python -m football_data_mcp.server
+uv run python -m football_data_mcp.server
 ```
 
 Run with Docker:
@@ -27,6 +56,7 @@ scripts/check.sh
 ```
 
 The local gate runs Python lint/type checks, the full backend test suite, frontend unit tests, and the production frontend build. CI runs the same checks on pull requests and pushes to `main`.
+When working on the host machine, prefer `uv run ...` instead of bare `python`/`pytest` so commands use the project environment rather than the shell's global PATH.
 
 MCP endpoint:
 
@@ -99,11 +129,11 @@ Paper learning loop:
 - Recommendation records are keyed by match/market/selection/line so repeated background cycles do not over-count the same paper pick. Jingcai parlay tickets are tracked for audit but are not left in single-match `open` settlement queues.
 - Background learning also records a bounded set of analyzed Asian handicap rejections as `*_observation` rows. These are not user-facing recommendations; they are paper observations used to calibrate whether the model probability is honest across more market states.
 - Background shortlist analysis now also writes a separate shadow prediction pool. Shadow rows include both accepted picks and rejected analyzed candidates, plus rejection reason, thresholds, quality evidence, selected market, model probability, odds, edge, compact `model_engine` evidence, and later settlement metrics. These rows increase validation sample size without increasing user-facing recommendations.
-- `sync_leisu_odds_snapshots` can persist gated Leisu multi-company odds into the local snapshot store. It first tries the Leisu mobile API, including the mobile `auth_key` signature, Aliyun WAF `acw_sc__v2` challenge, encrypted response decoding, and per-company odds-detail timelines; then it falls back to proxy/direct HTML parsing. When Leisu returns an Aliyun interactive slider page, the direct mobile path opens a longer circuit breaker and reports that a cookie or proxy is required instead of repeatedly hammering the upstream. Each accessible page is expanded into 1X2, Asian handicap, and over/under snapshot rows by bookmaker, market, selection, line, source timestamp, and fetched timestamp; unchanged rows are de-duplicated by a stable snapshot key. The background learning loop now attempts this sync before shortlist analysis so the dashboard and model can use fresh odds snapshots when Leisu access is available.
+- `sync_leisu_odds_snapshots` can persist gated Leisu multi-company odds into the local snapshot store. It first tries the Leisu mobile API, including the mobile `auth_key` signature, Aliyun WAF `acw_sc__v2` challenge, encrypted response decoding, and per-company odds-detail timelines; then it falls back to proxy/direct HTML parsing. When Leisu returns an Aliyun interactive slider page, the direct mobile path opens a longer circuit breaker and reports that a cookie or proxy is required instead of repeatedly hammering the upstream. Each accessible page is expanded into 1X2, Asian handicap, and over/under snapshot rows by bookmaker, market, selection, line, source timestamp, and fetched timestamp; unchanged rows are de-duplicated by a stable snapshot key. Downstream audit should prioritize sparse anchor points such as opening, decision-time, latest, and closing instead of assuming that every match needs a dense full-history curve.
 - `learning_calibration_status` reports record counts and exact plus broad calibration buckets by market, league, line, odds range, and probability range. Live calibration only applies buckets with enough settled samples and shrinks empirical hit rate toward the raw model probability.
 - `shortlist_value_matches` returns `funnel_report`, which explains how many candidates were listed, analyzed, rejected, returned, and why they were rejected. This is the first place to inspect when prediction volume looks too low.
 - Settlement also refreshes a machine-readable `strategy_state` for balanced Asian handicap selection. Probability calibration still uses all settled recommendation and observation rows, but strategy threshold tuning only uses formal balanced rows plus actionable observations (`immediate_bet` / `condition_observe`); `no_value` observations remain calibration evidence rather than strategy ROI. Once enough actionable samples exist, `shortlist_value_matches(mode="balanced", target_market="asian_handicap")` reads this state by default to tighten or relax probability/value/odds thresholds and use live-calibrated probabilities in the next shortlist cycle.
-- Docker Compose enables the background paper-learning loop by default with `FOOTBALL_DATA_AUTO_LEARNING_ENABLED=true`. It stores data in `/data/football_data_mcp_learning.sqlite3`, runs every 120 seconds, times out a stuck cycle after 300 seconds (`FOOTBALL_DATA_AUTO_LEARNING_CYCLE_TIMEOUT_SECONDS=300`), caps each single-match shortlist analysis at 45 seconds (`FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS=45`), and only analyzes/persists predictions for matches kicking off in the next 10 minutes (`FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES=10`, `FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES=10`, `FOOTBALL_DATA_AUTO_LEARNING_TOP_N=12`, `FOOTBALL_DATA_AUTO_LEARNING_LIMIT=80`, `FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CANDIDATE_LIMIT=80`, `FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY=10`, `FOOTBALL_DATA_AUTO_LEARNING_SHADOW_PREDICTION_LIMIT=100`, `FOOTBALL_DATA_AUTO_LEARNING_OBSERVATION_LIMIT=30`). Leisu odds snapshot collection is disabled by default (`FOOTBALL_DATA_AUTO_SYNC_LEISU_ODDS=false`) because the upstream uses interactive WAF checks; enable it only after an authorized proxy/session is ready. Its match window remains wider when enabled (`FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES=1440`, `FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_LIMIT=80`) so the model can use the accumulated odds timeline from first successful fetch through the latest pre-kickoff refresh. User-facing shortlist requests still keep their explicit/default time window and conservative `top_n`.
+- Docker Compose enables the background paper-learning loop by default with `FOOTBALL_DATA_AUTO_LEARNING_ENABLED=true`. It stores data in `/data/football_data_mcp_learning.sqlite3`, runs every 120 seconds, times out a stuck cycle after 300 seconds (`FOOTBALL_DATA_AUTO_LEARNING_CYCLE_TIMEOUT_SECONDS=300`), caps each single-match shortlist analysis at 45 seconds (`FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS=45`), and only analyzes/persists predictions for matches kicking off in the next 10 minutes (`FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES=10`, `FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES=10`, `FOOTBALL_DATA_AUTO_LEARNING_TOP_N=12`, `FOOTBALL_DATA_AUTO_LEARNING_LIMIT=80`, `FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CANDIDATE_LIMIT=80`, `FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_CONCURRENCY=10`, `FOOTBALL_DATA_AUTO_LEARNING_SHADOW_PREDICTION_LIMIT=100`, `FOOTBALL_DATA_AUTO_LEARNING_OBSERVATION_LIMIT=30`). Leisu odds snapshot collection is disabled by default (`FOOTBALL_DATA_AUTO_SYNC_LEISU_ODDS=false`) because the upstream uses interactive WAF checks; enable it only after an authorized proxy/session is ready. Its match window remains wider when enabled (`FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES=1440`, `FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_LIMIT=80`) so the system can accumulate enough key anchor points before kickoff. User-facing shortlist requests still keep their explicit/default time window and conservative `top_n`.
 - Docker Compose passes through optional Leisu access variables: `LEISU_ODDS_PROXY_URL`, `LEISU_COOKIE`, and `LEISU_ACW_SC_V2`. For Leisu's current interactive slider flow, run the local manual browser proxy and set `LEISU_ODDS_PROXY_URL=http://host.docker.internal:8918/leisu/odds/{match_id}`. `LEISU_MOBILE_DETAIL_COMPANY_LIMIT` controls how many bookmakers per market get full historical timelines (`0` means all, default `3` to reduce rate-limit pressure). If Leisu changes WAF behavior, rate-limits the host, or local Node.js is unavailable, the sync tool degrades without inventing prices.
 - When Leisu odds remain unstable, OddsPortal can be used as a fallback odds snapshot producer instead of replacing the whole fixture/score source chain. `sync_oddsportal_odds_snapshots` accepts explicit event URLs, defaults to `asian_handicap`, decrypts the OddsPortal market payload, and writes the same `market_snapshots` table used by charts, CLV, and model audit. `/api/sources/odds/oddsportal/sync` queues the fallback sync through the configured task backend; pass `resume_failed=true` to retry failed/empty OddsPortal URLs from `odds_source_sync_state`, or pass `auto_discover=true` with `discovery_urls`/`FOOTBALL_DATA_ODDSPORTAL_DISCOVERY_URLS` so open prediction targets are matched against OddsPortal listing pages before queuing. If the open ledger is empty, the service falls back to recent `analysis_odds` events as discovery seeds, then uses the built-in league-to-OddsPortal listing map for common leagues before falling back to the football landing page. Docker Compose enables this fallback ability by default (`FOOTBALL_DATA_AUTO_SYNC_ODDSPORTAL_ODDS=true`, `FOOTBALL_DATA_ODDSPORTAL_SCRAPER_ENABLED=true`), but the auto-learning daemon first checks `/api/sources/odds/status`: if Leisu or another independent odds source is fresh, OddsPortal is skipped; if only analysis-derived snapshots are fresh, OddsPortal auto-discovery is queued. Limits are controlled by `FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_SNAPSHOT_LIMIT` and `FOOTBALL_DATA_AUTO_LEARNING_ODDSPORTAL_TARGET_LIMIT`. `/api/sources/odds/status` plus dashboard `odds_source_status` expose queued/running/failed/succeeded rows, target source, active source, freshness, production readiness, and the next operator action.
 
@@ -114,6 +144,35 @@ uv sync --extra browser-proxy
 uv run python -m playwright install chromium
 uv run --extra browser-proxy python -m scripts.leisu_browser_proxy --port 8918 --profile-dir .leisu-browser-profile
 ```
+
+The proxy now also exposes lightweight session-health endpoints:
+
+- `GET /health`
+- `GET /leisu/session`
+
+`DataSourceService.odds_source_status()` reads that browser-session state when available, so the backend can distinguish "needs manual verification" from "session ready but snapshots not refreshed yet". See [docs/browser-assisted-crawler-stack.md](./docs/browser-assisted-crawler-stack.md).
+
+If you want to bootstrap the same persistent profile with `Crawlee + Playwright` instead of the lightweight proxy flow:
+
+```bash
+uv sync --extra crawler-runtime
+uv run --extra crawler-runtime python -m scripts.leisu_crawlee_session --match-id 4512919
+```
+
+You can also enqueue the same Leisu session bootstrap through the backend job system:
+
+- `POST /api/sources/odds/leisu/session/refresh`
+
+And the health/runtime state is now visible from:
+
+- `GET /api/sources/odds/status`
+- `GET /api/health`
+
+League blocking:
+
+- The backend now computes `league_breakdown` and can automatically block long-term losing leagues.
+- The repo also ships a conservative default blocked set for obvious losing fringe leagues seen in prior paper-trade runs: `南球杯`、`阿大都乙`、`解放者杯`、`澳足总`、`冈比亚超`。
+- Manual overrides can be added through `FOOTBALL_DATA_LEAGUE_BLOCKLIST` (comma-separated); env values are merged on top of the repo defaults.
 
 If Leisu keeps rejecting the slider in the Playwright browser, use a real local Chrome profile instead:
 
@@ -139,7 +198,7 @@ Dashboard:
 - The dashboard does not expose search boxes or query inputs. It polls `/api/dashboard`, which reads persisted MCP paper-learning state, current `strategy_state`, Asian handicap picks, candidate filter reasons, recent settlements, and learning events.
 - The dashboard model audit reads compact `model_engine` evidence when available and falls back to legacy candidate summaries for older rows, so model usage and market anchoring remain visible without rerunning historical predictions. Legacy rows cannot recover historical rho internals that were not persisted.
 - Match rows expose optional `home_team_logo_url` and `away_team_logo_url` fields. The UI renders real provider crests when present and falls back to deterministic team badges when persisted data only has team names.
-- The dashboard now also shows local odds time-series coverage from the snapshot store, including source, market types, snapshot count, covered matches, bookmaker count, and latest fetch time.
+- The dashboard now also shows local sparse odds-snapshot coverage from the snapshot store, including source, market types, snapshot count, covered matches, bookmaker count, and latest fetch time.
 - The frontend is a cockpit for monitoring the automatic loop; it does not place bets and does not trigger real-money actions.
 
 Example:
@@ -211,6 +270,6 @@ Odds quality contract:
 
 - `get_match_odds` and `analyze_single_match` return `odds.quality_contract` when a preferred 1X2 market is available.
 - Asian handicap responses keep `preferred_asian_handicap`, return the full `asian_handicap_markets` list, and add `asian_handicap_consensus` for line distribution, latest market, main line, freshness span, and preferred-vs-consensus warnings.
-- The contract includes raw implied probabilities, normalized probabilities, `overround`, `payout_rate`, opening-to-current movement, and timestamp quality.
+- The contract includes raw implied probabilities, normalized probabilities, `overround`, `payout_rate`, key anchor movement (opening / latest and, when available, decision / closing), and timestamp quality.
 - Downstream agents should treat `quality_contract.can_use_for_calculation=false` or `quality.flags` hard flags as observation/no-bet input unless another explicit source resolves the issue.
-- Timestamp warnings such as `future_source_timestamp` mean the provider's timestamp field is unreliable. The returned odds can still be used as the fetched response snapshot when `can_use_for_calculation=true`, but the timestamp must not be used for freshness or time-series analysis.
+- Timestamp warnings such as `future_source_timestamp` mean the provider's timestamp field is unreliable. The returned odds can still be used as the fetched response snapshot when `can_use_for_calculation=true`, but the timestamp must not be used for freshness or dense time-series analysis.

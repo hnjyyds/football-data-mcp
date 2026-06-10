@@ -142,7 +142,7 @@ def test_dashboard_model_failure_diagnostics_exports_action_policy_rules():
     assert rules["suppress_reason:no_positive_edge"]["action"] == "suppress_formal_recommendation"
     assert rules["suppress_reason:no_positive_edge"]["target"] == "prediction_diagnostic.primary_reason"
     assert rules["suppress_reason:no_positive_edge"]["target_key"] == "no_positive_edge"
-    assert rules["require_market_snapshots:missing_market_snapshots"]["status"] == "blocked"
+    assert rules["require_market_snapshots:missing_market_snapshots"]["status"] == "warning"
     assert rules["keep_market_baseline:learned_probability_not_beating_market"]["target"] == "probability_source"
     assert rules["down_weight_league_market:巴西丁:asian_handicap"]["action"] == "reduce_sampling_weight"
 
@@ -598,6 +598,104 @@ def test_auto_learning_cycle_records_rejected_as_learning_observations(monkeypat
     assert record["mode"] == "balanced_observation"
     assert record["recommendation"] == "no_value"
     assert record["settlement_status"] == "open"
+
+
+def test_auto_learning_cycle_captures_pending_closing_snapshots_for_open_records(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    market_db_path = str(tmp_path / "snapshots.sqlite3")
+
+    async def fake_shortlist_value_matches(**kwargs):
+        return {
+            "status": "ok",
+            "tool": "shortlist_value_matches",
+            "mode": kwargs["mode"],
+            "target_market": kwargs["target_market"],
+            "generated_at_utc": "2026-06-04T12:24:00+00:00",
+            "picks": [
+                {
+                    "match": {
+                        "match_id": "closing-open-1",
+                        "league": "测试联赛",
+                        "home_team": "CLV主队",
+                        "away_team": "CLV客队",
+                        "kickoff_utc": "2026-06-04T12:30:00+00:00",
+                        "kickoff_utc_plus_8": "2026-06-04T20:30:00+08:00",
+                        "time_window": {
+                            "as_of": "2026-06-04T20:24:00+08:00",
+                            "kickoff": "2026-06-04T20:30:00+08:00",
+                        },
+                    },
+                    "best_candidate": {
+                        "market": "asian_handicap",
+                        "selection": "CLV主队 -0.5",
+                        "selection_key": "home_cover",
+                        "line": -0.5,
+                        "decimal_odds": 1.90,
+                        "model_probability": 0.62,
+                        "edge": 0.05,
+                        "recommendation": "immediate_bet",
+                        "stake_level": "small",
+                    },
+                    "final_execution_advice": {"action": "bet_now"},
+                    "selection_confidence": {"calibrated_probability": 0.62},
+                    "created_at_utc": "2026-06-04T12:24:00+00:00",
+                    "odds_snapshot_summary": {
+                        "provider": "analysis_odds",
+                        "generated_snapshot_count": 1,
+                        "fetched_at_utc": "2026-06-04T12:24:00+00:00",
+                    },
+                    "caution_flags": [],
+                }
+            ],
+            "rejected": [],
+        }
+
+    async def fake_recommend_jingcai_parlay(**kwargs):
+        return {"status": "ok", "tool": "recommend_jingcai_parlay", "parlay_mode": kwargs["parlay_mode"], "recommended_tickets": []}
+
+    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
+    monkeypatch.setattr(sources_module, "recommend_jingcai_parlay", fake_recommend_jingcai_parlay)
+    monkeypatch.setattr(sources_module.snapshot_store, "snapshot_db_path", lambda: market_db_path)
+
+    snapshot_store.save_market_snapshots(
+        [
+            snapshot_store.MarketSnapshot(
+                provider="test_closing",
+                source_key="test_league",
+                event_id="evt-closing-open",
+                league="测试联赛",
+                home_team="CLV主队",
+                away_team="CLV客队",
+                kickoff_utc="2026-06-04T12:30:00+00:00",
+                bookmaker="Pinnacle",
+                market_type="spreads",
+                selection="CLV主队",
+                decimal_odds=1.84,
+                line=-0.5,
+                source_time_utc="2026-06-04T12:28:00+00:00",
+                fetched_at_utc="2026-06-04T12:28:05+00:00",
+                raw={"phase": "closing"},
+            )
+        ],
+        db_path=market_db_path,
+    )
+
+    result = asyncio.run(
+        sources_module.run_auto_learning_cycle(
+            db_path=db_path,
+            auto_settle=False,
+            include_market_snapshot_sync=False,
+            include_oddsportal_snapshot_sync=False,
+            include_snapshot_reanalysis=False,
+        )
+    )
+
+    assert result["closing_snapshot_tracking"]["status"] in {"ok", "partial"}
+    assert result["closing_snapshot_tracking"]["available_count"] == 1
+    record = learning_store.list_recommendation_records(db_path=db_path, status="open")[0]
+    assert record["raw"]["prediction_snapshot"]["decimal_odds"] == 1.9
+    assert record["raw"]["clv_tracking"]["closing_decimal_odds"] == 1.84
+    assert record["raw"]["clv_tracking"]["evaluation_evidence"]["prediction"]["decimal_odds"] == 1.9
 
 
 def test_learning_records_only_persist_near_kickoff_samples():
@@ -1470,6 +1568,86 @@ def test_dashboard_snapshot_exposes_prediction_ledger_with_results(tmp_path):
     assert snapshot["prediction_ledger"][1]["score"] == "2-0"
 
 
+def test_dashboard_recent_settlements_deduplicates_same_match_rows(tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    learning_store.save_recommendation_records(
+        [
+            {
+                "run_id": "cycle-settlement-dedupe",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "match_id": "same-match-1",
+                "league": "日职联",
+                "home_team": "柏太阳神",
+                "away_team": "京都不死鸟",
+                "kickoff_utc_plus_8": "2026-06-06T19:00:00+08:00",
+                "created_at_utc": "2026-06-06T11:09:00+00:00",
+                "market": "asian_handicap",
+                "selection": "京都不死鸟 +0.75",
+                "selection_key": "away_cover",
+                "line": 0.75,
+                "decimal_odds": 1.73,
+                "model_probability": 0.56,
+                "recommendation": "condition_observe",
+            },
+            {
+                "run_id": "cycle-settlement-dedupe",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "match_id": "same-match-1",
+                "league": "日职联",
+                "home_team": "柏太阳神",
+                "away_team": "京都不死鸟",
+                "kickoff_utc_plus_8": "2026-06-06T19:00:00+08:00",
+                "created_at_utc": "2026-06-06T11:08:00+00:00",
+                "market": "asian_handicap",
+                "selection": "柏太阳神 -0.75",
+                "selection_key": "home_cover",
+                "line": -0.75,
+                "decimal_odds": 1.91,
+                "model_probability": 0.52,
+                "recommendation": "no_value",
+            },
+            {
+                "run_id": "cycle-settlement-dedupe",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced",
+                "target_market": "asian_handicap",
+                "match_id": "same-match-2",
+                "league": "日职联",
+                "home_team": "川崎前锋",
+                "away_team": "广岛三箭",
+                "kickoff_utc_plus_8": "2026-06-06T19:00:00+08:00",
+                "created_at_utc": "2026-06-06T11:07:00+00:00",
+                "market": "asian_handicap",
+                "selection": "川崎前锋 -0.25",
+                "selection_key": "home_cover",
+                "line": -0.25,
+                "decimal_odds": 1.88,
+                "model_probability": 0.61,
+                "recommendation": "immediate_bet",
+            },
+        ],
+        db_path=db_path,
+    )
+    learning_store.settle_recommendations(
+        [
+            {"match_id": "same-match-1", "home_team": "柏太阳神", "away_team": "京都不死鸟", "home_score": 0, "away_score": 2},
+            {"match_id": "same-match-2", "home_team": "川崎前锋", "away_team": "广岛三箭", "home_score": 2, "away_score": 1},
+        ],
+        db_path=db_path,
+    )
+
+    snapshot = sources_module.dashboard_snapshot(db_path=db_path, limit=20)
+
+    matchups = [(row["home_team"], row["away_team"]) for row in snapshot["recent_settlements"]]
+    assert matchups.count(("柏太阳神", "京都不死鸟")) == 1
+    same_match_row = next(row for row in snapshot["recent_settlements"] if row["home_team"] == "柏太阳神")
+    assert same_match_row["selection"] == "京都不死鸟 +0.75"
+
+
 def test_dashboard_snapshot_exposes_learning_effectiveness_against_model_and_market(tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
     learning_store.save_recommendation_records(
@@ -1533,7 +1711,7 @@ def test_dashboard_snapshot_exposes_learning_effectiveness_against_model_and_mar
     snapshot = sources_module.dashboard_snapshot(db_path=db_path, limit=20)
     effectiveness = snapshot["learning_effectiveness"]
 
-    assert effectiveness["sample_count"] == 2
+    assert effectiveness["sample_count"] == 1
     assert effectiveness["status"] == "learning_improving"
     assert effectiveness["learned"]["brier_score"] == 0.0625
     assert effectiveness["model"]["brier_score"] == 0.16
@@ -1546,11 +1724,11 @@ def test_dashboard_snapshot_exposes_learning_effectiveness_against_model_and_mar
         "status": "paper_only_negative_roi",
         "severity": "warning",
         "title": "学习有效但收益未转正",
-        "detail": "学习概率优于原始模型和市场，但已结算收益率仍为 -10.0%，只能继续纸面验证。",
+        "detail": "学习概率优于原始模型和市场，但已结算收益率仍为 -100.0%，只能继续纸面验证。",
         "production_ready": False,
         "action": "keep_paper_backtest",
-        "sample_count": 2,
-        "roi": -0.1,
+        "sample_count": 1,
+        "roi": -1.0,
         "reasons": ["settled_roi_negative"],
     }
     assert "学习后概率优于原始模型" in effectiveness["detail"]
@@ -1730,6 +1908,75 @@ def test_dashboard_learning_effectiveness_exposes_probability_band_backtest(tmp_
     assert bands["over_65"]["sample_count"] == 1
     assert bands["over_65"]["hit_rate"] == 0.0
     assert bands["over_65"]["calibration_error"] == 0.72
+
+
+def test_dashboard_learning_effectiveness_ignores_immediate_bet_samples(tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    learning_store.save_recommendation_records(
+        [
+            {
+                "run_id": "cycle-ignore-immediate",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced",
+                "target_market": "asian_handicap",
+                "match_id": "ignore-immediate-hit",
+                "league": "筛选联赛",
+                "home_team": "立即主队",
+                "away_team": "立即客队",
+                "kickoff_utc_plus_8": "2026-05-25T19:00:00+08:00",
+                "market": "asian_handicap",
+                "selection": "立即主队 -0.5",
+                "selection_key": "home_cover",
+                "line": -0.5,
+                "decimal_odds": 1.8,
+                "model_probability": 0.6,
+                "calibrated_probability": 0.75,
+                "market_probability": 0.55,
+                "edge": 0.2,
+                "recommendation": "immediate_bet",
+                "stake_level": "small",
+            },
+            {
+                "run_id": "cycle-ignore-immediate",
+                "tool": "shortlist_value_matches",
+                "mode": "balanced_observation",
+                "target_market": "asian_handicap",
+                "match_id": "keep-observe-miss",
+                "league": "筛选联赛",
+                "home_team": "观察主队",
+                "away_team": "观察客队",
+                "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
+                "market": "asian_handicap",
+                "selection": "观察主队 +0.5",
+                "selection_key": "home_cover",
+                "line": 0.5,
+                "decimal_odds": 1.9,
+                "model_probability": 0.4,
+                "calibrated_probability": 0.25,
+                "market_probability": 0.45,
+                "edge": -0.01,
+                "recommendation": "condition_observe",
+                "stake_level": "none",
+                "raw": {"kind": "learning_observation", "reason": "no_positive_edge"},
+            },
+        ],
+        db_path=db_path,
+    )
+    learning_store.settle_recommendations(
+        [
+            {"match_id": "ignore-immediate-hit", "home_team": "立即主队", "away_team": "立即客队", "home_score": 2, "away_score": 0},
+            {"match_id": "keep-observe-miss", "home_team": "观察主队", "away_team": "观察客队", "home_score": 0, "away_score": 2},
+        ],
+        db_path=db_path,
+    )
+
+    snapshot = sources_module.dashboard_snapshot(db_path=db_path, limit=20)
+    effectiveness = snapshot["learning_effectiveness"]
+
+    assert effectiveness["sample_count"] == 1
+    assert effectiveness["model"]["sample_count"] == 1
+    assert effectiveness["learned"]["sample_count"] == 1
+    assert effectiveness["market"]["sample_count"] == 1
 
 
 def test_dashboard_detects_inverted_probability_bands_and_counter_signal_watchlist(tmp_path):
@@ -2922,8 +3169,9 @@ def test_dashboard_snapshot_exposes_recommendation_opportunity_audit(tmp_path):
     assert opportunity["missing_snapshot_count"] == 1
     assert opportunity["gate_thresholds"]["min_calibrated_probability"] == 0.58
     assert opportunity["gate_thresholds"]["min_value_edge"] == 0.02
+    assert len(opportunity["top_candidates"]) == 1
     assert opportunity["top_candidates"][0]["ledger_id"].startswith("recommendation:")
-    assert opportunity["top_candidates"][0]["recommendation"] == "immediate_bet"
+    assert opportunity["top_candidates"][0]["recommendation"] == "condition_observe"
     assert opportunity["top_candidates"][0]["primary_blocker"] == "awaiting_reanalysis_after_snapshot"
     assert opportunity["top_candidates"][0]["threshold_ready"] is True
     assert opportunity["top_candidates"][0]["has_odds_snapshot"] is True
@@ -2996,7 +3244,7 @@ def test_dashboard_recommendation_opportunity_counts_only_open_current_candidate
     assert opportunity["paper_signal_count"] == 0
     assert opportunity["historical_paper_signal_count"] == 1
     assert opportunity["settled_signal_count"] == 1
-    assert opportunity["top_candidates"] == []
+    assert len(opportunity["top_candidates"]) == 0
     assert "当前 1 场" in opportunity["detail"]
 
 
@@ -3236,7 +3484,7 @@ def test_recommendation_release_gate_blocks_negative_quality_segment_candidate()
     assert opportunity["paper_signal_count"] == 1
     assert opportunity["negative_segment_blocked_count"] == 1
     assert opportunity["threshold_ready_count"] == 0
-    assert opportunity["top_candidates"] == []
+    assert len(opportunity["top_candidates"]) == 0
     assert release_gate["status"] == "paper_only_negative_segment"
     assert release_gate["formal_enabled"] is False
     assert "无正向边际" in release_gate["detail"]
@@ -3321,10 +3569,10 @@ def test_recommendation_opportunity_executes_model_failure_policy_rules():
                     },
                     {
                         "key": "require_market_snapshots:missing_market_snapshots",
-                        "status": "blocked",
-                        "title": "正式推荐前必须补齐赔率快照",
-                        "detail": "缺少多公司同盘口快照时，只允许纸面预测和回测。",
-                        "action": "require_snapshot_before_formal_recommendation",
+                        "status": "warning",
+                        "title": "继续补赔率快照",
+                        "detail": "缺少多公司同盘口快照会降低复盘与 CLV 质量，但不再单独阻断正式推荐。",
+                        "action": "continue_collect_sparse_snapshots",
                         "target": "market_snapshot_coverage",
                         "target_key": "missing_market_snapshots",
                         "sample_count": 444,
@@ -3339,14 +3587,14 @@ def test_recommendation_opportunity_executes_model_failure_policy_rules():
     gates = {gate["key"]: gate for gate in release_gate["gates"]}
 
     assert opportunity["paper_signal_count"] == 2
-    assert opportunity["model_policy_blocked_count"] == 2
-    assert opportunity["threshold_ready_count"] == 0
-    assert opportunity["top_candidates"] == []
-    assert release_gate["status"] == "paper_only_model_failure_policy"
-    assert release_gate["formal_enabled"] is False
-    assert "模型失利策略" in release_gate["detail"]
-    assert gates["model_failure_policy"]["status"] == "blocked"
-    assert gates["model_failure_policy"]["current"] == 0
+    assert opportunity["model_policy_blocked_count"] == 1
+    assert opportunity["threshold_ready_count"] == 1
+    assert len(opportunity["top_candidates"]) == 1
+    assert release_gate["status"] == "formal_gate_open"
+    assert release_gate["formal_enabled"] is True
+    assert "正式推荐门槛开放" in release_gate["title"]
+    assert gates["model_failure_policy"]["status"] == "warning"
+    assert gates["model_failure_policy"]["current"] == 1
 
 
 def test_shadow_walk_forward_failure_blocks_formal_gate_and_production_readiness():
@@ -3481,9 +3729,9 @@ def test_clv_guard_blocks_production_readiness_after_formal_gate_opens():
     assert readiness["production_ready"] is False
     assert readiness["summary"]["avg_clv_return"] == -0.004
     assert readiness["summary"]["clv_ready"] is False
-    assert gates["closing_line_value"]["status"] == "blocked"
+    assert gates["closing_line_value"]["status"] == "warning"
     assert gates["closing_line_value"]["title"] == "平均 CLV 为负"
-    assert "生产发布至少需要 20 条可计算 CLV" in gates["closing_line_value"]["detail"]
+    assert "不再因为历史收盘价覆盖不足而单独阻断推荐发布" in gates["closing_line_value"]["detail"]
 
 
 def test_probability_governance_explains_shadow_guardrail_after_beating_market():

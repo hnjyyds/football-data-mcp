@@ -9,6 +9,7 @@ Free sources documented:
 - Sportmonks: REST API with odds, lineups, stats (paid, optional)
 - Leisu (live.leisu.com): Chinese mobile API + HTML (gated)
 - Dongqiudi (dongqiudi.com): Chinese fixture schedule + lineups
+- Goaloo / Nowgoal / Titan007 / 7M / BetExplorer: candidate free odds websites for sparse fallback snapshots
 """
 from __future__ import annotations
 
@@ -103,6 +104,69 @@ REGISTRY: list[SourceConfig] = [
         cost_tier="free",
         probe_url="https://www.oddsportal.com/soccer/",
         notes="Public corroboration of pre-match odds (HTML scrape).",
+    ),
+    SourceConfig(
+        name="goaloo",
+        label="Goaloo",
+        category="odds",
+        cost_tier="free",
+        probe_url="https://www.goaloo.com/",
+        rate_limit_per_minute=20,
+        notes="Candidate fallback odds site, but public routes currently return 200 with empty bodies in this environment; keep it behind BetExplorer / 7M in the integration queue.",
+    ),
+    SourceConfig(
+        name="titan007",
+        label="Titan007 / 球探新球",
+        category="odds",
+        cost_tier="free",
+        probe_url="https://live.titan007.com/",
+        rate_limit_per_minute=20,
+        notes="Candidate fallback odds site with old-style HTML pages; promising for sparse anchor snapshots without a persistent browser session.",
+    ),
+    SourceConfig(
+        name="7m",
+        label="7M",
+        category="odds",
+        cost_tier="free",
+        probe_url="https://bf.7m.com.cn/",
+        rate_limit_per_minute=20,
+        notes="Candidate fallback odds site with broad Asian-market coverage; promising after BetExplorer if score-page to match-detail traversal stays stable.",
+    ),
+    SourceConfig(
+        name="betexplorer",
+        label="BetExplorer",
+        category="odds",
+        cost_tier="free",
+        probe_url="https://www.betexplorer.com/",
+        rate_limit_per_minute=12,
+        notes="Best current free fallback candidate for first integration: public football routes and match detail URLs are explicit, with strong 1X2/opening/current comparison coverage.",
+    ),
+    SourceConfig(
+        name="nowgoal",
+        label="Nowgoal",
+        category="odds",
+        cost_tier="free",
+        probe_url="https://www.nowgoal.com/",
+        rate_limit_per_minute=12,
+        notes="Candidate fallback only; broad content but accessibility and page stability vary more than Goaloo / Titan007 / 7M.",
+    ),
+    SourceConfig(
+        name="aiscore",
+        label="AiScore",
+        category="odds",
+        cost_tier="free",
+        probe_url="https://m.aiscore.com/",
+        rate_limit_per_minute=8,
+        notes="Browser-session candidate only; useful as a last-resort mobile fallback when Cloudflare challenge is already solved in a persistent browser.",
+    ),
+    SourceConfig(
+        name="oddspedia",
+        label="Oddspedia",
+        category="odds",
+        cost_tier="free",
+        probe_url="https://oddspedia.com/odds",
+        rate_limit_per_minute=8,
+        notes="Browser-session candidate only; market coverage is attractive, but anti-bot pressure makes it a fallback, not a first integration.",
     ),
 ]
 

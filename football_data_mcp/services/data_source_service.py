@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
+from football_data_mcp import browser_session_runtime
+from football_data_mcp import betexplorer_source
+from football_data_mcp import crawler_runtime_support
 from football_data_mcp import oddsportal_source
 from football_data_mcp.repositories.data_source_repository import DataSourceRepository
 from football_data_mcp.services.task_queue import (
     OddsSourceSyncJobStarter,
+    LeisuSessionRefreshJobStarter,
     build_odds_source_sync_job_starter,
+    build_leisu_session_refresh_job_starter,
+    leisu_session_refresh_job_start_result,
     odds_source_sync_job_start_result,
 )
 
@@ -21,6 +30,8 @@ _SUPPORTED_ODDS_SYNC_MARKETS = frozenset({"h2h", "asian_handicap", "over_under"}
 _PRODUCTION_ODDS_SOURCE_FRESH_HOURS = 6.0
 _RUNNING_ODDS_SOURCE_JOBS: dict[str, threading.Thread] = {}
 _RUNNING_ODDS_SOURCE_JOBS_LOCK = threading.Lock()
+_RUNNING_LEISU_SESSION_JOBS: dict[str, threading.Thread] = {}
+_RUNNING_LEISU_SESSION_JOBS_LOCK = threading.Lock()
 
 
 class DataSourceService:
@@ -29,9 +40,11 @@ class DataSourceService:
         repository: DataSourceRepository | None = None,
         *,
         odds_sync_job_starter: OddsSourceSyncJobStarter | None = None,
+        leisu_session_job_starter: LeisuSessionRefreshJobStarter | None = None,
     ) -> None:
         self._repository = repository or DataSourceRepository()
         self._odds_sync_job_starter = odds_sync_job_starter
+        self._leisu_session_job_starter = leisu_session_job_starter
 
     async def fdo_matches(self, *, date_from: str | None, date_to: str | None) -> dict[str, Any]:
         return await self._repository.fetch_fdo_matches(date_from=date_from, date_to=date_to)
@@ -52,9 +65,17 @@ class DataSourceService:
         sync_state = data.get("sync_state") or {}
         provider_counts = data.get("provider_counts") or {}
         oddsportal_state = (sync_state.get("by_source") or {}).get("oddsportal_scraper") or {}
+        betexplorer_state = (sync_state.get("by_source") or {}).get("betexplorer_scraper") or {}
         leisu_state = (sync_state.get("by_source") or {}).get("leisu") or {}
         oddsportal_readiness = self._oddsportal_discovery_readiness()
         fresh_after_hours = _odds_source_fresh_hours()
+        betexplorer_fields = _betexplorer_operational_fields(
+            provider_counts,
+            betexplorer_state,
+            sync_state,
+            now=checked_at,
+            fresh_after_hours=fresh_after_hours,
+        )
         oddsportal_fields = _oddsportal_operational_fields(
             provider_counts,
             oddsportal_state,
@@ -97,6 +118,14 @@ class DataSourceService:
                 **oddsportal_readiness,
                 **oddsportal_fields,
             },
+            "betexplorer_scraper": {
+                "status": betexplorer_state.get("latest_status")
+                or _snapshot_provider_status(provider_counts, "betexplorer_scraper"),
+                "role": "structured fallback odds crawler for sparse 1X2/AH/O-U snapshots",
+                "snapshot_count": (provider_counts.get("betexplorer_scraper") or {}).get("snapshot_count", 0),
+                "sync": betexplorer_state,
+                **betexplorer_fields,
+            },
             "the_odds_api": {
                 "status": _snapshot_provider_status(provider_counts, "the_odds_api"),
                 "role": "configured API odds source when THE_ODDS_API_KEY is present",
@@ -119,7 +148,7 @@ class DataSourceService:
             "closure": _odds_source_closure(sources, checked_at=checked_at, fresh_after_hours=fresh_after_hours),
             "policy": {
                 "read_path": "分析和图表读取统一 market_snapshots；数据源只负责产生标准快照。",
-                "fallback_rule": "Leisu 赔率不可用时，可用 oddsportal_scraper 补充赔率快照；推荐发布仍由质量门控决定。",
+                "fallback_rule": "Leisu 赔率不可用时，可用 betexplorer_scraper / oddsportal_scraper 补充赔率快照；推荐发布仍由质量门控决定。",
                 "resume_rule": "按 odds_source_sync_state 的 source/scope_key/external_id/status 续跑失败或未完成项。",
                 "freshness_rule": f"独立赔率源最近快照超过 {fresh_after_hours:g} 小时会被标记为 stale，不再视为当前生产主源。",
             },
@@ -259,6 +288,22 @@ class DataSourceService:
             },
         }
 
+    async def start_betexplorer_sync(
+        self,
+        *,
+        event_urls: list[str] | None = None,
+        markets: list[str] | None = None,
+        limit: int = 10,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        return await self._repository.sync_betexplorer_odds_snapshots(
+            event_urls=[str(url).strip() for url in (event_urls or []) if str(url or "").strip()],
+            markets=[str(market).strip() for market in (markets or ["h2h"]) if str(market).strip()],
+            limit=max(1, min(int(limit or 10), 20)),
+            force=bool(force),
+            job_id=f"betexplorer-{uuid.uuid4().hex[:12]}",
+        )
+
     def start_oddsportal_background_runner(self, job_id: str, payload: dict[str, Any]) -> None:
         with _RUNNING_ODDS_SOURCE_JOBS_LOCK:
             current = _RUNNING_ODDS_SOURCE_JOBS.get(job_id)
@@ -279,6 +324,70 @@ class DataSourceService:
             force=bool(payload.get("force")),
             job_id=str(payload.get("job_id") or ""),
         )
+
+    async def start_leisu_session_refresh(
+        self,
+        *,
+        match_id: str = "",
+        url: str = "",
+        profile_dir: str = "",
+        headless: bool = False,
+        start_background: bool = True,
+    ) -> dict[str, Any]:
+        payload = {
+            "job_id": f"leisu-session-{uuid.uuid4().hex[:12]}",
+            "match_id": str(match_id or "").strip(),
+            "url": str(url or "").strip(),
+            "profile_dir": str(profile_dir or "").strip(),
+            "headless": bool(headless),
+        }
+        if not start_background:
+            return await self.run_leisu_session_refresh_inline(payload)
+        starter = self._leisu_session_job_starter or build_leisu_session_refresh_job_starter(
+            thread_starter=self.start_leisu_session_background_runner
+        )
+        start_result = leisu_session_refresh_job_start_result(
+            await starter.start_leisu_session_refresh_job(str(payload["job_id"]), payload)
+        )
+        return {
+            "tool": "start_leisu_session_refresh",
+            "status": "queued",
+            "provider": "leisu",
+            "job_id": payload["job_id"],
+            "backend": start_result.backend,
+            "queue_job_id": start_result.queue_job_id,
+            "payload": payload,
+            "policy": {
+                "mode": "browser_session_bootstrap",
+                "note": "后台任务会尝试恢复或刷新 Leisu 浏览器会话；如遇滑块仍需人工验证。",
+            },
+        }
+
+    def start_leisu_session_background_runner(self, job_id: str, payload: dict[str, Any]) -> None:
+        with _RUNNING_LEISU_SESSION_JOBS_LOCK:
+            current = _RUNNING_LEISU_SESSION_JOBS.get(job_id)
+            if current and current.is_alive():
+                return
+            thread = threading.Thread(
+                target=lambda: asyncio.run(self.run_leisu_session_refresh_inline(payload)),
+                daemon=True,
+            )
+            _RUNNING_LEISU_SESSION_JOBS[job_id] = thread
+            thread.start()
+
+    async def run_leisu_session_refresh_inline(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = await crawler_runtime_support.bootstrap_leisu_session(
+            match_id=str(payload.get("match_id") or ""),
+            url=str(payload.get("url") or ""),
+            profile_dir=str(payload.get("profile_dir") or ""),
+            headless=bool(payload.get("headless")),
+        )
+        return {
+            **result,
+            "tool": "refresh_leisu_session",
+            "job_id": str(payload.get("job_id") or ""),
+            "execution_backend": "inline",
+        }
 
     async def _oddsportal_sync_payload(
         self,
@@ -524,6 +633,59 @@ def _oddsportal_operational_fields(
     }
 
 
+def _betexplorer_operational_fields(
+    provider_counts: dict[str, Any],
+    betexplorer_state: dict[str, Any],
+    sync_state: dict[str, Any],
+    *,
+    now: datetime,
+    fresh_after_hours: float,
+) -> dict[str, Any]:
+    failed_count = _source_status_count(betexplorer_state, "failed")
+    empty_count = _source_status_count(betexplorer_state, "empty")
+    queued_count = _source_status_count(betexplorer_state, "queued")
+    running_count = _source_status_count(betexplorer_state, "running")
+    retryable_count = failed_count + empty_count
+    snapshot_count = _snapshot_count(provider_counts, "betexplorer_scraper")
+    last_error = _latest_source_error(sync_state, "betexplorer_scraper")
+    freshness = _freshness_fields(
+        provider_counts,
+        "betexplorer_scraper",
+        now=now,
+        fresh_after_hours=fresh_after_hours,
+    )
+    is_fresh = freshness["freshness_status"] == "fresh"
+
+    if queued_count or running_count:
+        operational_status = "running"
+        next_action = "等待 BetExplorer 补采完成；当前按低频显式 event URL 运行。"
+    elif retryable_count:
+        operational_status = "retryable"
+        next_action = "重试失败/空结果的 BetExplorer event URL，优先保留显式小批量补采。"
+    elif snapshot_count > 0 and is_fresh:
+        operational_status = "available"
+        next_action = "BetExplorer 稀疏快照可用；继续按需补充目标比赛。"
+    elif snapshot_count > 0:
+        operational_status = "stale"
+        next_action = f"BetExplorer 稀疏快照已过期（最近 {_freshness_age_text(freshness)} 前）；需要补采新比赛。"
+    else:
+        operational_status = "needs_input"
+        next_action = "提供 BetExplorer event_urls 后可开始显式补采；当前未启用自动发现/主链路。"
+
+    return {
+        "operational_status": operational_status,
+        "retryable_url_count": retryable_count,
+        "queued_count": queued_count,
+        "running_count": running_count,
+        "failed_count": failed_count,
+        "empty_count": empty_count,
+        "usable_for_analysis": bool(snapshot_count > 0 and is_fresh),
+        **freshness,
+        "last_error": last_error,
+        "next_action": next_action,
+    }
+
+
 def _oddsportal_discovery_urls(
     discovery_urls: list[str] | None,
     *,
@@ -633,6 +795,8 @@ def _leisu_operational_fields(
     failed_count = _source_status_count(leisu_state, "failed")
     queued_count = _source_status_count(leisu_state, "queued")
     running_count = _source_status_count(leisu_state, "running")
+    browser_session = _leisu_browser_session_status()
+    browser_session_status = str(browser_session.get("status") or "")
     freshness = _freshness_fields(provider_counts, "leisu", now=now, fresh_after_hours=fresh_after_hours)
     is_fresh = freshness["freshness_status"] == "fresh"
     if snapshot_count > 0 and is_fresh:
@@ -640,7 +804,24 @@ def _leisu_operational_fields(
         next_action = "雷速赔率快照可用；继续监控代理、Cookie 和访问稳定性。"
     elif snapshot_count > 0:
         operational_status = "stale"
-        next_action = f"雷速赔率快照已过期（最近 {_freshness_age_text(freshness)} 前）；应启用爬虫/API 兜底并检查雷速访问。"
+        if browser_session_status == "ready":
+            next_action = (
+                f"雷速赔率快照已过期（最近 {_freshness_age_text(freshness)} 前）；"
+                "但浏览器辅助会话已就绪，可立即重跑雷速同步。"
+            )
+        elif browser_session_status == "auth_required":
+            next_action = (
+                f"雷速赔率快照已过期（最近 {_freshness_age_text(freshness)} 前）；"
+                "浏览器会话仍需人工验证后才能恢复抓取。"
+            )
+        else:
+            next_action = f"雷速赔率快照已过期（最近 {_freshness_age_text(freshness)} 前）；应启用爬虫/API 兜底并检查雷速访问。"
+    elif browser_session_status == "ready":
+        operational_status = "session_ready"
+        next_action = "雷速浏览器辅助会话已就绪；可调用 /api/sources/odds/leisu/session/refresh 或直接重跑下一次同步。"
+    elif browser_session_status == "auth_required":
+        operational_status = "needs_auth"
+        next_action = "检测到雷速浏览器会话需要人工验证；先完成滑块，再调用 /api/sources/odds/leisu/session/refresh 或重试同步。"
     elif queued_count or running_count:
         operational_status = "running"
         next_action = "雷速赔率同步仍在执行；若长期停滞，检查代理和访问凭据。"
@@ -654,9 +835,48 @@ def _leisu_operational_fields(
         "running_count": running_count,
         "retryable_url_count": failed_count,
         "usable_for_analysis": bool(snapshot_count > 0 and is_fresh),
+        "browser_session": browser_session,
+        "browser_session_status": browser_session_status or "unknown",
+        "runtime_support": crawler_runtime_support.leisu_crawlee_runtime_plan(),
         **freshness,
         "next_action": next_action,
     }
+
+
+def _leisu_browser_session_status() -> dict[str, Any]:
+    entry = _probe_leisu_browser_session_http() or browser_session_runtime.provider_status("leisu")
+    if not entry:
+        return {}
+    return {
+        "status": str(entry.get("status") or "unknown"),
+        "mode": str(entry.get("mode") or ""),
+        "browser": str(entry.get("browser") or ""),
+        "message": str(entry.get("message") or ""),
+        "updated_at_utc": str(entry.get("updated_at_utc") or ""),
+        "last_ready_at_utc": str(entry.get("last_ready_at_utc") or ""),
+        "last_fetch_at_utc": str(entry.get("last_fetch_at_utc") or ""),
+        "last_verification_url": str(entry.get("last_verification_url") or ""),
+        "last_error": str(entry.get("last_error") or ""),
+        "connect_cdp": bool(entry.get("connect_cdp")),
+        "headless": bool(entry.get("headless")),
+        "profile_dir": str(entry.get("profile_dir") or ""),
+    }
+
+
+def _probe_leisu_browser_session_http() -> dict[str, Any]:
+    status_url = os.getenv("LEISU_BROWSER_PROXY_STATUS_URL", "").strip()
+    if not status_url:
+        proxy_url = os.getenv("LEISU_ODDS_PROXY_URL", "").strip()
+        if "/leisu/odds" in proxy_url:
+            status_url = f"{proxy_url.split('/leisu/odds', 1)[0]}/leisu/session"
+    if not status_url:
+        return {}
+    try:
+        with urllib_request.urlopen(status_url, timeout=1.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, urllib_error.URLError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _odds_source_closure(

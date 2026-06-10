@@ -138,6 +138,7 @@ class LarkNotificationService:
             db_path=db_path,
             include_shadow_predictions=include_shadow_predictions,
             limit=bounded_limit,
+            recommendation_allowlist=("condition_observe",),
         )
         summary["candidate_count"] = len(ledger_ids)
         if not ledger_ids:

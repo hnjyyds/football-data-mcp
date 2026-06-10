@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import sqlite3
 from typing import Any
 
@@ -25,6 +26,29 @@ logger = logging.getLogger(__name__)
 
 # Minimum settled samples per league required for classification
 MIN_LEAGUE_SAMPLES = 25
+NEGATIVE_TREND_MIN_SAMPLES = 10
+NEGATIVE_TREND_MAX_ROI = -0.05
+DEFAULT_MANUAL_BLOCKED_LEAGUES = (
+    "南球杯",
+    "阿大都乙",
+    "解放者杯",
+    "澳足总",
+    "冈比亚超",
+)
+
+
+def _manual_blocked_leagues() -> list[str]:
+    configured = {
+        item.strip()
+        for item in os.getenv("FOOTBALL_DATA_LEAGUE_BLOCKLIST", "").split(",")
+        if item.strip()
+    }
+    return sorted(set(DEFAULT_MANUAL_BLOCKED_LEAGUES).union(configured))
+
+
+def _auto_block_negative_trend_enabled() -> bool:
+    raw = os.getenv("FOOTBALL_DATA_AUTO_BLOCK_NEGATIVE_TREND_LEAGUES", "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def compute_league_breakdown(*, db_path: str | None = None) -> dict[str, Any]:
@@ -87,15 +111,17 @@ def compute_league_breakdown(*, db_path: str | None = None) -> dict[str, Any]:
 
     classifications: dict[str, str] = {}
     league_summaries: dict[str, Any] = {}
+    trend_blocked: set[str] = set()
     for league, data in by_league.items():
         samples = data["samples"]
+        roi_value = data["profit_sum"] / samples if samples else None
         if samples < MIN_LEAGUE_SAMPLES:
             classification = "insufficient_data"
         else:
             ll_model = data["log_loss_model_sum"] / max(data["valid_log_loss_samples"], 1)
             ll_market = data["log_loss_market_sum"] / max(data["valid_log_loss_samples"], 1)
             ll_diff = ll_model - ll_market
-            roi = data["profit_sum"] / samples
+            roi = roi_value if roi_value is not None else 0.0
             # Classification rule:
             # - winning: log_loss_diff < -0.005 AND roi > 0
             # - losing: log_loss_diff > 0.01 OR roi < -0.05
@@ -106,6 +132,14 @@ def compute_league_breakdown(*, db_path: str | None = None) -> dict[str, Any]:
                 classification = "losing"
             else:
                 classification = "uncertain"
+
+        if (
+            _auto_block_negative_trend_enabled()
+            and samples >= NEGATIVE_TREND_MIN_SAMPLES
+            and roi_value is not None
+            and roi_value <= NEGATIVE_TREND_MAX_ROI
+        ):
+            trend_blocked.add(league)
 
         classifications[league] = classification
 
@@ -119,9 +153,10 @@ def compute_league_breakdown(*, db_path: str | None = None) -> dict[str, Any]:
         league_summaries[league] = {
             "samples": samples,
             "hit_rate": round(data["hits"] / samples, 4) if samples else None,
-            "roi": round(data["profit_sum"] / samples, 4) if samples else None,
+            "roi": round(roi_value, 4) if roi_value is not None else None,
             "log_loss_diff": ll_diff_value,
             "classification": classification,
+            "trend_blocked": league in trend_blocked,
         }
 
     return {
@@ -129,7 +164,16 @@ def compute_league_breakdown(*, db_path: str | None = None) -> dict[str, Any]:
         "winning_leagues": sorted(league for league, classification in classifications.items() if classification == "winning"),
         "losing_leagues": sorted(league for league, classification in classifications.items() if classification == "losing"),
         "uncertain_leagues": sorted(league for league, classification in classifications.items() if classification == "uncertain"),
+        "negative_trend_blocked_leagues": sorted(trend_blocked),
+        "manual_blocked_leagues": sorted(_manual_blocked_leagues()),
+        "effective_blocked_leagues": sorted(
+            set(league for league, classification in classifications.items() if classification == "losing")
+            | trend_blocked
+            | set(_manual_blocked_leagues())
+        ),
         "min_samples_required": MIN_LEAGUE_SAMPLES,
+        "negative_trend_min_samples": NEGATIVE_TREND_MIN_SAMPLES,
+        "negative_trend_max_roi": NEGATIVE_TREND_MAX_ROI,
         "classification_method": "log_loss_diff_lt_-0.005_and_roi_positive",
     }
 
@@ -145,6 +189,20 @@ def is_league_allowed(league: str, *, db_path: str | None = None) -> dict[str, A
         return {"allowed": True, "mode": "default", "reason": "no_league"}
 
     breakdown = compute_league_breakdown(db_path=db_path)
+    if league in set(breakdown.get("effective_blocked_leagues") or []):
+        trend_blocked = league in set(breakdown.get("negative_trend_blocked_leagues") or [])
+        return {
+            "allowed": False,
+            "mode": "blocked",
+            "reason": "league_in_blocklist",
+            "classification": (
+                "manual_blocked"
+                if league in set(breakdown.get("manual_blocked_leagues") or [])
+                else "negative_trend_blocked"
+                if trend_blocked and league not in set(breakdown.get("losing_leagues") or [])
+                else "losing"
+            ),
+        }
     info = breakdown["by_league"].get(league)
     if not info or info["classification"] == "insufficient_data":
         return {
