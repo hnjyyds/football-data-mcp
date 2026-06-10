@@ -773,6 +773,8 @@ def _betexplorer_discovery_urls(
 ) -> list[str]:
     configured = _configured_betexplorer_discovery_urls()
     selected = [str(url).strip() for url in (discovery_urls or configured) if str(url or "").strip()]
+    if not selected and targets:
+        selected = betexplorer_source.betexplorer_discovery_urls_for_targets(targets)
     if not selected:
         selected = ["https://www.betexplorer.com/football/"]
     deduped: list[str] = []

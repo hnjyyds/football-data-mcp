@@ -23,6 +23,45 @@ BETEXPLORER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
+BETEXPLORER_TEAM_NAME_ALIASES = {
+    "阿鲁巴体育": "Aruba Sport",
+    "布里坦尼亚": "Britannia",
+    "阿尔梅里亚": "Almeria",
+    "卡斯特利翁": "Castellon",
+    "德约里巴": "Djoliba",
+    "皇家巴马科": "Real Bamako",
+    "马里安": "Malian",
+    "宾加": "Binga",
+    "比约克朗根": "Bjorkelangen",
+    "桑讷菲尤尔B队": "Sandefjord 2",
+    "瓦勒伦加二队": "Valerenga 2",
+    "诺斯特兰德": "Nordstrand",
+    "KM": "KM Reykjavik",
+    "BF 108": "BF 108",
+    "雷提尔": "Reynir",
+    "凯里亚": "Karia",
+    "奥尔塔内斯": "Afturelding",
+    "KF哈夫尼尔": "KF Hafnir",
+}
+
+BETEXPLORER_LEAGUE_ALIASES = {
+    "澳布甲": "queensland premier league",
+    "阿鲁巴甲级联赛": "division di honor",
+    "冰岛丁": "4 deild",
+    "西乙": "laliga2",
+    "马里甲": "premiere division",
+    "挪丙": "3 division",
+}
+
+BETEXPLORER_DISCOVERY_PATH_BY_LEAGUE = {
+    "laliga2": "/football/spain/laliga2/",
+    "division di honor": "/football/aruba/division-di-honor/",
+    "queensland premier league": "/football/australia/queensland-premier-league/",
+    "premiere division": "/football/mali/premiere-division/",
+    "4 deild": "/football/iceland/4-deild/",
+    "3 division": "/football/norway/3-division/",
+}
+
 
 def extract_betexplorer_market_tab_urls(page_html: str, *, page_url: str = "") -> dict[str, str]:
     if not page_html:
@@ -58,8 +97,12 @@ def extract_betexplorer_match_urls(page_html: str, *, page_url: str = "") -> lis
 
 
 def _normalize_name(value: Any) -> str:
-    text = str(value or "").strip().lower()
+    raw = str(value or "").strip().lower()
+    text = BETEXPLORER_TEAM_NAME_ALIASES.get(raw, raw)
     text = re.sub(r"[\s\-_/]+", " ", text)
+    text = re.sub(r"\b(fc|cf|afc|sc|u23|u21|club|team|deportivo)\b", " ", text)
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
@@ -78,9 +121,10 @@ def _match_score(event_url: str, target: dict[str, Any]) -> tuple[float, str]:
         score += 0.45
     else:
         score += 0.25 * SequenceMatcher(None, away, normalized).ratio()
-    league = _normalize_name(target.get("league"))
-    if league and league in normalized:
-        score += 0.1
+    league_raw = str(target.get("league") or "").strip().lower()
+    league = BETEXPLORER_LEAGUE_ALIASES.get(league_raw, _normalize_name(target.get("league")))
+    if league and (league in normalized or _normalize_name(league) in normalized):
+        score += 0.12
         reason = "home_away_league_match"
     else:
         reason = "home_away_match"
@@ -121,6 +165,23 @@ def match_betexplorer_events_to_targets(
         if len(matches) >= bounded_limit:
             break
     return matches
+
+
+def betexplorer_discovery_urls_for_targets(targets: list[dict[str, Any]]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for target in targets:
+        league_raw = str(target.get("league") or "").strip().lower()
+        league = BETEXPLORER_LEAGUE_ALIASES.get(league_raw, _normalize_name(target.get("league")))
+        path = BETEXPLORER_DISCOVERY_PATH_BY_LEAGUE.get(league)
+        if not path:
+            continue
+        url = urljoin(BETEXPLORER_BASE_URL, path)
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
 
 
 async def fetch_betexplorer_match_tabs(
@@ -383,6 +444,8 @@ async def discover_betexplorer_event_urls(
             "discovery_urls": selected_urls,
             "message": "No open prediction targets were available for BetExplorer discovery.",
         }
+    if not selected_urls:
+        selected_urls = betexplorer_discovery_urls_for_targets(targets)
     if not selected_urls:
         return {
             "status": "no_discovery_urls",
