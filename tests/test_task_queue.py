@@ -4,8 +4,10 @@ from football_data_mcp import validation_store
 from football_data_mcp.config import TaskQueueSettings
 from football_data_mcp.services.task_queue import (
     ArqOddsSourceSyncJobStarter,
+    ArqLeisuSessionRefreshJobStarter,
     ArqValidationJobStarter,
     FallbackOddsSourceSyncJobStarter,
+    FallbackLeisuSessionRefreshJobStarter,
     FallbackValidationJobStarter,
     task_queue_health_snapshot,
 )
@@ -140,6 +142,67 @@ def test_fallback_odds_source_sync_job_starter_uses_thread_when_arq_enqueue_fail
     assert start_result.backend == "thread"
     assert start_result.queue_job_id is None
     assert started == [("odds-job-456", {"markets": ["asian_handicap"], "job_id": "odds-job-456"})]
+
+
+def test_arq_leisu_session_refresh_job_starter_enqueues_payload():
+    calls: list[dict[str, object]] = []
+
+    class FakeRedis:
+        async def enqueue_job(self, function: str, *args: object, **kwargs: object) -> object:
+            calls.append({"function": function, "args": args, "kwargs": kwargs})
+            return object()
+
+        async def aclose(self) -> None:
+            calls.append({"function": "aclose", "args": (), "kwargs": {}})
+
+    async def fake_create_pool(redis_settings: object, queue_name: str) -> FakeRedis:
+        calls.append({"function": "create_pool", "args": (queue_name,), "kwargs": {}})
+        return FakeRedis()
+
+    settings = TaskQueueSettings(
+        backend="arq",
+        arq_redis_host="redis",
+        arq_queue_name="football-data-test",
+        fallback_to_thread=False,
+    )
+    starter = ArqLeisuSessionRefreshJobStarter(settings=settings, create_pool=fake_create_pool)
+
+    start_result = asyncio.run(
+        starter.start_leisu_session_refresh_job(
+            "leisu-job-123",
+            {"match_id": "4512919", "profile_dir": ".leisu-browser-profile"},
+        )
+    )
+
+    assert start_result.backend == "arq"
+    assert start_result.queue_job_id == "leisu-session-refresh:leisu-job-123"
+    assert calls[1]["function"] == "run_leisu_session_refresh_job"
+    assert calls[1]["args"] == (
+        {"match_id": "4512919", "profile_dir": ".leisu-browser-profile", "job_id": "leisu-job-123"},
+    )
+
+
+def test_fallback_leisu_session_refresh_job_starter_uses_thread_when_arq_enqueue_fails():
+    started: list[tuple[str, dict[str, object]]] = []
+
+    class BrokenStarter:
+        async def start_leisu_session_refresh_job(self, job_id: str, payload: dict[str, object]) -> str:
+            raise RuntimeError(f"redis unavailable for {job_id}")
+
+    class ThreadStarter:
+        async def start_leisu_session_refresh_job(self, job_id: str, payload: dict[str, object]) -> str:
+            started.append((job_id, payload))
+            return "thread"
+
+    starter = FallbackLeisuSessionRefreshJobStarter(primary=BrokenStarter(), fallback=ThreadStarter())
+
+    start_result = asyncio.run(
+        starter.start_leisu_session_refresh_job("leisu-job-456", {"match_id": "4512919"})
+    )
+
+    assert start_result.backend == "thread"
+    assert start_result.queue_job_id is None
+    assert started == [("leisu-job-456", {"match_id": "4512919", "job_id": "leisu-job-456"})]
 
 
 def test_task_queue_health_reports_thread_backend():
@@ -337,3 +400,28 @@ def test_arq_worker_entrypoint_runs_oddsportal_snapshot_sync(monkeypatch):
             "job_id": "odds-job-789",
         }
     ]
+
+
+def test_arq_worker_entrypoint_runs_leisu_session_refresh(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    async def fake_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        calls.append(payload)
+        return {"tool": "refresh_leisu_session", "status": "ready", "provider": "leisu"}
+
+    monkeypatch.setattr(
+        "football_data_mcp.workers.arq_worker.DataSourceService.run_leisu_session_refresh_inline",
+        fake_refresh,
+    )
+    payload = {
+        "job_id": "leisu-job-789",
+        "match_id": "4512919",
+        "profile_dir": ".leisu-browser-profile",
+    }
+
+    completed = asyncio.run(arq_worker.run_leisu_session_refresh_job({"job_id": "arq-leisu-1"}, payload))
+
+    assert completed["status"] == "ready"
+    assert completed["job_id"] == "leisu-job-789"
+    assert completed["queue_job_id"] == "arq-leisu-1"
+    assert calls == [payload]

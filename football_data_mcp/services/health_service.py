@@ -7,6 +7,7 @@ from typing import Any
 
 from football_data_mcp.config import env_bool
 from football_data_mcp.repositories.learning_repository import LearningRepository
+from football_data_mcp.services.data_source_service import DataSourceService
 from football_data_mcp.services.task_queue import task_queue_health_snapshot
 
 
@@ -56,5 +57,6 @@ class HealthService:
             "last_learning_cycle_error": last_cycle_error,
             "auto_learning_enabled": env_bool("FOOTBALL_DATA_AUTO_LEARNING_ENABLED", False),
             "task_queue": task_queue_health_snapshot(),
+            "odds_source_status": DataSourceService().odds_source_status(),
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         }

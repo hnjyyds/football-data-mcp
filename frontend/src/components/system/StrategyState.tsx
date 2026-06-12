@@ -34,24 +34,24 @@ export function StrategyStateCard({ snapshot }: { snapshot: DashboardSnapshot })
   ];
 
   return (
-    <section className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-100 dark:border-slate-700/50">
-        <Icon name="settingsAlt" size={14} className="text-ink-500 dark:text-ink-400" />
-        <span className="font-semibold text-slate-900 dark:text-white text-sm flex-1">策略状态</span>
+    <section className="surface-panel overflow-hidden">
+      <div className="flex items-center gap-2 px-4 pt-4 pb-2">
+        <Icon name="settingsAlt" size={14} className="text-ink-400 dark:text-ink-500" />
+        <span className="text-sm font-semibold text-ink-950 dark:text-white flex-1">策略状态</span>
         <Badge variant={toneVariant(tone)}>{statusLabel}</Badge>
       </div>
-      <div className="divide-y divide-slate-50 dark:divide-slate-700/30">
+      <div className="grid grid-cols-2 gap-2 px-4 pb-4 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3">
         {rows.map(([label, value, valueTone]) => {
           const toneClass =
             valueTone === "good"
-              ? "text-emerald-600 dark:text-emerald-400"
+              ? "text-emerald-700 dark:text-emerald-300"
               : valueTone === "bad"
-              ? "text-red-600 dark:text-red-400"
-              : "text-slate-900 dark:text-white";
+              ? "text-red-700 dark:text-red-300"
+              : "text-ink-950 dark:text-white";
           return (
-            <div key={label} className="flex items-center justify-between px-3 py-1.5">
-              <span className="text-xs text-slate-600 dark:text-slate-400">{label}</span>
-              <span className={`text-xs font-semibold tabular-nums ${toneClass}`}>{value}</span>
+            <div key={label} className="clean-card px-3 py-2">
+              <div className="metric-label">{label}</div>
+              <div className={`mt-1 text-sm font-semibold tabular-nums ${toneClass}`}>{value}</div>
             </div>
           );
         })}

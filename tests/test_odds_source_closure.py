@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives import hashes, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from football_data_mcp import oddsportal_source, snapshot_store
+from football_data_mcp import browser_session_runtime, oddsportal_source, snapshot_store
 from football_data_mcp import sources as sources_module
 from football_data_mcp.repositories.data_source_repository import DataSourceRepository
 from football_data_mcp.services.data_source_service import DataSourceService
@@ -491,6 +491,71 @@ def test_data_source_service_selects_fresh_leisu_as_production_source():
     assert status["closure"]["active_source"] == "leisu"
     assert status["closure"]["production_ready"] is True
     assert status["closure"]["reason"] == "雷速主赔率源新鲜可用。"
+
+
+def test_data_source_service_surfaces_ready_leisu_browser_session(monkeypatch, tmp_path):
+    session_path = tmp_path / "leisu-browser-session.json"
+    monkeypatch.setenv("LEISU_BROWSER_SESSION_STATUS_PATH", str(session_path))
+    monkeypatch.setenv("LEISU_ODDS_PROXY_URL", "http://127.0.0.1:8918/leisu/odds/{match_id}")
+    browser_session_runtime.record_provider_status(
+        "leisu",
+        "ready",
+        path=session_path,
+        message="浏览器会话已就绪",
+        last_fetch_at_utc="2026-06-02T11:58:00+00:00",
+    )
+
+    class FakeRepository:
+        def odds_source_status(self, *, db_path: str | None = None) -> dict[str, object]:
+            return {
+                "snapshot_summary": {},
+                "provider_counts": {},
+                "sync_state": {"by_source": {}, "recent": []},
+            }
+
+        def open_prediction_odds_targets(self, *, limit: int) -> list[dict[str, object]]:
+            return []
+
+    status = DataSourceService(repository=FakeRepository()).odds_source_status()
+    leisu = status["sources"]["leisu"]
+
+    assert leisu["operational_status"] == "session_ready"
+    assert leisu["browser_session_status"] == "ready"
+    assert leisu["browser_session"]["message"] == "浏览器会话已就绪"
+    assert leisu["runtime_support"]["provider"] == "leisu"
+    assert leisu["runtime_support"]["browser_proxy_status_url"] == "http://127.0.0.1:8918/leisu/session"
+    assert "浏览器辅助会话已就绪" in leisu["next_action"]
+
+
+def test_data_source_service_surfaces_auth_required_leisu_browser_session(monkeypatch, tmp_path):
+    session_path = tmp_path / "leisu-browser-session.json"
+    monkeypatch.setenv("LEISU_BROWSER_SESSION_STATUS_PATH", str(session_path))
+    browser_session_runtime.record_provider_status(
+        "leisu",
+        "auth_required",
+        path=session_path,
+        message="需要人工验证",
+        last_verification_url="https://m.leisu.com/live/odds-4512919",
+    )
+
+    class FakeRepository:
+        def odds_source_status(self, *, db_path: str | None = None) -> dict[str, object]:
+            return {
+                "snapshot_summary": {},
+                "provider_counts": {},
+                "sync_state": {"by_source": {}, "recent": []},
+            }
+
+        def open_prediction_odds_targets(self, *, limit: int) -> list[dict[str, object]]:
+            return []
+
+    status = DataSourceService(repository=FakeRepository()).odds_source_status()
+    leisu = status["sources"]["leisu"]
+
+    assert leisu["operational_status"] == "needs_auth"
+    assert leisu["browser_session_status"] == "auth_required"
+    assert leisu["browser_session"]["last_verification_url"] == "https://m.leisu.com/live/odds-4512919"
+    assert "人工验证" in leisu["next_action"]
 
 
 def test_data_source_service_reports_oddsportal_discovery_readiness(monkeypatch):

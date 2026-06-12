@@ -105,6 +105,20 @@ function snapshot(overrides: Partial<DashboardSnapshot> = {}): DashboardSnapshot
         ],
       },
       sources: {
+        leisu: {
+          status: "ok",
+          role: "primary gated multi-company odds source when access/proxy is healthy",
+          snapshot_count: 0,
+          operational_status: "needs_auth",
+          browser_session_status: "auth_required",
+          next_action: "检测到雷速浏览器会话需要人工验证；先完成滑块，再重试同步。",
+          runtime_support: {
+            engine: "crawlee_playwright",
+            supported: true,
+            message: "Crawlee + Playwright 已安装，可用于浏览器辅助抓取运行时。",
+            recommended_entrypoint: "uv run --extra crawler-runtime python -m scripts.leisu_crawlee_session",
+          },
+        },
         oddsportal_scraper: {
           status: "failed",
           role: "experimental fallback odds crawler for 1X2/AH/O-U snapshots",
@@ -172,5 +186,7 @@ describe("HealthPanel", () => {
     expect(screen.getByText(/分析种子 2/)).toBeInTheDocument();
     expect(screen.getByText(/自动开/)).toBeInTheDocument();
     expect(screen.getByText(/resume_failed=true/)).toBeInTheDocument();
+    expect(screen.getByText(/Crawlee 路径 · 可切换/)).toBeInTheDocument();
+    expect(screen.getByText(/scripts\.leisu_crawlee_session/)).toBeInTheDocument();
   });
 });

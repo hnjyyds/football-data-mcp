@@ -212,6 +212,7 @@ function expectOddsSourceStatus(value: unknown, path: string, issues: Issues): v
     }
     expectOptionalField(sourceValue, "last_error", "string", sourcePath, issues, { nullable: true });
     expectOptionalField(sourceValue, "next_action", "string", sourcePath, issues);
+    expectOptionalField(sourceValue, "browser_session_status", "string", sourcePath, issues);
     if ("sync" in sourceValue && sourceValue.sync !== undefined && sourceValue.sync !== null) {
       if (expectObject(sourceValue.sync, `${sourcePath}.sync`, issues)) {
         expectOptionalField(sourceValue.sync, "latest_status", "string", `${sourcePath}.sync`, issues, { nullable: true });
@@ -220,6 +221,24 @@ function expectOddsSourceStatus(value: unknown, path: string, issues: Issues): v
         expectOptionalField(sourceValue.sync, "latest_started_at_utc", "string", `${sourcePath}.sync`, issues, { nullable: true });
         expectOptionalField(sourceValue.sync, "latest_finished_at_utc", "string", `${sourcePath}.sync`, issues, { nullable: true });
         expectOptionalField(sourceValue.sync, "latest_error", "string", `${sourcePath}.sync`, issues, { nullable: true });
+      }
+    }
+    if ("browser_session" in sourceValue && sourceValue.browser_session !== undefined && sourceValue.browser_session !== null) {
+      if (expectObject(sourceValue.browser_session, `${sourcePath}.browser_session`, issues)) {
+        expectOptionalField(sourceValue.browser_session, "status", "string", `${sourcePath}.browser_session`, issues);
+        expectOptionalField(sourceValue.browser_session, "message", "string", `${sourcePath}.browser_session`, issues);
+        expectOptionalField(sourceValue.browser_session, "updated_at_utc", "string", `${sourcePath}.browser_session`, issues);
+        expectOptionalField(sourceValue.browser_session, "last_verification_url", "string", `${sourcePath}.browser_session`, issues);
+        expectOptionalField(sourceValue.browser_session, "last_error", "string", `${sourcePath}.browser_session`, issues);
+      }
+    }
+    if ("runtime_support" in sourceValue && sourceValue.runtime_support !== undefined && sourceValue.runtime_support !== null) {
+      if (expectObject(sourceValue.runtime_support, `${sourcePath}.runtime_support`, issues)) {
+        expectOptionalField(sourceValue.runtime_support, "engine", "string", `${sourcePath}.runtime_support`, issues);
+        expectOptionalField(sourceValue.runtime_support, "status", "string", `${sourcePath}.runtime_support`, issues);
+        expectOptionalField(sourceValue.runtime_support, "supported", "boolean", `${sourcePath}.runtime_support`, issues);
+        expectOptionalField(sourceValue.runtime_support, "message", "string", `${sourcePath}.runtime_support`, issues);
+        expectOptionalField(sourceValue.runtime_support, "recommended_entrypoint", "string", `${sourcePath}.runtime_support`, issues);
       }
     }
   });

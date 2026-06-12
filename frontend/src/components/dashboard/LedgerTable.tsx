@@ -109,15 +109,16 @@ export function LedgerTable({
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
   return (
-    <section className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden">
+    <section className="surface-panel overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-100 dark:border-slate-700/50">
-        <span className="font-semibold text-slate-900 dark:text-white text-sm flex-1">预测台账</span>
-        <span className="text-xs text-slate-500 dark:text-slate-400">{total} 条</span>
+      <div className="flex items-center gap-3 px-4 pt-4 pb-2">
+        <Icon name="database" size={14} className="text-[hsl(var(--muted-foreground))]" />
+        <span className="font-semibold text-[hsl(var(--foreground))] text-sm flex-1">预测台账</span>
+        <span className="text-xs text-[hsl(var(--muted-foreground))]">{total} 条</span>
         <button
           type="button"
           onClick={() => setCollapsed((c) => !c)}
-          className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 transition-colors"
+          className="shadcn-button-ghost h-8 w-8 p-0"
           aria-label={collapsed ? "展开台账" : "折叠台账"}
         >
           <Icon name={collapsed ? "chevronDown" : "chevronUp"} size={16} />
@@ -127,30 +128,30 @@ export function LedgerTable({
       {!collapsed && (
         <>
           {/* Filter bar */}
-          <div className="border-b border-slate-100 dark:border-slate-700/50">
+          <div className="border-b border-[hsl(var(--border))]">
             {reasonFilter?.reason && (
               <div className="flex flex-wrap items-center gap-2 px-4 pt-2 text-xs">
-                <span className="text-slate-500 dark:text-slate-400">阻断原因筛选</span>
+                <span className="text-[hsl(var(--muted-foreground))]">阻断原因筛选</span>
                 <Badge variant="warning">{reasonFilter.label}</Badge>
                 <button
                   type="button"
                   onClick={() => { onReasonFilterClear?.(); setPage(0); }}
-                  className="rounded-full px-2 py-0.5 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
+                  className="shadcn-button-ghost min-h-7 rounded-md px-2 py-0.5 text-xs"
                 >
                   清除阻断筛选
                 </button>
               </div>
             )}
-            <div className="flex gap-1 px-4 py-2 overflow-x-auto">
+            <div className="flex gap-1.5 px-4 py-2 overflow-x-auto">
               {FILTERS.map((f) => (
                 <button
                   key={f.key}
                   type="button"
                   onClick={() => { setFilter(f.key); setPage(0); }}
-                  className={`flex-shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  className={`focusable-control flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                     filter === f.key
-                      ? "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300"
-                      : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+                      ? "bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]"
+                      : "text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--foreground))]"
                   }`}
                 >
                   {f.label} <span className="tabular-nums">{counts[f.key]}</span>
@@ -163,7 +164,7 @@ export function LedgerTable({
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-slate-100 dark:border-slate-700/50 text-xs text-slate-500 dark:text-slate-400">
+                <tr className="border-b border-[hsl(var(--border))] text-xs text-[hsl(var(--muted-foreground))]">
                   <th className="text-left px-4 py-2 font-medium w-8" />
                   <th className="text-left px-4 py-2 font-medium">赛事</th>
                   <th className="text-left px-3 py-2 font-medium hidden sm:table-cell">联赛</th>
@@ -178,8 +179,16 @@ export function LedgerTable({
               <tbody>
                 {pageRows.length === 0 && (
                   <tr>
-                    <td colSpan={9} className="text-center py-8 text-slate-400 dark:text-slate-500 text-sm">
-                      暂无记录
+                    <td colSpan={9} className="py-10">
+                      <div className="mx-auto max-w-sm text-center">
+                        <div className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-lg bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))]">
+                          <Icon name="search" size={18} />
+                        </div>
+                        <div className="text-sm font-semibold text-[hsl(var(--foreground))]">当前筛选没有记录</div>
+                        <div className="mt-1 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">
+                          切换筛选条件，或等待自动学习写入新的预测样本。
+                        </div>
+                      </div>
                     </td>
                   </tr>
                 )}
@@ -200,10 +209,10 @@ export function LedgerTable({
                       aria-label={a11yLabel}
                       aria-pressed={isSelected}
                       onKeyDown={onKey}
-                      className={`border-b border-slate-50 dark:border-slate-700/30 cursor-pointer transition-colors outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+                      className={`border-b border-[hsl(var(--border))] cursor-pointer transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] ${
                         isSelected
-                          ? "bg-blue-50 dark:bg-blue-900/20"
-                          : "hover:bg-slate-50 dark:hover:bg-slate-700/30"
+                          ? "bg-[hsl(var(--muted))]"
+                          : "hover:bg-[hsl(var(--muted))]/60"
                       }`}
                       onClick={() => onSelect?.(row.ledger_id)}
                     >
@@ -214,38 +223,38 @@ export function LedgerTable({
                         <div className="flex items-center gap-2 min-w-0">
                           <TeamLogo name={row.home_team ?? ""} logoUrl={row.home_team_logo_url} size="xs" />
                           <div className="min-w-0">
-                            <div className="text-xs font-medium text-slate-900 dark:text-white truncate max-w-[120px]">
+                            <div className="text-xs font-medium text-[hsl(var(--foreground))] truncate max-w-[120px]">
                               {row.home_team}
                             </div>
-                            <div className="text-xs text-slate-500 dark:text-slate-400 truncate max-w-[120px]">
+                            <div className="text-xs text-[hsl(var(--muted-foreground))] truncate max-w-[120px]">
                               {row.away_team}
                             </div>
                           </div>
                         </div>
                       </td>
                       <td className="px-3 py-2.5 hidden sm:table-cell">
-                        <span className="text-xs text-slate-500 dark:text-slate-400 truncate max-w-[80px] block">{row.league}</span>
+                        <span className="text-xs text-[hsl(var(--muted-foreground))] truncate max-w-[80px] block">{row.league}</span>
                       </td>
                       <td className="px-3 py-2.5 hidden md:table-cell">
-                        <span className="text-xs text-slate-700 dark:text-slate-300 truncate max-w-[120px] block">{row.selection}</span>
+                        <span className="text-xs text-[hsl(var(--foreground))] truncate max-w-[120px] block">{row.selection}</span>
                       </td>
                       <td className="px-3 py-2.5 text-right hidden lg:table-cell">
-                        <span className="text-xs tabular-nums text-slate-700 dark:text-slate-300">
+                        <span className="text-xs tabular-nums text-[hsl(var(--foreground))]">
                           {row.learned_probability != null ? formatPercent(row.learned_probability) : row.model_probability != null ? formatPercent(row.model_probability) : "—"}
                         </span>
                       </td>
                       <td className="px-3 py-2.5 text-right">
-                        <span className="text-xs tabular-nums font-medium text-slate-900 dark:text-white">
+                        <span className="text-xs tabular-nums font-medium text-[hsl(var(--foreground))]">
                           {row.decimal_odds != null ? formatOdds(row.decimal_odds) : "—"}
                         </span>
                       </td>
                       <td className="px-3 py-2.5 text-right hidden md:table-cell">
-                        <span className={`text-xs tabular-nums ${(row.edge ?? 0) > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-slate-500"}`}>
+                        <span className={`text-xs tabular-nums ${(row.edge ?? 0) > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-[hsl(var(--muted-foreground))]"}`}>
                           {row.edge != null ? formatPercent(row.edge) : "—"}
                         </span>
                       </td>
                       <td className="px-3 py-2.5 text-right hidden lg:table-cell">
-                        <span className="text-xs text-slate-500 dark:text-slate-400">{localTime(row.kickoff_utc_plus_8)}</span>
+                        <span className="text-xs text-[hsl(var(--muted-foreground))]">{localTime(row.kickoff_utc_plus_8)}</span>
                       </td>
                       <td className="px-3 py-2.5">
                         <div className="flex justify-center">
@@ -273,12 +282,12 @@ export function LedgerTable({
 
           {/* Pagination */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between px-4 py-2 border-t border-slate-100 dark:border-slate-700/50 text-xs text-slate-500 dark:text-slate-400">
+            <div className="flex items-center justify-between px-4 py-2 border-t border-[hsl(var(--border))] text-xs text-[hsl(var(--muted-foreground))]">
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.max(0, p - 1))}
                 disabled={page === 0}
-                className="px-3 py-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-40 transition-colors"
+                className="shadcn-button-ghost min-h-8 px-3 py-1.5 text-xs disabled:opacity-40"
               >
                 上一页
               </button>
@@ -287,7 +296,7 @@ export function LedgerTable({
                 type="button"
                 onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
                 disabled={page >= totalPages - 1}
-                className="px-3 py-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-40 transition-colors"
+                className="shadcn-button-ghost min-h-8 px-3 py-1.5 text-xs disabled:opacity-40"
               >
                 下一页
               </button>

@@ -10,9 +10,9 @@ type Gate = {
 };
 
 function GateIcon({ tone }: { tone: string | undefined }) {
-  if (tone === "good") return <Icon name="success" size={14} className="text-success-500" />;
-  if (tone === "bad") return <Icon name="error" size={14} className="text-danger-500" />;
-  if (tone === "caution") return <Icon name="warn" size={14} className="text-warning-500" />;
+  if (tone === "good") return <Icon name="success" size={14} className="text-success-600" />;
+  if (tone === "bad") return <Icon name="error" size={14} className="text-danger-600" />;
+  if (tone === "caution") return <Icon name="warn" size={14} className="text-warning-600" />;
   return <Icon name="warn" size={14} className="text-ink-400" />;
 }
 
@@ -27,26 +27,39 @@ export function ProductionGates({
 }) {
   const isReady = overallTone === "good";
   return (
-    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-100 dark:border-slate-700/50">
-        <Icon name={isReady ? "unlock" : "lock"} size={16} className={isReady ? "text-success-500" : "text-warning-500"} />
-        <span className="font-semibold text-slate-900 dark:text-white text-sm flex-1">上线门控</span>
+    <div className="surface-panel overflow-hidden">
+      <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-4">
+        <div className="min-w-0">
+          <div className="section-kicker">Release Gates</div>
+          <div className="mt-1 flex items-center gap-2">
+            <Icon name={isReady ? "unlock" : "lock"} size={16} className={isReady ? "text-success-600" : "text-warning-600"} />
+            <h2 className="text-base font-semibold tracking-tight text-ink-950 dark:text-white">上线门控</h2>
+          </div>
+        </div>
         <Badge variant={toneVariant(overallTone)}>{overallLabel}</Badge>
       </div>
-      <div className="divide-y divide-slate-50 dark:divide-slate-700/30">
+      <div className="px-4 pb-4">
+        <div className="grid gap-2">
         {gates.map((gate) => (
-          <div key={gate.name} className="flex items-start gap-3 px-4 py-2.5">
-            <GateIcon tone={gate.tone} />
-            <div className="flex-1 min-w-0">
-              <div className="text-xs font-medium text-slate-800 dark:text-slate-200">{gate.name}</div>
-              {gate.detail && <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{gate.detail}</div>}
+          <div key={gate.name} className="clean-card px-3 py-3">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 grid h-6 w-6 flex-shrink-0 place-items-center rounded-full bg-black/[0.035] dark:bg-white/[0.06]">
+                <GateIcon tone={gate.tone} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="text-sm font-semibold text-ink-900 dark:text-ink-100">{gate.name}</div>
+                  {gate.required && (
+                    <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500">必须</span>
+                  )}
+                </div>
+                {gate.detail && <div className="mt-1 text-xs leading-relaxed text-ink-500 dark:text-ink-400">{gate.detail}</div>}
+              </div>
+              <Badge variant={toneVariant(gate.tone)} className="flex-shrink-0">{gate.status}</Badge>
             </div>
-            <Badge variant={toneVariant(gate.tone)} className="flex-shrink-0">{gate.status}</Badge>
-            {gate.required && (
-              <span className="text-xs text-slate-400 dark:text-slate-500 flex-shrink-0">必须</span>
-            )}
           </div>
         ))}
+        </div>
       </div>
     </div>
   );

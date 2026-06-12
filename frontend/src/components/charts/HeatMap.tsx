@@ -94,13 +94,15 @@ export function HeatMap({
         </div>
       )}
       <div className="p-3 overflow-x-auto">
-        <table className="border-separate border-spacing-0.5">
+        <table className="border-separate border-spacing-1.5 min-w-max">
           <thead>
             <tr>
-              <th className="w-24" />
+              <th className="w-28" />
               {xLabels.map((x) => (
-                <th key={x} className="text-2xs font-medium text-ink-500 dark:text-ink-400 px-1 pb-1 text-left rotate-[-30deg] origin-bottom-left h-8 whitespace-nowrap">
-                  {x}
+                <th key={x} className="px-1 pb-2 align-bottom">
+                  <div className="w-20 text-[11px] font-medium text-ink-500 dark:text-ink-400 leading-tight text-center whitespace-normal break-words">
+                    {x}
+                  </div>
                 </th>
               ))}
             </tr>
@@ -108,7 +110,7 @@ export function HeatMap({
           <tbody>
             {yLabels.map((y) => (
               <tr key={y}>
-                <td className="text-2xs font-medium text-ink-700 dark:text-ink-300 pr-2 text-right whitespace-nowrap">
+                <td className="text-2xs font-medium text-ink-700 dark:text-ink-300 pr-3 text-right whitespace-nowrap align-middle">
                   {y}
                 </td>
                 {xLabels.map((x) => {
@@ -117,7 +119,7 @@ export function HeatMap({
                     return (
                       <td
                         key={x}
-                        className="w-10 h-7 rounded bg-ink-100/40 dark:bg-ink-800/40"
+                        className="w-20 h-16 rounded-xl bg-ink-100/50 dark:bg-ink-800/40 border border-ink-100 dark:border-ink-800"
                         title={`${y} × ${x}: 无样本`}
                       />
                     );
@@ -128,11 +130,14 @@ export function HeatMap({
                   return (
                     <td
                       key={x}
-                      className="w-10 h-7 rounded text-center text-2xs font-medium tabular-nums cursor-default"
+                      className="w-20 h-16 rounded-xl text-center text-sm font-semibold tabular-nums cursor-default border border-white/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
                       style={{ backgroundColor: bg, opacity, color: text }}
                       title={cell.tooltip ?? `${y} × ${x}: ${formatValue(cell.value)} (n=${cell.sampleSize ?? "-"})`}
                     >
-                      {formatValue(cell.value)}
+                      <div className="flex h-full flex-col items-center justify-center gap-1 px-1">
+                        <div>{formatValue(cell.value)}</div>
+                        <div className="text-[10px] font-medium opacity-75">n={cell.sampleSize ?? "-"}</div>
+                      </div>
                     </td>
                   );
                 })}

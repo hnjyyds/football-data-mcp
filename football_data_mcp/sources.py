@@ -7732,6 +7732,7 @@ async def sync_betexplorer_odds_snapshots(
     limit: int = 10,
     force: bool = False,
     job_id: str | None = None,
+    target_map: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Fetch explicit BetExplorer event pages and persist sparse best-odds snapshots."""
 
@@ -7761,6 +7762,11 @@ async def sync_betexplorer_odds_snapshots(
 
     snapshots_to_save: list[snapshot_store.MarketSnapshot] = []
     results = []
+    target_by_event_url: dict[str, dict[str, Any]] = {
+        str(key): dict(value)
+        for key, value in (target_map or {}).items()
+        if str(key).strip()
+    }
     for event_url in bounded_urls:
         snapshot_store.upsert_odds_source_sync_state(
             source=betexplorer_source.BETEXPLORER_PROVIDER,
@@ -7778,6 +7784,28 @@ async def sync_betexplorer_odds_snapshots(
                     market_type=_BETEXPLORER_MARKET_REQUESTS[market_name],
                 )
                 market_snapshots = result.get("snapshots") or []
+                target = target_by_event_url.get(event_url) or {}
+                if target:
+                    market_snapshots = [
+                        snapshot_store.MarketSnapshot(
+                            provider=item.provider,
+                            source_key=item.source_key,
+                            event_id=item.event_id,
+                            league=str(target.get("league") or item.league),
+                            home_team=str(target.get("home_team") or item.home_team),
+                            away_team=str(target.get("away_team") or item.away_team),
+                            kickoff_utc=str(target.get("kickoff_utc") or item.kickoff_utc),
+                            bookmaker=item.bookmaker,
+                            market_type=item.market_type,
+                            selection=item.selection,
+                            decimal_odds=item.decimal_odds,
+                            line=item.line,
+                            source_time_utc=item.source_time_utc,
+                            fetched_at_utc=item.fetched_at_utc,
+                            raw={**item.raw, "target_match": target},
+                        )
+                        for item in market_snapshots
+                    ]
                 event_snapshots.extend(market_snapshots)
                 market_results.append(
                     {

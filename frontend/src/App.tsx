@@ -1,8 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Icon } from "./components/shared/Icon";
-import {
-  CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis
-} from "recharts";
 import {
   buildDashboardView, buildMatchDetailView, customerCopy, formatOdds, formatPercent,
   formatSignedPercent, marketLabel, reasonLabel, strategyStatusLabel
@@ -624,6 +621,7 @@ const QUICK_HOLDOUT_VALIDATION_REQUEST: StartHoldoutValidationJobRequest = {
 };
 
 const MatchDetailPage = lazy(() => import("./pages/MatchDetailPage"));
+const ProgressCurvePanel = lazy(() => import("./components/dashboard/ProgressCurvePanel").then((mod) => ({ default: mod.ProgressCurvePanel })));
 
 function numericValue(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -956,6 +954,45 @@ function OverviewSection({ snapshot, view, onSelectRecommendation }: {
       tone: roi != null && roi > 0 ? "good" : roi != null && roi < 0 ? "bad" : "neutral",
     },
   ];
+  const predictionCards = useMemo<DashboardRecord[]>(
+    () =>
+      (snapshot.prediction_ledger ?? []).map((row) => ({
+        id: row.ledger_id,
+        league: row.league,
+        matchup: row.matchup,
+        home_team: row.home_team,
+        away_team: row.away_team,
+        home_team_logo_url: row.home_team_logo_url,
+        away_team_logo_url: row.away_team_logo_url,
+        kickoff_utc_plus_8: row.kickoff_utc_plus_8,
+        market: row.market,
+        selection: row.selection,
+        selection_key: row.selection_key,
+        line: row.line,
+        decimal_odds: row.decimal_odds,
+        model_probability: row.model_probability,
+        learned_probability: row.governed_probability ?? row.learned_probability,
+        market_probability: row.market_probability,
+        edge: row.edge,
+        expected_multiplier: row.expected_multiplier,
+        recommendation: row.recommendation || row.prediction_type,
+        stake_level: row.prediction_type === "recommendation" ? "small" : "watch_only",
+        risk_flags: [],
+        caution_flags: [],
+        settlement_status: row.settlement_status,
+        created_at_utc: row.created_at_utc,
+        score: row.score,
+        score_type: row.score_type,
+        status_label: row.status_label,
+        true_result: row.true_result,
+        match_state: row.match_state,
+        hit: row.hit,
+        payout_multiplier: row.payout_multiplier,
+        profit_units: row.profit_units,
+        settled_at_utc: row.settled_at_utc,
+      })),
+    [snapshot.prediction_ledger],
+  );
 
   return (
     <div className="flex flex-col gap-3">
@@ -999,11 +1036,11 @@ function OverviewSection({ snapshot, view, onSelectRecommendation }: {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         {/* Picks column */}
         <div className="lg:col-span-2 flex flex-col gap-3">
-          <Panel title="当前推荐" icon="trendUp" badge={`${snapshot.asian_picks?.length ?? 0} 条·亚盘`} dense>
+          <Panel title="预测分层" icon="trendUp" badge={`${predictionCards.length} 场·按概率分组`} dense>
             <PickGrid
-              records={snapshot.asian_picks}
+              records={predictionCards}
               onSelect={onSelectRecommendation}
-              emptyMessage="暂无可发布推荐信号"
+              emptyMessage="暂无预测样本"
             />
           </Panel>
           <SettlementFeed records={snapshot.recent_settlements ?? []} />
@@ -1241,19 +1278,297 @@ function SignalWorkbenchPanel({
   );
 }
 
+function sourceDisplayName(source: string): string {
+  const names: Record<string, string> = {
+    leisu: "雷速",
+    oddsportal_scraper: "OddsPortal",
+    the_odds_api: "The Odds API",
+    analysis_odds: "分析沉淀快照",
+  };
+  return names[source] ?? source;
+}
+
+function statusDisplayName(status: string | null | undefined): string {
+  const names: Record<string, string> = {
+    stale: "已过期",
+    stale_derived: "沉淀快照过期",
+    retryable: "可续跑",
+    needs_config: "待配置",
+    no_snapshots: "无快照",
+    snapshot_available: "有历史快照",
+    healthy: "健康",
+    succeeded: "最近成功",
+  };
+  return names[String(status ?? "")] ?? String(status ?? "待确认");
+}
+
+function rejectionReasonSummary(reasons: Record<string, number> | null | undefined): Array<{ key: string; label: string; count: number }> {
+  return Object.entries(reasons ?? {})
+    .map(([key, count]) => ({ key, label: reasonLabel(key), count }))
+    .filter((row) => Number.isFinite(row.count) && row.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+}
+
+type SignalTone = KpiCard["tone"] | "info";
+
+function toneAccentClasses(tone: SignalTone | null | undefined): string {
+  if (tone === "good") return "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-100";
+  if (tone === "bad") return "border-red-200 bg-red-50 text-red-900 dark:border-red-800 dark:bg-red-950/30 dark:text-red-100";
+  if (tone === "caution") return "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100";
+  if (tone === "info") return "border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-100";
+  return "border-slate-200 bg-slate-50 text-slate-900 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-100";
+}
+
+function SignalActionButton({
+  icon,
+  children,
+  onClick,
+  primary = false,
+}: {
+  icon: ReactNode;
+  children: ReactNode;
+  onClick: () => void;
+  primary?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+        primary
+          ? "border-sky-300 bg-sky-600 text-white hover:bg-sky-700 dark:border-sky-500 dark:bg-sky-500 dark:text-slate-950 dark:hover:bg-sky-400"
+          : "border-slate-200 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
+      }`}
+    >
+      {icon}
+      <span className="whitespace-nowrap">{children}</span>
+    </button>
+  );
+}
+
+function SignalMetricTile({
+  label,
+  value,
+  caption,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  caption: string;
+  tone?: SignalTone;
+}) {
+  return (
+    <div className={`rounded-lg border px-3 py-3 ${toneAccentClasses(tone)}`}>
+      <div className="text-[11px] font-medium opacity-75">{label}</div>
+      <div className="mt-1 truncate text-lg font-bold tabular-nums">{value}</div>
+      <div className="mt-1 truncate text-[11px] opacity-75">{caption}</div>
+    </div>
+  );
+}
+
+function SignalStatusPanel({
+  snapshot,
+  view,
+  onRefresh,
+  onGoSection,
+}: {
+  snapshot: DashboardSnapshot;
+  view: DashboardViewModel;
+  onRefresh: () => void;
+  onGoSection: (section: DashboardSectionKey) => void;
+}) {
+  const kpis = snapshot.prediction_kpis;
+  const opportunity = view.recommendationOpportunity;
+  const autoSummary = snapshot.auto_learning_state?.last_result_summary;
+  const rejectionRows = rejectionReasonSummary(autoSummary?.asian_rejection_reasons);
+  const oddsClosure = snapshot.odds_source_status?.closure;
+  const orderedSources = oddsClosure?.ordered_sources ?? [];
+  const activeSource = oddsClosure?.active_source ? sourceDisplayName(oddsClosure.active_source) : "无可用主源";
+  const latestGenerated = formatBeijingFull(snapshot.generated_at_utc);
+  const savedCount = autoSummary?.saved_record_count ?? 0;
+  const totalCandidates = autoSummary?.asian_total_candidates ?? 0;
+  const rejectedCount = autoSummary?.asian_rejected_count ?? 0;
+  const openCount = kpis.open_count ?? 0;
+  const settledCount = kpis.settled_count ?? 0;
+  const allTimeHitRate = kpis.hit_rate ?? null;
+  const hasOpenPrediction = openCount > 0;
+  const stateTone: KpiCard["tone"] = hasOpenPrediction ? "good" : oddsClosure?.production_ready === false ? "caution" : "neutral";
+  const headline = hasOpenPrediction
+    ? `当前有 ${openCount} 场开放预测`
+    : "当前没有开放预测";
+  const detail = hasOpenPrediction
+    ? "这些比赛仍在等待赛果或开赛，可以在下方台账用“未结算”筛选。"
+    : opportunity.detail || "本轮候选没有进入预测台账。优先看候选来源、赔率新鲜度和过滤规则。";
+  const primaryReason = !hasOpenPrediction && rejectedCount > 0
+    ? `上一轮 ${rejectedCount} 个候选被过滤`
+    : !hasOpenPrediction && oddsClosure?.production_ready === false
+      ? "赔率主源不可用于当前分析"
+      : !hasOpenPrediction
+        ? "没有候选通过预测门槛"
+        : "等待赛果回填";
+  const journeyRows = [
+    {
+      label: "候选",
+      value: String(totalCandidates),
+      caption: totalCandidates > 0 ? "已进入分析" : "当前为空",
+      tone: totalCandidates > 0 ? "info" as SignalTone : "neutral" as SignalTone,
+    },
+    {
+      label: "过滤",
+      value: String(rejectedCount),
+      caption: rejectedCount > 0 ? "规则拦截" : "无新增拦截",
+      tone: rejectedCount > 0 ? "caution" as KpiCard["tone"] : "neutral" as KpiCard["tone"],
+    },
+    {
+      label: "入账",
+      value: String(savedCount),
+      caption: savedCount > 0 ? "已保存样本" : "未保存",
+      tone: savedCount > 0 ? "good" as KpiCard["tone"] : "neutral" as KpiCard["tone"],
+    },
+    {
+      label: "开放",
+      value: String(openCount),
+      caption: openCount > 0 ? "待赛果" : "无当前场次",
+      tone: openCount > 0 ? "good" as KpiCard["tone"] : "neutral" as KpiCard["tone"],
+    },
+  ];
+
+  return (
+    <Panel
+      title="当前信号状态"
+      icon="signals"
+      badge={hasOpenPrediction ? "有开放预测" : "无开放预测"}
+      className="border-slate-300 dark:border-slate-700"
+    >
+      <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.65fr)] gap-4">
+        <div className={`relative overflow-hidden rounded-xl border p-4 ${toneAccentClasses(stateTone)}`}>
+          <div className="absolute inset-y-0 left-0 w-1 bg-current opacity-60" />
+          <div className="grid grid-cols-1 lg:grid-cols-[auto_minmax(0,1fr)] gap-4">
+            <div className="flex items-center gap-4">
+              <div className="grid h-20 w-20 shrink-0 place-items-center rounded-2xl border border-current/20 bg-white/60 text-3xl font-black tabular-nums shadow-sm dark:bg-slate-950/30">
+                {openCount}
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={toneVariant(stateTone)}>{headline}</Badge>
+                  <span className="text-xs font-semibold opacity-80">{primaryReason}</span>
+                </div>
+                <div className="mt-2 max-w-3xl text-sm leading-relaxed opacity-90">{detail}</div>
+                <div className="mt-2 text-xs opacity-70">
+                  快照时间 {latestGenerated} · 自动学习空跑 {snapshot.auto_learning_state.consecutive_empty_cycles ?? 0} 轮
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-start gap-2 lg:justify-end">
+              <SignalActionButton icon={<Icon name="database" size={14} />} onClick={() => onGoSection("data")} primary>
+                看赔率源
+              </SignalActionButton>
+              <SignalActionButton icon={<Icon name="model" size={14} />} onClick={() => onGoSection("model")}>
+                看模型
+              </SignalActionButton>
+              <SignalActionButton icon={<Icon name="refresh" size={14} />} onClick={onRefresh}>
+                刷新
+              </SignalActionButton>
+            </div>
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-2">
+            {journeyRows.map((row) => (
+              <SignalMetricTile key={row.label} label={row.label} value={row.value} caption={row.caption} tone={row.tone} />
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-1 gap-3">
+          <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950/30 p-3 shadow-sm">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-900 dark:text-white">
+                <Icon name="filter" size={13} className="text-amber-500" />
+                上一轮过滤原因
+              </div>
+              <Badge variant={rejectionRows.length ? "caution" : "neutral"}>{rejectedCount} 条</Badge>
+            </div>
+            {rejectionRows.length > 0 ? (
+              <div className="space-y-2">
+                {rejectionRows.map((row) => (
+                  <div key={row.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 text-xs">
+                    <span className="min-w-0 truncate text-slate-600 dark:text-slate-300">{row.label}</span>
+                    <span className="rounded-md bg-slate-100 px-2 py-0.5 font-semibold tabular-nums text-slate-900 dark:bg-slate-800 dark:text-white">{row.count}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                后端没有返回明确过滤分组。通常代表候选为空或还没跑到候选分析阶段。
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950/30 p-3 shadow-sm">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-900 dark:text-white">
+                <Icon name="database" size={13} className="text-sky-500" />
+                赔率源闭环
+              </div>
+              <Badge variant={oddsClosure?.production_ready ? "good" : "caution"}>
+                {oddsClosure?.production_ready ? "可用" : "需处理"}
+              </Badge>
+            </div>
+            <div className="text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+              {oddsClosure?.reason || "暂无赔率源闭环说明。"}
+            </div>
+            {orderedSources.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {orderedSources.slice(0, 4).map((source) => (
+                  <span
+                    key={source.source}
+                    className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300"
+                  >
+                    {sourceDisplayName(source.source)} · {statusDisplayName(source.operational_status || source.freshness_status)}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+        <SignalMetricTile label="历史台账" value={`${snapshot.prediction_ledger?.length ?? 0}`} caption="可筛选复盘" />
+        <SignalMetricTile label="已结算" value={String(settledCount)} caption="长期样本池" />
+        <SignalMetricTile label="总体命中" value={allTimeHitRate != null ? `${Math.round(allTimeHitRate * 100)}%` : "待统计"} caption="按全部样本" />
+        <SignalMetricTile label="当前赔率源" value={activeSource} caption={oddsClosure?.production_ready ? "可参与分析" : "不可作为主源"} tone={oddsClosure?.production_ready ? "good" : "caution"} />
+      </div>
+    </Panel>
+  );
+}
+
 // ─── Signals section ─────────────────────────────────────────────────────────
 
-function SignalsSection({ snapshot, view, onSelectLedger, onSelectRecommendation }: {
+function SignalsSection({ snapshot, view, onSelectLedger, onSelectRecommendation, onRefresh, onGoSection }: {
   snapshot: DashboardSnapshot;
   view: DashboardViewModel;
   onSelectLedger: (id: string) => void;
   onSelectRecommendation: (r: DashboardRecord) => void;
+  onRefresh: () => void;
+  onGoSection: (section: DashboardSectionKey) => void;
 }) {
   const mb = snapshot.market_breakdown;
   const [ledgerReasonFilter, setLedgerReasonFilter] = useState<LedgerReasonFilter | null>(null);
+  const blockedLeagueSet = useMemo(
+    () => new Set(snapshot.league_breakdown?.effective_blocked_leagues ?? []),
+    [snapshot.league_breakdown?.effective_blocked_leagues],
+  );
+  const visibleHeatmapLeagues = useMemo(
+    () => (mb?.leagues ?? []).filter((league) => !blockedLeagueSet.has(league)),
+    [mb?.leagues, blockedLeagueSet],
+  );
   // Build heatmap cells from market_breakdown (league × market)
   const heatmapCells = (mb?.heatmap_cells ?? [])
     .filter((c) => c.hit_rate != null && c.sample_count >= 1)
+    .filter((c) => !blockedLeagueSet.has(c.league))
     .map((c) => ({
       x: c.league,
       y: c.market,
@@ -1263,6 +1578,7 @@ function SignalsSection({ snapshot, view, onSelectLedger, onSelectRecommendation
     }));
   const roiCells = (mb?.heatmap_cells ?? [])
     .filter((c) => c.roi != null && c.sample_count >= 1)
+    .filter((c) => !blockedLeagueSet.has(c.league))
     .map((c) => ({
       x: c.league,
       y: c.market,
@@ -1273,6 +1589,12 @@ function SignalsSection({ snapshot, view, onSelectLedger, onSelectRecommendation
 
   return (
     <div className="flex flex-col gap-4">
+      <SignalStatusPanel
+        snapshot={snapshot}
+        view={view}
+        onRefresh={onRefresh}
+        onGoSection={onGoSection}
+      />
       <RecommendationOpportunityPanel opportunity={view.recommendationOpportunity} />
       <SignalWorkbenchPanel
         opportunity={view.recommendationOpportunity}
@@ -1285,20 +1607,20 @@ function SignalsSection({ snapshot, view, onSelectLedger, onSelectRecommendation
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <HeatMap
             cells={heatmapCells}
-            xLabels={mb?.leagues ?? []}
+            xLabels={visibleHeatmapLeagues}
             yLabels={mb?.markets ?? []}
-            title="命中率热力图（联赛 × 市场）"
-            subtitle={`总结算样本 ${mb?.total_settled ?? 0}，颜色越深命中率越高，透明度反映样本量`}
+            title="命中率热力图（白名单联赛 × 市场）"
+            subtitle={`总结算样本 ${mb?.total_settled ?? 0}，已自动隐藏默认阻断联赛；颜色越深命中率越高，透明度反映样本量`}
             domain={[0, 1]}
             scale="sequential"
             formatValue={(v) => `${(v * 100).toFixed(0)}%`}
           />
           <HeatMap
             cells={roiCells}
-            xLabels={mb?.leagues ?? []}
+            xLabels={visibleHeatmapLeagues}
             yLabels={mb?.markets ?? []}
-            title="ROI 热力图（联赛 × 市场）"
-            subtitle="红=亏损 / 灰=平 / 绿=盈利，可识别强势赛事"
+            title="ROI 热力图（白名单联赛 × 市场）"
+            subtitle="红=亏损 / 灰=平 / 绿=盈利；仅展示当前允许继续观察/推荐的联赛"
             domain={[-0.30, 0.30]}
             scale="diverging"
             formatValue={(v) => `${v > 0 ? "+" : ""}${(v * 100).toFixed(0)}%`}
@@ -1332,11 +1654,111 @@ function SignalsSection({ snapshot, view, onSelectLedger, onSelectRecommendation
 
 // ─── Production section ───────────────────────────────────────────────────────
 
+function ProductionFocusPanel({ view }: { view: DashboardViewModel }) {
+  const readiness = view.productionReadiness;
+  const blockers = (view.productionOps.blockerRows ?? []).slice(0, 3);
+  const actionRows = [
+    ...(view.dataSourceHealth.checkRows ?? []).filter((row) => row.tone !== "good").slice(0, 2),
+    ...(view.productionOps.workflowRows ?? []).filter((row) => row.tone !== "good").slice(0, 2),
+  ]
+    .filter((row, index, all) => all.findIndex((item) => item.key === row.key) === index)
+    .slice(0, 3);
+
+  return (
+    <section className="surface-panel overflow-hidden">
+      <div className="grid gap-5 p-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)] lg:p-5">
+        <div className="min-w-0">
+          <div className="section-kicker">Production Readiness</div>
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <h1 className="text-2xl font-semibold tracking-tight text-ink-950 dark:text-white sm:text-3xl">
+              当前结论
+            </h1>
+            <Badge variant={toneVariant(readiness.tone)}>{readiness.actionText}</Badge>
+          </div>
+          <div className="mt-4 max-w-3xl text-sm leading-7 text-ink-700 dark:text-ink-300">
+            {readiness.detail}
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-ink-500 dark:text-ink-400">
+            <Icon name="production" size={14} />
+            <span>先看结论、再看阻断，不需要在所有诊断项里来回找重点。</span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-2">
+          {readiness.metrics.slice(0, 4).map((item) => (
+            <div key={item.label} className="clean-card px-3 py-3">
+              <Metric label={item.label} value={String(item.value ?? "—")} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid gap-3 border-t border-black/[0.06] p-4 dark:border-white/[0.07] lg:grid-cols-2 lg:p-5">
+        <div className="min-w-0">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div>
+              <div className="section-kicker">Blockers</div>
+              <div className="mt-1 text-base font-semibold text-ink-950 dark:text-white">核心阻断</div>
+            </div>
+              <Badge variant={toneVariant(blockers.length ? "caution" : "good")}>{blockers.length ? `${blockers.length} 项` : "已清空"}</Badge>
+          </div>
+          <div className="grid gap-2">
+              {(blockers.length ? blockers : readiness.gateRows.slice(0, 3)).map((row) => (
+                <div key={row.key} className="clean-card px-3 py-3">
+                  <div className="flex items-start gap-3">
+                    <Badge variant={toneVariant(row.tone)} className="mt-0.5 flex-shrink-0">{row.statusText}</Badge>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-semibold text-ink-950 dark:text-white">{row.label}</span>
+                        <span className="text-xs tabular-nums text-ink-400 dark:text-ink-500">{row.progressText}</span>
+                      </div>
+                      <div className="mt-1 text-xs leading-relaxed text-ink-600 dark:text-ink-400">{row.detail}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div>
+              <div className="section-kicker">Next Actions</div>
+              <div className="mt-1 text-base font-semibold text-ink-950 dark:text-white">下一步动作</div>
+            </div>
+            <Badge variant="neutral">按优先级</Badge>
+          </div>
+          <div className="grid gap-2">
+              {actionRows.map((row) => (
+                <div key={row.key} className="clean-card px-3 py-3">
+                  <div className="flex items-start gap-3">
+                    <Badge variant={toneVariant(row.tone)} className="mt-0.5 flex-shrink-0">{row.statusText}</Badge>
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-ink-950 dark:text-white">{row.label}</div>
+                      <div className="mt-1 text-xs leading-relaxed text-ink-600 dark:text-ink-400">{row.detail}</div>
+                      <div className="mt-1 text-[11px] text-ink-400 dark:text-ink-500">{row.metaText}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {actionRows.length === 0 && (
+                <div className="clean-card px-3 py-3 text-xs leading-relaxed text-ink-500 dark:text-ink-400">
+                  当前没有新的硬阻断动作，继续积累 prediction / closing / outcome 样本即可。
+                </div>
+              )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ProductionSection({ view }: { view: DashboardViewModel }) {
   const gates = view.productionReadiness.gateRows ?? [];
   const formattedGates = formatProductionGatesForDisplay(gates);
   return (
     <div className="flex flex-col gap-4">
+      <ProductionFocusPanel view={view} />
       <ProductionGates
         gates={formattedGates}
         overallTone={view.productionReadiness.tone ?? "neutral"}
@@ -1368,6 +1790,17 @@ function ModelSection({
 }) {
   const backtestCurve = view.backtestCurve;
   const buckets = snapshot.buckets ?? [];
+  const leagueBreakdownRows = useMemo(() => {
+    const rows = Object.entries(snapshot.league_breakdown?.by_league ?? {}).map(([league, row]) => ({
+      league,
+      samples: row.samples,
+      hitRate: row.hit_rate,
+      roi: row.roi,
+      classification: row.classification,
+      blocked: (snapshot.league_breakdown?.effective_blocked_leagues ?? []).includes(league),
+    }));
+    return rows.sort((left, right) => right.samples - left.samples || (left.roi ?? 0) - (right.roi ?? 0));
+  }, [snapshot.league_breakdown]);
 
   // Build reliability points from market-global buckets.
   // The dashboard contract normalizes to {band, sample_count, hit_rate, avg_model_probability}.
@@ -1859,18 +2292,55 @@ function ModelSection({
         </Panel>
       )}
 
-      {/* Backtest curve */}
-      {backtestCurve?.points?.length > 0 && (
-        <Panel title="累计 ROI 曲线" icon="chart">
-          <OddsChart
-            points={backtestCurve.points.map((p) => ({
-              label: String(p.index),
-              roi: p.cumulativeValue,
-            }))}
-            lines={["roi"]}
-            referenceValue={0}
-          />
+      {leagueBreakdownRows.length > 0 && (
+        <Panel
+          title="联赛表现表"
+          icon="database"
+          badge={`样本阈值 ${snapshot.league_breakdown?.min_samples_required ?? 25} 场`}
+        >
+          <div className="mb-3 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+            当前会自动屏蔽长期亏损联赛；表格按样本数排序，方便你先看“样本足够且持续亏损”的联赛。
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-100 dark:border-slate-700/50 text-xs text-slate-500 dark:text-slate-400">
+                  <th className="text-left py-2 px-3 font-medium">联赛</th>
+                  <th className="text-right py-2 px-3 font-medium">样本</th>
+                  <th className="text-right py-2 px-3 font-medium">命中率</th>
+                  <th className="text-right py-2 px-3 font-medium">ROI</th>
+                  <th className="text-right py-2 px-3 font-medium">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {leagueBreakdownRows.map((row) => (
+                  <tr key={row.league} className="border-b border-slate-50 dark:border-slate-700/30">
+                    <td className="py-2 px-3 text-xs font-medium text-slate-800 dark:text-slate-200">{row.league}</td>
+                    <td className="py-2 px-3 text-xs text-right tabular-nums text-slate-600 dark:text-slate-400">{row.samples}</td>
+                    <td className="py-2 px-3 text-xs text-right tabular-nums text-slate-600 dark:text-slate-400">
+                      {row.hitRate != null ? formatPercent(row.hitRate) : "—"}
+                    </td>
+                    <td className={`py-2 px-3 text-xs text-right tabular-nums font-medium ${(row.roi ?? 0) > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-500 dark:text-red-400"}`}>
+                      {row.roi != null ? formatSignedPercent(row.roi) : "—"}
+                    </td>
+                    <td className="py-2 px-3 text-xs text-right">
+                      <Badge variant={row.blocked ? "bad" : row.classification === "winning" ? "good" : row.classification === "losing" ? "bad" : "neutral"}>
+                        {row.blocked ? "已屏蔽" : row.classification === "winning" ? "盈利" : row.classification === "losing" ? "亏损" : "观察"}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Panel>
+      )}
+
+      {/* Progress / accuracy curve */}
+      {backtestCurve?.points?.length > 0 && (
+        <Suspense fallback={<SkeletonCard lines={4} />}>
+          <ProgressCurvePanel backtestCurve={backtestCurve} />
+        </Suspense>
       )}
 
       {/* Calibration bands from snapshot */}
@@ -2408,7 +2878,7 @@ export function App() {
   }
 
   return (
-    <div className={`min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white`}>
+    <div className="min-h-screen text-slate-900 dark:text-white">
       <TopBar
         snapshot={snapshot}
         darkMode={darkMode}
@@ -2433,12 +2903,12 @@ export function App() {
           />
         </Suspense>
       ) : (
-        <div className="flex max-w-screen-2xl mx-auto">
+        <div className="flex max-w-screen-2xl mx-auto gap-2 lg:px-2">
           {/* Sidebar (desktop) */}
           <Sidebar active={activeSection} onChange={navigateToSection} />
 
           {/* Main content */}
-          <main className="flex-1 min-w-0 px-3 sm:px-4 py-3 pb-20 lg:pb-4">
+          <main className="flex-1 min-w-0 px-3 py-4 pb-20 sm:px-4 lg:pb-5 xl:px-5">
             {error && (
               <div className="mb-3 rounded-lg border border-amber-200 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-200 flex items-center gap-2">
                 <Icon name="warn" size={12} />
@@ -2458,7 +2928,7 @@ export function App() {
                   <OverviewSection
                     snapshot={snapshot}
                     view={view}
-                    onSelectRecommendation={(r) => navigateToMatch(`recommendation:${r.id}`)}
+                    onSelectRecommendation={(r) => navigateToMatch(String(r.id))}
                   />
                 )}
                 {activeSection === "production" && <ProductionSection view={view} />}
@@ -2478,12 +2948,14 @@ export function App() {
                     snapshot={snapshot}
                     view={view}
                     onSelectLedger={navigateToMatch}
-                    onSelectRecommendation={(r) => navigateToMatch(`recommendation:${r.id}`)}
+                    onSelectRecommendation={(r) => navigateToMatch(String(r.id))}
+                    onRefresh={handleManualDashboardRefresh}
+                    onGoSection={navigateToSection}
                   />
                 )}
                 {activeSection === "data" && <DataSection snapshot={snapshot} view={view} />}
 
-                <footer className="mt-6 text-[10px] text-slate-400 dark:text-slate-600 text-center py-3 border-t border-slate-100 dark:border-slate-800">
+                <footer className="mt-8 text-center text-[10px] text-ink-400 dark:text-ink-600">
                   只读监控台 · 不执行交易动作
                 </footer>
               </>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -10,12 +11,14 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from football_data_mcp import browser_session_runtime
 from football_data_mcp import sources
 
 
 HOST = os.getenv("LEISU_BROWSER_PROXY_HOST", "127.0.0.1")
 PORT = int(os.getenv("LEISU_BROWSER_PROXY_PORT", "8918"))
 DEFAULT_PROFILE_DIR = Path(os.getenv("LEISU_BROWSER_PROFILE_DIR", ".leisu-browser-profile"))
+SESSION_STATUS_PATH = os.getenv("LEISU_BROWSER_SESSION_STATUS_PATH", "").strip()
 TIMEOUT_MS = int(float(os.getenv("LEISU_BROWSER_PROXY_TIMEOUT_SECONDS", "15")) * 1000)
 DETAIL_COMPANY_LIMIT = int(os.getenv("LEISU_BROWSER_PROXY_DETAIL_COMPANY_LIMIT", "3"))
 AUTH_COOLDOWN_SECONDS = float(os.getenv("LEISU_BROWSER_PROXY_AUTH_COOLDOWN_SECONDS", "90"))
@@ -40,10 +43,29 @@ class LeisuBrowserSession:
         self._auth_pending_until = 0.0
         self._auth_pending_payload: dict[str, Any] | None = None
 
+    def _record_status(self, status: str, **fields: Any) -> None:
+        browser_session_runtime.record_provider_status(
+            "leisu",
+            status,
+            path=SESSION_STATUS_PATH or None,
+            mode="manual_browser_session",
+            browser="chromium_cdp" if self.connect_cdp else "playwright_persistent_context",
+            connect_cdp=bool(self.connect_cdp),
+            headless=bool(self.headless),
+            profile_dir=str(self.profile_dir),
+            **fields,
+        )
+
     def start(self) -> None:
+        self._record_status("starting", message="正在启动 Playwright 浏览器会话。")
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
+            self._record_status(
+                "error",
+                message="缺少 Playwright 依赖。",
+                last_error="playwright_not_installed",
+            )
             raise SystemExit(
                 "缺少 Playwright。请先执行：uv pip install playwright && uv run python -m playwright install chromium"
             ) from exc
@@ -64,6 +86,7 @@ class LeisuBrowserSession:
             )
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         self._page.goto(sources.LEISU_MOBILE_WEBSITE_URL, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+        self._record_status("ready", message="浏览器会话已就绪，等待雷速验证或抓取请求。")
 
     def close(self) -> None:
         if self._context is not None and not self.connect_cdp:
@@ -72,11 +95,17 @@ class LeisuBrowserSession:
             self._browser.close()
         if self._playwright is not None:
             self._playwright.stop()
+        self._record_status("stopped", message="浏览器会话已关闭。")
 
     def open_verification_page(self, match_id: str) -> str:
         verification_url = f"{sources.LEISU_MOBILE_WEBSITE_URL}/live/odds-{match_id}"
         self._page.goto(verification_url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
         self._page.bring_to_front()
+        self._record_status(
+            "auth_required",
+            message="需要在浏览器窗口中完成人工验证后再继续抓取。",
+            last_verification_url=verification_url,
+        )
         return verification_url
 
     def _cache_auth_pending(self, payload: dict[str, Any]) -> None:
@@ -128,6 +157,11 @@ class LeisuBrowserSession:
         text = str(result.get("text") or "")
         access = sources.leisu_odds_access_status(text)
         if response_status in (401, 403):
+            self._record_status(
+                "auth_required",
+                message="浏览器会话已失效，需要重新完成雷速人工验证。",
+                last_error=f"http_{response_status}_session_invalid",
+            )
             raise UpstreamAccessError(
                 status_code=428,
                 payload={
@@ -142,6 +176,11 @@ class LeisuBrowserSession:
                 },
             )
         if access.get("blocked"):
+            self._record_status(
+                "auth_required",
+                message="雷速返回滑块/风控页面，需要人工验证。",
+                last_error=str(access.get("reason") or access.get("status") or "interactive_captcha"),
+            )
             raise UpstreamAccessError(
                 status_code=428 if access.get("status") == "interactive_captcha" else 502,
                 payload={
@@ -151,6 +190,11 @@ class LeisuBrowserSession:
                 },
             )
         if response_status >= 400:
+            self._record_status(
+                "error",
+                message="雷速上游返回错误状态。",
+                last_error=f"http_{response_status}",
+            )
             raise UpstreamAccessError(
                 status_code=502,
                 payload={
@@ -162,6 +206,11 @@ class LeisuBrowserSession:
         try:
             raw_payload = json.loads(text)
         except json.JSONDecodeError as exc:
+            self._record_status(
+                "error",
+                message="雷速返回内容无法解码为 JSON。",
+                last_error=f"{type(exc).__name__}: {exc}",
+            )
             raise UpstreamAccessError(
                 status_code=502,
                 payload={"status": "json_decode_error", "error": f"{type(exc).__name__}: {exc}", "body_snippet": text[:500]},
@@ -239,6 +288,13 @@ class LeisuBrowserSession:
             "detail_errors": detail_errors[:10],
             "verification": "manual_browser_session",
         }
+        self._record_status(
+            "ready",
+            message="浏览器会话抓取成功，可继续复用当前会话。",
+            last_fetch_at_utc=datetime.now(timezone.utc).isoformat(),
+            last_source_url=source_url,
+            detail_error_count=len(detail_errors),
+        )
         return classic_payload
 
 
@@ -264,7 +320,18 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
         if path == "/health":
-            _json_response(self, 200, {"ok": True, "service": "leisu_browser_proxy"})
+            _json_response(
+                self,
+                200,
+                {
+                    "ok": True,
+                    "service": "leisu_browser_proxy",
+                    "session": browser_session_runtime.provider_status("leisu", path=SESSION_STATUS_PATH or None),
+                },
+            )
+            return
+        if path == "/leisu/session":
+            _json_response(self, 200, browser_session_runtime.provider_status("leisu", path=SESSION_STATUS_PATH or None))
             return
         match_id = ""
         if path.startswith("/leisu/odds/"):

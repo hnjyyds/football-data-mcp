@@ -19,7 +19,7 @@ export function Sidebar({
   badges?: Partial<Record<DashboardSectionKey, string | number>>;
 }) {
   return (
-    <aside className="hidden lg:flex flex-col w-14 flex-shrink-0 border-r border-ink-200 dark:border-ink-800 bg-white dark:bg-ink-900 py-3 gap-0.5">
+    <aside className="hidden lg:flex flex-col w-14 xl:w-40 flex-shrink-0 py-3 gap-0.5">
       {SECTIONS.map(({ key, label, icon }) => {
         const isActive = active === key;
         const badge = badges?.[key];
@@ -30,21 +30,19 @@ export function Sidebar({
             onClick={() => onChange(key)}
             aria-pressed={isActive}
             title={label}
-            className={`relative flex flex-col items-center justify-center py-2.5 mx-1.5 rounded-lg text-xs transition-all duration-150 ${
+            className={`focusable-control relative mx-1.5 flex min-h-10 items-center justify-center xl:justify-start gap-2 rounded-md px-2 py-2 text-xs transition-colors ${
               isActive
-                ? "bg-brand-50 dark:bg-brand-900/30 text-brand-700 dark:text-brand-300"
-                : "text-ink-500 dark:text-ink-400 hover:bg-ink-100 dark:hover:bg-ink-800 hover:text-brand-600 dark:hover:text-brand-400"
+                ? "bg-[hsl(var(--foreground))] text-[hsl(var(--background))]"
+                : "text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--foreground))]"
             }`}
           >
-            <Icon name={icon} size={18} />
-            <span className="mt-1 text-[10px] leading-none">{label}</span>
+            <Icon name={icon} size={16} className="shrink-0" />
+            <span className="hidden xl:inline text-sm font-normal">{label}</span>
+            <span className="xl:hidden mt-0.5 text-[10px] leading-none">{label}</span>
             {badge != null && (
-              <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 flex items-center justify-center text-[9px] rounded-full bg-strike-500 text-white font-medium leading-none">
+              <span className="absolute top-1 right-1 xl:right-2 min-w-[16px] h-4 px-1 flex items-center justify-center text-[9px] rounded-full bg-[hsl(var(--destructive))] text-[hsl(var(--destructive-foreground))] font-medium leading-none">
                 {badge}
               </span>
-            )}
-            {isActive && (
-              <span className="absolute left-0 top-1/4 bottom-1/4 w-0.5 rounded-r-full bg-brand-500" />
             )}
           </button>
         );
@@ -61,7 +59,7 @@ export function BottomNav({
   onChange: (key: DashboardSectionKey) => void;
 }) {
   return (
-    <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white dark:bg-ink-900 border-t border-ink-200 dark:border-ink-800 flex shadow-lg">
+    <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-[hsl(var(--background))]/95 border-t border-[hsl(var(--border))] flex backdrop-blur">
       {SECTIONS.map(({ key, label, icon }) => {
         const isActive = active === key;
         return (
@@ -70,10 +68,10 @@ export function BottomNav({
             type="button"
             onClick={() => onChange(key)}
             aria-pressed={isActive}
-            className={`flex-1 flex flex-col items-center justify-center py-2 gap-0.5 text-xs transition-colors ${
+            className={`focusable-control flex-1 flex min-h-14 flex-col items-center justify-center py-2 gap-0.5 text-xs transition-colors ${
               isActive
-                ? "text-brand-600 dark:text-brand-400"
-                : "text-ink-500 dark:text-ink-400"
+                ? "text-[hsl(var(--foreground))]"
+                : "text-[hsl(var(--muted-foreground))]"
             }`}
           >
             <Icon name={icon} size={18} />

@@ -32,6 +32,16 @@ class OddsSourceSyncJobStarter(Protocol):
         ...
 
 
+class LeisuSessionRefreshJobStarter(Protocol):
+    async def start_leisu_session_refresh_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> LeisuSessionRefreshJobStartResult | str:
+        """Start a Leisu session refresh/bootstrap job and return the execution backend name."""
+        ...
+
+
 @dataclass(slots=True)
 class ValidationJobStartResult:
     backend: str
@@ -40,6 +50,12 @@ class ValidationJobStartResult:
 
 @dataclass(slots=True)
 class OddsSourceSyncJobStartResult:
+    backend: str
+    queue_job_id: str | None = None
+
+
+@dataclass(slots=True)
+class LeisuSessionRefreshJobStartResult:
     backend: str
     queue_job_id: str | None = None
 
@@ -56,6 +72,14 @@ def odds_source_sync_job_start_result(
     if isinstance(value, OddsSourceSyncJobStartResult):
         return value
     return OddsSourceSyncJobStartResult(backend=str(value), queue_job_id=None)
+
+
+def leisu_session_refresh_job_start_result(
+    value: LeisuSessionRefreshJobStartResult | str,
+) -> LeisuSessionRefreshJobStartResult:
+    if isinstance(value, LeisuSessionRefreshJobStartResult):
+        return value
+    return LeisuSessionRefreshJobStartResult(backend=str(value), queue_job_id=None)
 
 
 @dataclass(slots=True)
@@ -78,6 +102,19 @@ class ThreadOddsSourceSyncJobStarter:
     ) -> OddsSourceSyncJobStartResult:
         self.thread_starter(job_id, _payload_with_job_id(payload, job_id))
         return OddsSourceSyncJobStartResult(backend="thread", queue_job_id=None)
+
+
+@dataclass(slots=True)
+class ThreadLeisuSessionRefreshJobStarter:
+    thread_starter: Callable[[str, dict[str, Any]], None]
+
+    async def start_leisu_session_refresh_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> LeisuSessionRefreshJobStartResult:
+        self.thread_starter(job_id, _payload_with_job_id(payload, job_id))
+        return LeisuSessionRefreshJobStartResult(backend="thread", queue_job_id=None)
 
 
 @dataclass(slots=True)
@@ -135,6 +172,35 @@ class ArqOddsSourceSyncJobStarter:
 
 
 @dataclass(slots=True)
+class ArqLeisuSessionRefreshJobStarter:
+    settings: TaskQueueSettings
+    create_pool: ArqCreatePool | None = None
+
+    async def start_leisu_session_refresh_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> LeisuSessionRefreshJobStartResult:
+        redis = await self._create_pool()
+        queue_job_id = f"leisu-session-refresh:{job_id}"
+        try:
+            await redis.enqueue_job(
+                "run_leisu_session_refresh_job",
+                _payload_with_job_id(payload, job_id),
+                _job_id=queue_job_id,
+                _queue_name=self.settings.arq_queue_name,
+            )
+        finally:
+            await _close_redis_pool(redis)
+        return LeisuSessionRefreshJobStartResult(backend="arq", queue_job_id=queue_job_id)
+
+    async def _create_pool(self) -> Any:
+        if self.create_pool:
+            return await self.create_pool(redis_settings_from_task_queue(self.settings), self.settings.arq_queue_name)
+        return await _create_arq_pool(redis_settings_from_task_queue(self.settings), self.settings.arq_queue_name)
+
+
+@dataclass(slots=True)
 class FallbackValidationJobStarter:
     primary: ValidationJobStarter
     fallback: ValidationJobStarter
@@ -168,6 +234,27 @@ class FallbackOddsSourceSyncJobStarter:
             )
 
 
+@dataclass(slots=True)
+class FallbackLeisuSessionRefreshJobStarter:
+    primary: LeisuSessionRefreshJobStarter
+    fallback: LeisuSessionRefreshJobStarter
+
+    async def start_leisu_session_refresh_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> LeisuSessionRefreshJobStartResult:
+        try:
+            return leisu_session_refresh_job_start_result(
+                await self.primary.start_leisu_session_refresh_job(job_id, payload)
+            )
+        except Exception as exc:
+            logger.warning("ARQ enqueue failed for Leisu session refresh job %s; falling back to thread: %s", job_id, exc)
+            return leisu_session_refresh_job_start_result(
+                await self.fallback.start_leisu_session_refresh_job(job_id, _payload_with_job_id(payload, job_id))
+            )
+
+
 def build_validation_job_starter(*, thread_starter: Callable[[str], None]) -> ValidationJobStarter:
     settings = load_task_queue_settings()
     thread = ThreadValidationJobStarter(thread_starter=thread_starter)
@@ -190,6 +277,20 @@ def build_odds_source_sync_job_starter(
     arq_starter = ArqOddsSourceSyncJobStarter(settings=settings)
     if settings.fallback_to_thread:
         return FallbackOddsSourceSyncJobStarter(primary=arq_starter, fallback=thread)
+    return arq_starter
+
+
+def build_leisu_session_refresh_job_starter(
+    *,
+    thread_starter: Callable[[str, dict[str, Any]], None],
+) -> LeisuSessionRefreshJobStarter:
+    settings = load_task_queue_settings()
+    thread = ThreadLeisuSessionRefreshJobStarter(thread_starter=thread_starter)
+    if settings.backend == "thread":
+        return thread
+    arq_starter = ArqLeisuSessionRefreshJobStarter(settings=settings)
+    if settings.fallback_to_thread:
+        return FallbackLeisuSessionRefreshJobStarter(primary=arq_starter, fallback=thread)
     return arq_starter
 
 

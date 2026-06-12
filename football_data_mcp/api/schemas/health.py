@@ -15,4 +15,5 @@ class HealthResponse(BaseModel):
     last_learning_cycle_error: str | None
     auto_learning_enabled: bool
     task_queue: dict[str, Any]
+    odds_source_status: dict[str, Any]
     generated_at_utc: str

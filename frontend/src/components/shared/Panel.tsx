@@ -18,11 +18,11 @@ export function Panel({
   dense?: boolean;
 }) {
   return (
-    <section className={`rounded-xl border border-ink-200 dark:border-ink-700 bg-white dark:bg-ink-800 shadow-sm overflow-hidden ${className}`}>
+    <section className={`surface-panel overflow-hidden ${className}`}>
       {title && (
-        <div className={`flex items-center gap-2 ${dense ? "px-3 py-2" : "px-4 py-3"} border-b border-ink-100 dark:border-ink-700/50`}>
-          {icon && <Icon name={icon} size={14} className="text-ink-500 dark:text-ink-400" />}
-          <span className="font-semibold text-ink-900 dark:text-white text-sm flex-1">{title}</span>
+        <div className={`flex items-center gap-2 ${dense ? "px-3 pt-3 pb-1" : "px-4 pt-4 pb-1"}`}>
+          {icon && <Icon name={icon} size={14} className="text-ink-400 dark:text-ink-500" />}
+          <span className="text-sm font-semibold text-ink-950 dark:text-white flex-1">{title}</span>
           {badge && <Badge variant="neutral">{badge}</Badge>}
         </div>
       )}
@@ -33,9 +33,9 @@ export function Panel({
 
 export function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div>
-      <div className="text-xs text-slate-500 dark:text-slate-400 mb-0.5">{label}</div>
-      <div className="text-sm font-semibold text-slate-900 dark:text-white tabular-nums">{value}</div>
+    <div className="min-w-0">
+      <div className="metric-label mb-1 truncate">{label}</div>
+      <div className="metric-value truncate">{value}</div>
     </div>
   );
 }

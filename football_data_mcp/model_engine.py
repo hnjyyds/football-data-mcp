@@ -656,6 +656,66 @@ def _baseline_projection_summary(
     }
 
 
+def _market_input_summary(
+    *,
+    moneyline_target: dict[str, float],
+    total_line: float | None,
+    over_target: float | None,
+    asian_line: float | None,
+    asian_target: dict[str, float],
+) -> dict[str, Any]:
+    return {
+        "moneyline_1x2": {
+            "available": bool(moneyline_target),
+            "normalized_probability": {key: round_metric(value, 6) for key, value in moneyline_target.items()},
+        },
+        "over_under": {
+            "available": bool(total_line is not None and over_target is not None),
+            "line": round_metric(total_line, 4),
+            "over_probability": round_metric(over_target, 6),
+        },
+        "asian_handicap": {
+            "available": bool(asian_line is not None and asian_target),
+            "line": round_metric(asian_line, 4),
+            "normalized_probability": {key: round_metric(value, 6) for key, value in asian_target.items()},
+        },
+        "rule": "Use clean current market probabilities as the main anchor; historical/team features only supply bounded priors.",
+    }
+
+
+def _market_implied_goal_expectancy_summary(
+    *,
+    home_xg: float,
+    away_xg: float,
+    moneyline_target: dict[str, float],
+    total_line: float | None,
+    over_target: float | None,
+    asian_line: float | None,
+    asian_target: dict[str, float],
+    loss: float,
+) -> dict[str, Any]:
+    source_markets = []
+    if moneyline_target:
+        source_markets.append("moneyline_1x2")
+    if total_line is not None and over_target is not None:
+        source_markets.append("over_under")
+    if asian_line is not None and asian_target:
+        source_markets.append("asian_handicap")
+    return {
+        "available": True,
+        "method": "market_probability_grid_inversion_v1",
+        "home": round_metric(home_xg, 3),
+        "away": round_metric(away_xg, 3),
+        "total": round_metric(home_xg + away_xg, 3),
+        "source_markets": source_markets,
+        "calibration_loss": round_metric(loss),
+        "inference": (
+            "Expected goals are inferred from current de-vig market probabilities using a bounded Poisson grid search, "
+            "which is the repository's penaltyblog-style market anchor."
+        ),
+    }
+
+
 def _penaltyblog_available() -> bool:
     return importlib.util.find_spec("penaltyblog") is not None
 
@@ -880,10 +940,30 @@ def build_model_projection(
             "home": round_metric(home_xg, 3),
             "away": round_metric(away_xg, 3),
             "total": round_metric(home_xg + away_xg, 3),
+            "market_implied_home": round_metric(baseline_home_xg, 3),
+            "market_implied_away": round_metric(baseline_away_xg, 3),
+            "market_implied_total": round_metric(baseline_home_xg + baseline_away_xg, 3),
             "form_total_hint": form_total,
             "strength_goal_diff_hint": round_metric(strength_goal_diff, 4),
             "strength_goal_diff_loss_weight": ROLLING_ELO_GOAL_DIFF_LOSS_WEIGHT if strength_goal_diff is not None else None,
         },
+        "market_inputs": _market_input_summary(
+            moneyline_target=moneyline_target,
+            total_line=total_line,
+            over_target=over_target,
+            asian_line=asian_line,
+            asian_target=asian_target,
+        ),
+        "market_implied_goal_expectancy": _market_implied_goal_expectancy_summary(
+            home_xg=baseline_home_xg,
+            away_xg=baseline_away_xg,
+            moneyline_target=moneyline_target,
+            total_line=total_line,
+            over_target=over_target,
+            asian_line=asian_line,
+            asian_target=asian_target,
+            loss=baseline_loss,
+        ),
         "dixon_coles": {
             "rho": round_metric(dixon_coles_rho, 4),
             "rho_source": rho_source,
@@ -927,9 +1007,10 @@ def build_model_projection(
             "limits": limits,
         },
         "probability_source": "MCP Dixon-Coles adjusted scoreline distribution",
+        "probability_pipeline": "current_market_probability -> implied_goal_expectancy -> dixon_coles_scoreline_distribution",
         "penaltyblog_adapter": {
             "available": _penaltyblog_available(),
             "used": False,
-            "reason": "internal_grid_used_until_historical_fit_adapter_is_added",
+            "reason": "repository now exposes the same market-implied goal-expectancy idea directly through the internal grid inversion",
         },
     }

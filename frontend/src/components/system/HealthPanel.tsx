@@ -84,6 +84,8 @@ const ODDS_STATUS_LABELS: Record<string, string> = {
   error: "抓取失败",
   empty: "无快照",
   no_snapshots: "无快照",
+  session_ready: "会话就绪",
+  needs_auth: "待人工验证",
 };
 
 function oddsSourceDetail(key: string, entry: OddsSourceStatusEntry): string {
@@ -113,6 +115,41 @@ function oddsSourceDetail(key: string, entry: OddsSourceStatusEntry): string {
   }
   const freshnessText = entry.freshness_status ? (ODDS_STATUS_LABELS[entry.freshness_status] ?? entry.freshness_status) : "";
   return freshnessText ? `${snapshotText} · ${syncStatus} · ${freshnessText}` : `${snapshotText} · ${syncStatus}`;
+}
+
+function runtimeSupportDetail(entry: OddsSourceStatusEntry): string | undefined {
+  const runtime = entry.runtime_support;
+  if (!runtime) return undefined;
+  const engine = runtime.engine === "crawlee_playwright" ? "Crawlee 路径" : runtime.engine || "运行时";
+  const status = runtime.supported ? "可切换" : "未就绪";
+  const message = typeof runtime.message === "string" ? runtime.message : "";
+  return message ? `${engine} · ${status} · ${message}` : `${engine} · ${status}`;
+}
+
+function healthCardClass(status: string | null | undefined): string {
+  if (["ok", "fresh", "live", "succeeded", "success", "snapshot_available", "ready"].includes(status ?? "")) {
+    return "border-emerald-500/[0.16] bg-white/[0.66] dark:border-emerald-500/20 dark:bg-white/[0.035]";
+  }
+  if (
+    [
+      "stale",
+      "degraded",
+      "partial",
+      "queued",
+      "running",
+      "empty",
+      "no_snapshots",
+      "retryable",
+      "needs_input",
+      "needs_access",
+      "needs_config",
+      "derived_fallback",
+      "stale_derived",
+    ].includes(status ?? "")
+  ) {
+    return "border-amber-500/20 bg-white/[0.66] dark:border-amber-500/25 dark:bg-white/[0.035]";
+  }
+  return "border-red-500/20 bg-white/[0.66] dark:border-red-500/25 dark:bg-white/[0.035]";
 }
 
 export function HealthPanel({ snapshot }: { snapshot: DashboardSnapshot }) {
@@ -145,11 +182,14 @@ export function HealthPanel({ snapshot }: { snapshot: DashboardSnapshot }) {
   if (!sources.length && !oddsSources.length) return null;
 
   return (
-    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm p-4">
+    <div className="surface-panel p-4">
       <div className="flex items-center justify-between gap-3 mb-3">
-        <div className="font-semibold text-slate-900 dark:text-white text-sm">数据源健康</div>
+        <div>
+          <div className="section-kicker">Source Health</div>
+          <div className="mt-1 text-sm font-semibold text-ink-950 dark:text-white">数据源健康</div>
+        </div>
         {oddsStatus?.policy?.fallback_rule && (
-          <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+          <div className="text-[11px] text-ink-500 dark:text-ink-400 truncate">
             雷速不稳时启用赔率快照补位
           </div>
         )}
@@ -157,11 +197,11 @@ export function HealthPanel({ snapshot }: { snapshot: DashboardSnapshot }) {
       {sources.length > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {sources.map((s) => (
-            <div key={s.name} className="flex items-start gap-2 p-2 rounded-lg bg-slate-50 dark:bg-slate-700/40">
+            <div key={s.name} className={`flex items-start gap-2 rounded-xl border p-2.5 ${healthCardClass(s.status)}`}>
               <StatusIcon status={s.status} />
               <div>
-                <div className="text-xs font-medium text-slate-800 dark:text-slate-200">{s.name}</div>
-                {s.detail && <div className="text-xs text-slate-500 dark:text-slate-400">{s.detail}</div>}
+                <div className="text-xs font-semibold text-ink-800 dark:text-ink-200">{s.name}</div>
+                {s.detail && <div className="text-xs text-ink-500 dark:text-ink-400">{s.detail}</div>}
               </div>
             </div>
           ))}
@@ -170,9 +210,9 @@ export function HealthPanel({ snapshot }: { snapshot: DashboardSnapshot }) {
       {oddsSources.length > 0 && (
         <div className="mt-3">
           <div className="flex items-center justify-between gap-3 mb-2">
-            <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">赔率源闭环</div>
+            <div className="text-xs font-semibold text-ink-700 dark:text-ink-300">赔率源闭环</div>
             {closure && (
-              <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+              <div className="flex items-center gap-1.5 text-[11px] text-ink-500 dark:text-ink-400">
                 <StatusIcon status={closure.production_ready ? "ok" : "stale"} />
                 <span>
                   当前：{activeOddsSource} · {closure.production_ready ? "生产可用" : "仅观察/兜底"}
@@ -181,19 +221,29 @@ export function HealthPanel({ snapshot }: { snapshot: DashboardSnapshot }) {
             )}
           </div>
           {closure?.reason && (
-            <div className="mb-2 rounded-lg border border-amber-100 bg-amber-50/70 px-2.5 py-2 text-[11px] leading-snug text-slate-600 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-slate-300">
+            <div className="mb-2 rounded-xl border border-amber-500/20 bg-amber-50/60 px-2.5 py-2 text-[11px] leading-snug text-amber-900 dark:bg-amber-950/[0.18] dark:text-amber-100">
               {closure.reason}
             </div>
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
             {oddsSources.map((s) => (
-              <div key={s.name} className="flex items-start gap-2 p-2 rounded-lg bg-emerald-50/70 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/40">
+              <div key={s.name} className={`flex items-start gap-2 rounded-xl border p-2.5 ${healthCardClass(s.status)}`}>
                 <StatusIcon status={s.status} />
                 <div>
-                  <div className="text-xs font-medium text-slate-800 dark:text-slate-200">{s.name}</div>
-                  {s.detail && <div className="text-xs text-slate-500 dark:text-slate-400">{s.detail}</div>}
+                  <div className="text-xs font-semibold text-ink-800 dark:text-ink-200">{s.name}</div>
+                  {s.detail && <div className="text-xs text-ink-500 dark:text-ink-400">{s.detail}</div>}
+                  {s.name === "雷速赔率" && oddsStatus?.sources?.leisu?.runtime_support && (
+                    <div className="mt-1 text-[11px] leading-snug text-ink-500 dark:text-ink-400">
+                      {runtimeSupportDetail(oddsStatus.sources.leisu)}
+                    </div>
+                  )}
+                  {s.name === "雷速赔率" && oddsStatus?.sources?.leisu?.runtime_support?.recommended_entrypoint && (
+                    <div className="mt-1 text-[11px] leading-snug text-ink-500 dark:text-ink-400 break-all">
+                      命令：{oddsStatus.sources.leisu.runtime_support.recommended_entrypoint}
+                    </div>
+                  )}
                   {s.nextAction && (
-                    <div className="mt-1 text-[11px] leading-snug text-slate-500 dark:text-slate-400 line-clamp-2">
+                    <div className="mt-1 text-[11px] leading-snug text-ink-500 dark:text-ink-400 line-clamp-2">
                       下一步：{s.nextAction}
                     </div>
                   )}

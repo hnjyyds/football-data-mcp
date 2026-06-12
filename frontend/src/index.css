@@ -3,13 +3,60 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 9%;
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 45%;
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+    --accent: 0 0% 9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 86% 97%;
+    --ring: 0 0% 9%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 0 0% 4%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 4%;
+    --card-foreground: 0 0% 98%;
+    --muted: 0 0% 10%;
+    --muted-foreground: 0 0% 64%;
+    --border: 0 0% 16%;
+    --input: 0 0% 16%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --accent: 0 0% 98%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 63% 40%;
+    --destructive-foreground: 0 86% 97%;
+    --ring: 0 0% 83%;
+  }
+
   html {
     font-feature-settings: "cv11", "ss01", "ss03";
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
   body {
-    @apply font-sans text-ink-900 dark:text-ink-100 antialiased;
+    @apply font-sans text-ink-900 dark:text-ink-100 antialiased bg-[hsl(var(--background))];
+    min-width: 320px;
+  }
+  .dark body {
+    background-image: none;
+  }
+  ::selection {
+    @apply bg-brand-200 text-brand-950 dark:bg-brand-500/40 dark:text-brand-50;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-400 ring-offset-2 ring-offset-white dark:ring-brand-300 dark:ring-offset-ink-950;
   }
   .tabular-nums {
     font-variant-numeric: tabular-nums;
@@ -27,10 +74,43 @@
     background-size: 200% 100%;
   }
   .card {
-    @apply rounded-xl border border-ink-200 dark:border-ink-800 bg-white dark:bg-ink-900 shadow-sm;
+    @apply rounded-[var(--radius)] border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--card-foreground))];
+  }
+  .surface-panel {
+    @apply rounded-[var(--radius)] border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--card-foreground))];
+  }
+  .surface-muted {
+    @apply rounded-[calc(var(--radius)-2px)] border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/55 text-[hsl(var(--card-foreground))];
+  }
+  .clean-card {
+    @apply rounded-[calc(var(--radius)-2px)] border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--card-foreground))];
+  }
+  .section-kicker {
+    @apply text-[10px] font-medium uppercase tracking-[0.14em] text-[hsl(var(--muted-foreground))];
+  }
+  .metric-label {
+    @apply text-[11px] font-medium text-[hsl(var(--muted-foreground))];
+  }
+  .metric-value {
+    @apply text-base font-semibold tracking-tight text-[hsl(var(--foreground))] tabular-nums;
+  }
+  .shadcn-button {
+    @apply focusable-control inline-flex min-h-9 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-50;
+  }
+  .shadcn-button-secondary {
+    @apply focusable-control inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-2 text-sm font-medium text-[hsl(var(--foreground))] transition-colors hover:bg-[hsl(var(--muted))] disabled:pointer-events-none disabled:opacity-50;
+  }
+  .shadcn-button-ghost {
+    @apply focusable-control inline-flex min-h-9 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--foreground))] disabled:pointer-events-none disabled:opacity-50;
+  }
+  .shadcn-chip {
+    @apply inline-flex items-center rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/55 px-2 py-1 text-xs font-medium text-[hsl(var(--muted-foreground))];
+  }
+  .focusable-control {
+    @apply transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-brand-300 dark:focus-visible:ring-offset-ink-950;
   }
   .live-dot {
-    @apply inline-block w-1.5 h-1.5 rounded-full bg-success-500 animate-pulse-glow;
+    @apply inline-block w-1.5 h-1.5 rounded-full bg-[hsl(var(--foreground))];
   }
 }
 
@@ -46,4 +126,15 @@
 }
 ::-webkit-scrollbar-thumb:hover {
   @apply bg-ink-400 dark:bg-ink-600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }

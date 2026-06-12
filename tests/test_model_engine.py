@@ -80,7 +80,12 @@ def test_model_engine_builds_scoreline_distribution_and_market_edges():
     assert projection["model_quality"]["fallback_used"] is False
     assert projection["dixon_coles"]["low_score_adjustment"] is True
     assert projection["independent_poisson_baseline"]["method"] == "market_anchored_independent_poisson_baseline_v1"
+    assert projection["market_implied_goal_expectancy"]["available"] is True
+    assert projection["market_implied_goal_expectancy"]["method"] == "market_probability_grid_inversion_v1"
+    assert projection["market_inputs"]["moneyline_1x2"]["available"] is True
+    assert projection["probability_pipeline"] == "current_market_probability -> implied_goal_expectancy -> dixon_coles_scoreline_distribution"
     assert projection["expected_goals"]["home"] > projection["expected_goals"]["away"]
+    assert projection["expected_goals"]["market_implied_home"] is not None
     assert abs(projection["model_quality"]["scoreline_probability_sum"] - 1.0) < 0.0001
     assert projection["derived_probabilities"]["1x2"]["home"] > projection["derived_probabilities"]["1x2"]["away"]
     assert projection["derived_probabilities"]["over_under"]["line"] == 2.5

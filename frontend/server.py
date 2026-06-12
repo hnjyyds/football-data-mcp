@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import os
+import ssl
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 BACKEND_URL = os.getenv("DASHBOARD_BACKEND_URL", "http://football-data-mcp:8910").rstrip("/")
 ROOT = Path(__file__).resolve().parent / "dist"
+IMAGE_PROXY_ALLOWED_HOSTS = {"sd.qunliao.info"}
+IMAGE_PROXY_MAX_BYTES = 2_000_000
 
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
@@ -115,6 +118,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path == "/healthz":
             self.serve_healthz()
             return
+        if path == "/image-proxy":
+            self.serve_image_proxy(write_body=True)
+            return
         if path.startswith("/api/"):
             self.proxy_api()
             return
@@ -124,6 +130,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         path = request_path(self.path)
         if path == "/healthz":
             self.serve_healthz(write_body=False)
+            return
+        if path == "/image-proxy":
+            self.serve_image_proxy(write_body=False)
             return
         if path.startswith("/api/"):
             self.proxy_api()
@@ -165,6 +174,44 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         if write_body:
             self.wfile.write(body)
+
+    def serve_image_proxy(self, *, write_body: bool = True) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        raw_url = (query.get("url") or [""])[0]
+        parsed = urlparse(raw_url)
+        if parsed.scheme != "https" or parsed.hostname not in IMAGE_PROXY_ALLOWED_HOSTS:
+            self.send_error(404, "Not found")
+            return
+
+        request = Request(
+            raw_url,
+            headers={
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://www.dongqiudi.com/",
+            },
+        )
+        try:
+            context = ssl._create_unverified_context()
+            with urlopen(request, timeout=8, context=context) as response:
+                content_type = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip().lower()
+                if not content_type.startswith("image/"):
+                    self.send_error(404, "Not found")
+                    return
+                body = response.read(IMAGE_PROXY_MAX_BYTES + 1)
+                if len(body) > IMAGE_PROXY_MAX_BYTES:
+                    self.send_error(413, "Image too large")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self._send_security_headers()
+                super().end_headers()
+                if write_body:
+                    self.wfile.write(body)
+        except Exception:
+            self.send_error(404, "Not found")
 
     def _maybe_cors(self) -> None:
         origin = self.headers.get("Origin", "")

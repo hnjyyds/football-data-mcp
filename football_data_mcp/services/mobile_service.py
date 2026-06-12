@@ -5,7 +5,7 @@ import copy
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable, cast
 
 from football_data_mcp import learning_store, sources, validation_store
 from football_data_mcp.services.data_source_service import DataSourceService
@@ -24,6 +24,8 @@ _SETTLEMENT_REFRESH_TIMEOUT_SECONDS = 12.0
 _SETTLEMENT_REFRESH_LOCK = asyncio.Lock()
 _LAST_SETTLEMENT_REFRESH_AT = 0.0
 _LAST_SETTLEMENT_REFRESH: dict[str, Any] | None = None
+_RecommendationLister = Callable[..., list[dict[str, Any]]]
+_SettlementRefresher = Callable[..., Awaitable[dict[str, Any]]]
 
 
 class MobileAnalysisService:
@@ -268,7 +270,7 @@ class MobileAnalysisService:
         if not callable(lister):
             records: list[dict[str, Any]] = []
         else:
-            records = lister(db_path=db_path, limit=bounded_limit)
+            records = cast(_RecommendationLister, lister)(db_path=db_path, limit=bounded_limit)
         performance = _mobile_performance(records)
         performance.update({
             "status": "ok",
@@ -282,7 +284,7 @@ class MobileAnalysisService:
         lister = getattr(self._learning_store, "list_recommendation_records", None)
         if not callable(lister):
             return {"status": "unavailable", "message": "学习记录库不可用。"}
-        open_records = lister(db_path=db_path, status="open", limit=1)
+        open_records = cast(_RecommendationLister, lister)(db_path=db_path, status="open", limit=1)
         if not open_records:
             return {"status": "skipped", "message": "没有待结算推荐。"}
 
@@ -306,9 +308,10 @@ class MobileAnalysisService:
                     "cacheHit": True,
                     "message": "赛果刷新刚运行过，本次直接复用结果。",
                 }
+            refresh: dict[str, Any]
             try:
                 result = await asyncio.wait_for(
-                    refresher(days_back=7, days_forward=0, db_path=db_path),
+                    cast(_SettlementRefresher, refresher)(days_back=7, days_forward=0, db_path=db_path),
                     timeout=_SETTLEMENT_REFRESH_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
@@ -879,12 +882,12 @@ def _odds_movement(best_candidate: dict[str, Any], data_bundle: dict[str, Any]) 
         points.append(_movement_point(label, row))
     if not points:
         points.append({
-            "label": "赔率走势",
+            "label": "关键赔率锚点",
             "opening": "暂无",
             "current": "暂无",
             "change": "等待快照",
             "direction": "neutral",
-            "note": "后端还没有足够的开盘到当前快照，当前只按最新赔率计算。",
+            "note": "后端还没有足够的关键快照，当前只按最新赔率计算。",
         })
     signal = str(best_candidate.get("market_movement_signal") or primary.get("direction_label") or "等待更多快照")
     risk_note = str(best_candidate.get("odds_research_note") or "").strip()
@@ -896,10 +899,10 @@ def _odds_movement(best_candidate: dict[str, Any], data_bundle: dict[str, Any]) 
     return {
         "openingTime": _compact_time(primary.get("first_observed_at_utc")) or "早盘",
         "currentTime": _compact_time(primary.get("latest_observed_at_utc")) or "当前",
-        "summary": str(best_candidate.get("market_movement_note") or "赔率走势用于小幅校准模型概率，但当前赔率仍决定价值。"),
+        "summary": str(best_candidate.get("market_movement_note") or "系统只读取少量关键赔率锚点做轻量校准，当前赔率仍决定价值。"),
         "marketSignal": _signal_label(signal),
         "points": points,
-        "riskNote": risk_note or "赔率变化是强信号，但不能单独决定结论；系统会把它和当前价格、比分模型、风险标记一起看。",
+        "riskNote": risk_note or "系统优先保留开盘、决策、最新、收盘等关键价位，不依赖完整盘口曲线；这些锚点只能辅助判断，不能单独决定结论。",
     }
 
 
@@ -978,7 +981,7 @@ def _data_sources(
     rows = [
         _source_row("赛程", "公开赛程源", "已确认", "高", "参与计算", blocks.get("schedule"), "用于确认比赛双方和开球时间。"),
         _source_row("赔率/盘口", "多源赔率", "当前快照", "高", "参与计算", blocks.get("moneyline_1x2") or blocks.get("asian_handicap"), "用于换算基础概率和计算当前价值。"),
-        _source_row("赔率走势", "market_snapshots", "历史快照", "中等", "参与计算" if movement.get("status") == "available" else "仅作参考", movement.get("status") == "available", "用于小幅校准概率，并提示价格是否已经变紧。"),
+        _source_row("关键赔率锚点", "market_snapshots", "稀疏快照", "中等", "参与计算" if movement.get("status") == "available" else "仅作参考", movement.get("status") == "available", "只保留开盘、决策、最新、收盘等关键价位，用于轻量校准和 CLV 复盘。"),
         _source_row("比分模型", "Dixon-Coles/Poisson", "本次计算", "中等", "参与计算", blocks.get("model_engine"), "把赔率、大小球和亚盘转换成比分分布。"),
         _source_row("阵容/新闻", "公开上下文", "赛前更新", "偏低", "仅作参考", blocks.get("lineup"), "未确认信号默认只提示，不直接改动结论。"),
     ]

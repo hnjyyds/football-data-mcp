@@ -1305,8 +1305,8 @@ describe("dashboard model", () => {
           {
             key: "closing_line_value",
             label: "CLV 收盘价",
-            status: "blocked",
-            title: "收盘价样本不足",
+            status: "warning",
+            title: "收盘价样本观察中",
             detail: "已对齐 8/30 条收盘价；平均 CLV -0.3%。",
             current: 8,
             target: 20,
@@ -1335,7 +1335,7 @@ describe("dashboard model", () => {
     ]);
     expect(view.productionOps.blockerRows.map((item) => `${item.label}:${item.title}:${item.statusText}`)).toEqual([
       "验证收益:验证收益为负:阻断",
-      "CLV 收盘价:收盘价样本不足:阻断",
+      "CLV 收盘价:收盘价样本观察中:注意",
       "发布评估:推荐发布关闭:阻断"
     ]);
     expect(view.productionOps.workflowRows.map((item) => `${item.label}:${item.statusText}:${item.detail}`)).toEqual([
@@ -1345,7 +1345,7 @@ describe("dashboard model", () => {
       "观察样本:观察:上一轮新增 0 条观察样本。",
       "赛果结算:通过:上一轮结算 1 条推荐和 2 条影子样本。",
       "实时校准:通过:实时校准中 99。",
-      "CLV 追踪:阻断:8/30 条可计算收盘价价值。",
+      "CLV 追踪:注意:8/30 条可计算收盘价价值。",
       "发布门禁:阻断:推荐发布保持关闭。"
     ]);
     expect(JSON.stringify(view.productionOps)).not.toMatch(/paper_validation|outside_near_kickoff_window|formal|blocked|重训|toy/);
@@ -2157,7 +2157,7 @@ describe("dashboard model", () => {
       "赛前窗口:候选不在分析窗口:注意",
       "台账覆盖:部分预测缺少赔率快照:注意",
       "赛事情报:赛事情报待补齐:注意",
-      "收盘价追踪:收盘价样本不足:阻断"
+      "收盘价追踪:收盘价样本观察中:注意"
     ]);
     expect(view.dataSourceHealth.issueText).toBe("雷速访问受限；需要雷速登录凭据或代理");
     expect(JSON.stringify(view.dataSourceHealth)).not.toMatch(
@@ -2229,6 +2229,37 @@ describe("dashboard model", () => {
       "收盘价追踪:收盘价样本可用:通过"
     ]);
     expect(view.dataSourceHealth.issueText).toBe("2 项需要关注");
+  });
+
+  it("treats historical snapshot gaps as non-blocking when no open samples remain", () => {
+    const settledOnlySnapshot = {
+      ...snapshot,
+      recommendation_opportunity: {
+        ...snapshot.recommendation_opportunity!,
+        current_open_count: 0,
+      },
+      prediction_kpis: {
+        ...snapshot.prediction_kpis!,
+        open_count: 0,
+      },
+      prediction_ledger: (snapshot.prediction_ledger || []).map((row) => ({
+        ...row,
+        settlement_status: "settled",
+      })),
+      clv_tracking: {
+        ...snapshot.clv_tracking!,
+        available_count: 8,
+      },
+    } as DashboardSnapshot;
+
+    const view = buildDashboardView(settledOnlySnapshot);
+
+    expect(view.dataSourceHealth.checkRows.map((row) => `${row.label}:${row.title}:${row.statusText}`)).toContain(
+      "台账覆盖:赔率覆盖可追溯:通过"
+    );
+    expect(view.dataSourceHealth.checkRows.map((row) => `${row.label}:${row.title}:${row.statusText}`)).toContain(
+      "收盘价追踪:历史 CLV 缺口不阻断当前展示:通过"
+    );
   });
 
   it("summarizes match context coverage without raw status codes", () => {
@@ -3111,9 +3142,10 @@ describe("dashboard model", () => {
       }
     });
 
-    expect(view.marketMovement.title).toBe("盘口变化已纳入分析");
+    expect(view.marketMovement.title).toBe("关键赔率锚点");
     expect(view.marketMovement.rows[0].directionText).toBe("升温");
     expect(view.marketMovement.rows[0].probabilityText).toBe("+3.9%");
+    expect(view.marketMovement.rows[0].anchorText).toContain("开盘");
     expect(view.candidateRows[0].movementText).toContain("盘口走势");
   });
 
@@ -3368,9 +3400,9 @@ describe("dashboard model", () => {
               key: "require_market_snapshots:missing_market_snapshots",
               type: "require_market_snapshots",
               status: "warning",
-              title: "正式推荐前必须补齐赔率快照",
-              detail: "缺少多公司同盘口快照时，只允许纸面预测和回测。",
-              action: "require_snapshot_before_formal_recommendation",
+              title: "继续补赔率快照",
+              detail: "缺少多公司同盘口快照会降低复盘与 CLV 质量，但不再单独阻断正式推荐。",
+              action: "continue_collect_sparse_snapshots",
               target: "market_snapshot_coverage",
               target_key: "missing_market_snapshots",
               sample_count: 6,

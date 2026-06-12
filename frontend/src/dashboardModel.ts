@@ -1400,16 +1400,24 @@ function backtestCurveView(snapshot: DashboardSnapshot): DashboardView["backtest
   const xStep = points.length > 1 ? 100 / (points.length - 1) : 0;
   const chartPoints = points.map((point, index) => {
     const cumulative = numeric(point.cumulative_profit) ?? 0;
+    const cumulativeHitRate = numeric(point.index) && numeric(point.hit) !== null
+      ? (points.slice(0, index + 1).reduce((total, item) => total + (numeric(item.hit) ?? 0), 0) / (index + 1))
+      : null;
     const x = points.length > 1 ? index * xStep : 50;
     const y = 100 - ((cumulative - minValue) / range) * 100;
     return {
       index: point.index,
+      atUtc: String(point.at_utc || ""),
       matchup: point.matchup || "比赛",
       typeText: point.prediction_type_label || "预测",
       resultText: point.hit ? "命中" : "未命中",
+      hitValue: numeric(point.hit) ?? 0,
       cumulativeValue: Number(cumulative.toFixed(4)),
       cumulativeText: formatSignedDecimal(point.cumulative_profit, 2),
+      cumulativeHitRateValue: cumulativeHitRate,
+      cumulativeHitRateText: formatPercent(cumulativeHitRate),
       drawdownText: formatSignedDecimal(point.drawdown_units, 2),
+      rollingHitValue: numeric(point.rolling_hit_rate),
       rollingHitText: formatPercent(point.rolling_hit_rate),
       profitValue: numeric(point.profit_units) ?? 0,
       profitText: formatSignedDecimal(point.profit_units, 2),
@@ -1768,6 +1776,7 @@ function modelFailureRuleActionText(action: string): string {
   if (action === "reduce_sampling_weight") return "降低采样权重";
   if (action === "tighten_market_thresholds") return "收紧市场门槛";
   if (action === "require_snapshot_before_formal_recommendation") return "先补赔率快照";
+  if (action === "continue_collect_sparse_snapshots") return "继续补关键快照";
   if (action === "keep_market_probability_guardrail") return "保留市场基线";
   if (action === "collect_more_samples") return "继续补样本";
   return customerCopy(action || "继续验证");
@@ -2329,7 +2338,7 @@ function productionOpsView(snapshot: DashboardSnapshot): DashboardView["producti
     productionWorkflowRow(
       "clv",
       "CLV 追踪",
-      clvReady ? "ok" : "blocked",
+      clvReady ? "ok" : "warning",
       `${clvAvailable}/${clvTracked} 条可计算收盘价价值。`,
       formatSignedPercent(summary.avg_clv_return ?? snapshot.clv_tracking?.avg_clv_return ?? null)
     ),
@@ -2527,8 +2536,17 @@ function dataSourceHealthView(snapshot: DashboardSnapshot): DashboardView["dataS
   const ledgerCount = snapshot.prediction_ledger?.length || 0;
   const coveredCount = (snapshot.prediction_ledger || []).filter((row) => row.has_odds_snapshot || (row.odds_snapshot_count ?? 0) > 0).length;
   const multiBookmakerCount = (snapshot.prediction_ledger || []).filter((row) => (row.odds_bookmaker_count ?? 0) >= 2).length;
+  const currentOpenCount = snapshot.recommendation_opportunity?.current_open_count ?? 0;
   const ledgerRatio = ledgerCount ? coveredCount / ledgerCount : null;
-  const ledgerStatus = ledgerCount === 0 ? "info" : coveredCount === ledgerCount ? "ok" : coveredCount > 0 ? "warning" : "blocked";
+  const ledgerStatus = currentOpenCount === 0
+    ? "ok"
+    : ledgerCount === 0
+      ? "info"
+      : coveredCount === ledgerCount
+        ? "ok"
+        : coveredCount > 0
+          ? "warning"
+          : "blocked";
   const skippedCount = numberText(reanalysis.skipped_count);
   const windowStatus = skippedCount > 0 ? "warning" : "ok";
   const contextCoverage = snapshot.context_coverage;
@@ -2541,7 +2559,13 @@ function dataSourceHealthView(snapshot: DashboardSnapshot): DashboardView["dataS
   const clvReadiness = objectValue(objectValue(clv).readiness);
   const clvAvailable = numeric(clvReadiness.current) ?? clv?.available_count ?? 0;
   const clvTarget = numeric(clvReadiness.target) ?? 30;
-  const clvStatus = clvAvailable >= clvTarget ? "ok" : clvAvailable > 0 ? "blocked" : "blocked";
+  const clvStatus = currentOpenCount === 0
+    ? "ok"
+    : clvAvailable >= clvTarget
+      ? "ok"
+      : clvAvailable > 0
+        ? "warning"
+        : "warning";
   const latestSnapshotText = freshnessText(marketSummary?.latest_fetched_at_utc, snapshot.generated_at_utc);
   const syncAttemptText = freshnessText(marketSync.at_utc, snapshot.generated_at_utc);
   const syncCaptionText = syncCaption(marketSync);
@@ -2579,6 +2603,8 @@ function dataSourceHealthView(snapshot: DashboardSnapshot): DashboardView["dataS
       ledgerStatus === "ok" || (syncSeverity === "ok" && coveredCount > 0) ? "赔率覆盖可追溯" : ledgerCount === 0 ? "等待预测台账" : "部分预测缺少赔率快照",
       ledgerCount === 0
         ? "当前暂无预测台账，无法判断赔率覆盖。"
+        : currentOpenCount === 0
+          ? `当前没有待跟踪的 open 样本；历史台账 ${coveredCount}/${ledgerCount} 场已有赔率快照，旧样本缺口只影响历史复盘，不再视为当前阻断。`
         : `台账 ${coveredCount}/${ledgerCount} 场有赔率快照，其中 ${multiBookmakerCount} 场达到多公司覆盖。`,
       `${coveredCount}/${ledgerCount}`,
       ledgerRatio
@@ -2596,8 +2622,10 @@ function dataSourceHealthView(snapshot: DashboardSnapshot): DashboardView["dataS
       "clv_tracking",
       "收盘价追踪",
       clvStatus,
-      clvStatus === "ok" ? "收盘价样本可用" : "收盘价样本不足",
-      `当前 ${clvAvailable}/${clvTarget} 条可计算收盘价价值，用于判断是否跑赢收盘线。`,
+      currentOpenCount === 0 ? "历史 CLV 缺口不阻断当前展示" : clvStatus === "ok" ? "收盘价样本可用" : "收盘价样本观察中",
+      currentOpenCount === 0
+        ? `当前没有待跟踪的 open 样本；历史可计算 CLV ${clvAvailable}/${clvTarget} 条，剩余缺口主要来自旧记录当时未保存收盘前锚点，不再视为当前展示问题。`
+        : `当前 ${clvAvailable}/${clvTarget} 条可计算收盘价价值；继续用于复盘和 CLV 审计，不再单独阻断推荐发布。`,
       `${clvAvailable}/${clvTarget}`,
       clvTarget ? clvAvailable / clvTarget : null
     )
@@ -3568,46 +3596,68 @@ function movementTone(direction: unknown): KpiCard["tone"] {
 }
 
 function movementStatusText(status: string): string {
-  if (status === "available") return "已捕捉走势";
-  if (status === "insufficient_history") return "等待更多时间点";
-  if (status === "unavailable") return "暂无走势";
+  if (status === "available") return "关键快照可用";
+  if (status === "insufficient_history") return "关键快照不足";
+  if (status === "unavailable") return "暂无关键快照";
   return status || "状态未知";
 }
 
 function marketMovementRows(movement: Record<string, unknown>): MatchDetailView["marketMovement"]["rows"] {
-  const rawRows = Array.isArray(movement.key_movements)
-    ? movement.key_movements.map(objectValue).filter((item) => Object.keys(item).length > 0)
+  const rawRows = Array.isArray(movement.key_anchors)
+    ? movement.key_anchors.map(objectValue).filter((item) => Object.keys(item).length > 0)
+    : Array.isArray(movement.key_movements)
+      ? movement.key_movements.map(objectValue).filter((item) => Object.keys(item).length > 0)
     : [];
   return rawRows.slice(0, 4).map((item, index) => {
     const marketType = stringValue(item.market_type, "");
     const openingLine = numeric(item.opening_line);
+    const decisionLine = numeric(item.decision_line);
+    const closingLine = numeric(item.closing_line);
     const latestLine = numeric(item.latest_line);
     const lineDelta = numeric(item.line_delta);
     const hasLine = openingLine !== null || latestLine !== null;
+    const openingOdds = formatOdds(numeric(item.opening_decimal_odds));
+    const decisionOdds = formatOdds(numeric(item.decision_decimal_odds));
+    const latestOdds = formatOdds(numeric(item.latest_decimal_odds));
+    const closingOdds = formatOdds(numeric(item.closing_decimal_odds));
+    const anchorBits = [
+      `开盘 ${openingOdds}`,
+      decisionOdds !== "—" ? `决策 ${decisionOdds}` : "",
+      `最新 ${latestOdds}`,
+      closingOdds !== "—" ? `收盘 ${closingOdds}` : ""
+    ].filter(Boolean);
+    const timeBits = [
+      stringValue(item.first_observed_at_utc, ""),
+      stringValue(item.decision_observed_at_utc, ""),
+      stringValue(item.latest_observed_at_utc, ""),
+      stringValue(item.closing_observed_at_utc, "")
+    ].filter(Boolean).map((value) => trendTimeLabel(value));
     return {
       key: `${marketType}-${stringValue(item.selection_key, "")}-${index}`,
       marketText: marketLabel(marketType) || "盘口",
       selectionText: selectionLabel(item.selection || item.selection_key, marketType),
-      directionText: stringValue(item.direction_label, "走势未知"),
-      priceText: `${formatOdds(numeric(item.opening_decimal_odds))} -> ${formatOdds(numeric(item.latest_decimal_odds))}`,
+      directionText: stringValue(item.direction_label, "变化未知"),
+      priceText: `${openingOdds} -> ${latestOdds}`,
+      anchorText: anchorBits.join(" / "),
       probabilityText: formatSignedPercent(numeric(item.implied_probability_delta)),
       lineText: hasLine
-        ? `${lineText(openingLine)} -> ${lineText(latestLine)}${lineDelta ? ` (${lineDelta > 0 ? "+" : ""}${lineDelta})` : ""}`
+        ? `${lineText(openingLine)} -> ${lineText(latestLine)}${lineDelta ? ` (${lineDelta > 0 ? "+" : ""}${lineDelta})` : ""}${decisionLine !== null ? ` · 决策 ${lineText(decisionLine)}` : ""}${closingLine !== null ? ` · 收盘 ${lineText(closingLine)}` : ""}`
         : "无盘口线",
       metaText: `${numeric(item.bookmaker_count) ?? 0} 家 · ${numeric(item.snapshot_count) ?? 0} 条`,
+      timeText: timeBits.join(" / ") || "时间待补齐",
       tone: movementTone(item.direction)
     };
   });
 }
 
 function marketMovementView(detail: DashboardMatchDetail): MatchDetailView["marketMovement"] {
-  const movement = objectValue(detail.odds_snapshot.movement);
+  const movement = objectValue(detail.odds_snapshot.sparse_summary || detail.odds_snapshot.movement);
   const status = stringValue(movement.status, "unavailable");
   const rows = marketMovementRows(movement);
   if (status === "available") {
     return {
-      title: "盘口变化已纳入分析",
-      detail: `${numeric(movement.snapshot_count) ?? 0} 条快照，${numeric(movement.bookmaker_count) ?? 0} 家公司；展示开盘到最新的赔率和隐含概率变化。`,
+      title: "关键赔率锚点",
+      detail: `${numeric(movement.snapshot_count) ?? 0} 条快照，${numeric(movement.bookmaker_count) ?? 0} 家公司；优先展示开盘、决策、最新、收盘这些关键价位，不再假设必须有完整曲线。`,
       statusText: movementStatusText(status),
       tone: "good",
       rows
@@ -3615,16 +3665,16 @@ function marketMovementView(detail: DashboardMatchDetail): MatchDetailView["mark
   }
   if ((detail.odds_snapshot.snapshot_count ?? 0) > 0) {
     return {
-      title: "已有赔率，但走势样本不足",
-      detail: "本场有快照记录，但同一盘口方向还不足两个时间点；当前分析仍以最新赔率和模型概率为主。",
+      title: "已有赔率，但关键锚点不足",
+      detail: "本场有快照记录，但还不足以同时构成开盘、决策、最新、收盘这些关键价位；当前分析仍以最新赔率和模型概率为主。",
       statusText: movementStatusText(status),
       tone: "caution",
       rows
     };
   }
   return {
-    title: "暂无盘口变化证据",
-    detail: "本地还没有匹配到多公司时间序列快照；当前只能展示预测使用的盘口或等待采集补齐。",
+    title: "暂无关键赔率证据",
+    detail: "本地还没有匹配到可用于开盘/决策/收盘锚点的快照；当前只能展示预测使用的盘口或等待采集补齐。",
     statusText: movementStatusText(status),
     tone: "neutral",
     rows: []

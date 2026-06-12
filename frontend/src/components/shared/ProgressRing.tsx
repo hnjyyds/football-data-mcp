@@ -31,7 +31,7 @@ export function ProgressRing({
             fill="none"
             stroke="currentColor"
             strokeWidth={strokeWidth}
-            className="text-slate-200 dark:text-slate-700"
+            className="text-[hsl(var(--border))]"
           />
           <circle
             cx={size / 2}
@@ -48,11 +48,11 @@ export function ProgressRing({
         </svg>
         {label && (
           <div className="absolute inset-0 flex items-center justify-center">
-            <span className="text-xs font-bold text-slate-800 dark:text-slate-100">{label}</span>
+            <span className="text-xs font-semibold text-[hsl(var(--foreground))]">{label}</span>
           </div>
         )}
       </div>
-      {sublabel && <span className="text-xs text-slate-500 dark:text-slate-400 text-center">{sublabel}</span>}
+      {sublabel && <span className="text-xs text-[hsl(var(--muted-foreground))] text-center">{sublabel}</span>}
     </div>
   );
 }

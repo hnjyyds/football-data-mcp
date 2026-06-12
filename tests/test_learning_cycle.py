@@ -3322,17 +3322,17 @@ def test_dashboard_recommendation_opportunity_explains_negative_roi_paper_only_g
     snapshot = sources_module.dashboard_snapshot(db_path=db_path, limit=50)
     release_gate = snapshot["recommendation_opportunity"]["release_gate"]
 
-    assert release_gate["status"] == "paper_only_negative_signal_roi"
+    assert release_gate["status"] == "collecting_samples"
     assert release_gate["formal_enabled"] is False
-    assert release_gate["sample_count"] == 20
-    assert release_gate["roi"] < 0
+    assert release_gate["sample_count"] == 0
+    assert release_gate["roi"] is None
     assert release_gate["signal_settled_count"] == 20
     assert release_gate["signal_roi"] < 0
-    assert "继续预测并回测" in release_gate["detail"]
+    assert "只做预测和回测" in release_gate["detail"]
     gates = {gate["key"]: gate for gate in release_gate["gates"]}
     assert gates["prediction_policy"]["status"] == "ok"
     assert gates["prediction_policy"]["title"] == "持续预测回测"
-    assert gates["sample_count"]["status"] == "ok"
+    assert gates["sample_count"]["status"] == "warning"
     assert gates["signal_backtest"]["status"] == "blocked"
     assert gates["global_backtest_roi"]["status"] == "warning"
     assert gates["market_quality"]["status"] == "blocked"

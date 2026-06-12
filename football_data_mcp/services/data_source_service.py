@@ -349,6 +349,11 @@ class DataSourceService:
             limit=bounded_limit,
             force=bool(force),
             job_id=f"betexplorer-{uuid.uuid4().hex[:12]}",
+            target_map={
+                str(item.get("event_url") or ""): dict(item.get("target") or {})
+                for item in ((discovery_result or {}).get("matches") or [])
+                if str(item.get("event_url") or "").strip()
+            } if discovery_result is not None else None,
         )
         if discovery_result is not None:
             result["discovery_result"] = discovery_result

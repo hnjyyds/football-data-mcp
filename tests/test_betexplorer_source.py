@@ -198,6 +198,39 @@ def test_match_betexplorer_events_to_targets_prefers_best_home_away_match():
     assert matches[0]["score"] >= 0.55
 
 
+def test_match_betexplorer_events_to_targets_supports_chinese_aliases():
+    event_urls = [
+        "https://www.betexplorer.com/football/aruba/division-di-honor/britannia-aruba-sport/ABC12345/",
+    ]
+    targets = [
+        {
+            "league": "阿鲁巴甲级联赛",
+            "home_team": "布里坦尼亚",
+            "away_team": "阿鲁巴体育",
+        }
+    ]
+
+    matches = betexplorer_source.match_betexplorer_events_to_targets(event_urls, targets, limit=5)
+
+    assert len(matches) == 1
+    assert matches[0]["event_url"].endswith("/ABC12345/")
+    assert matches[0]["score"] >= 0.55
+
+
+def test_betexplorer_discovery_urls_for_targets_uses_league_mapping():
+    urls = betexplorer_source.betexplorer_discovery_urls_for_targets(
+        [
+            {"league": "西乙"},
+            {"league": "阿鲁巴甲级联赛"},
+            {"league": "马里甲"},
+        ]
+    )
+
+    assert "https://www.betexplorer.com/football/spain/laliga2/" in urls
+    assert "https://www.betexplorer.com/football/aruba/division-di-honor/" in urls
+    assert "https://www.betexplorer.com/football/mali/premiere-division/" in urls
+
+
 def test_discover_betexplorer_event_urls_handles_missing_targets():
     result = betexplorer_source.discover_betexplorer_event_urls
     assert callable(result)

@@ -9,13 +9,7 @@ const SIZE_CLASSES: Record<Size, string> = {
   lg: "w-14 h-14 text-xl",
 };
 
-const PALETTE = ["#0f766e","#2563eb","#c2410c","#7c3aed","#be123c","#047857","#b45309","#155e75"];
-
-function teamAccent(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) % PALETTE.length;
-  return PALETTE[Math.abs(hash) % PALETTE.length];
-}
+const PROXIED_LOGO_HOSTS = new Set(["sd.qunliao.info"]);
 
 function teamInitials(name: string): string {
   const clean = (name || "").replace(/\s+/g, " ").trim();
@@ -28,6 +22,27 @@ function teamInitials(name: string): string {
   return (initials || "FC").toUpperCase();
 }
 
+function normalizeLogoUrl(value: string | null | undefined): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  if (raw.startsWith("//")) return `https:${raw}`;
+  return raw;
+}
+
+function logoSrc(value: string | null | undefined): string {
+  const raw = normalizeLogoUrl(value);
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (PROXIED_LOGO_HOSTS.has(parsed.hostname)) {
+      return `/image-proxy?url=${encodeURIComponent(parsed.toString())}`;
+    }
+  } catch {
+    return raw;
+  }
+  return raw;
+}
+
 export function TeamLogo({
   name,
   logoUrl,
@@ -37,30 +52,29 @@ export function TeamLogo({
   logoUrl?: string | null;
   size?: Size;
 }) {
-  const accent = teamAccent(name);
   const initials = teamInitials(name);
   const [broken, setBroken] = useState(false);
+  const src = logoSrc(logoUrl);
 
   useEffect(() => {
     setBroken(false);
   }, [logoUrl]);
 
-  const showImage = !!logoUrl && !broken;
+  const showImage = !!src && !broken;
   return (
     <span
-      className={`inline-flex items-center justify-center rounded-full font-bold text-white flex-shrink-0 ${SIZE_CLASSES[size]}`}
-      style={{ backgroundColor: accent }}
+      className={`inline-flex items-center justify-center overflow-hidden rounded-full border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--muted-foreground))] font-medium flex-shrink-0 ${SIZE_CLASSES[size]}`}
       title={name}
       aria-label={`${name} 队徽`}
     >
       {showImage ? (
         <img
-          src={logoUrl ?? ""}
+          src={src}
           alt=""
           loading="lazy"
           referrerPolicy="no-referrer"
           onError={() => setBroken(true)}
-          className="w-full h-full rounded-full object-cover"
+          className="h-full w-full rounded-full bg-white object-contain p-[2px]"
         />
       ) : (
         <span>{initials}</span>
@@ -88,13 +102,13 @@ export function TeamMatchup({
     <div className="flex flex-col gap-1 min-w-0">
       <div className="flex items-center gap-2 min-w-0">
         <TeamLogo name={home} logoUrl={homeLogo} size={size} />
-        <span className="font-medium text-slate-900 dark:text-slate-100 truncate text-sm">{home}</span>
+        <span className="font-medium text-[hsl(var(--foreground))] truncate text-sm">{home}</span>
       </div>
       <div className="flex items-center gap-2 min-w-0">
         <TeamLogo name={away} logoUrl={awayLogo} size={size} />
-        <span className="font-medium text-slate-900 dark:text-slate-100 truncate text-sm">{away}</span>
+        <span className="font-medium text-[hsl(var(--foreground))] truncate text-sm">{away}</span>
       </div>
-      {meta && <span className="text-xs text-slate-500 dark:text-slate-400 pl-10">{meta}</span>}
+      {meta && <span className="text-xs text-[hsl(var(--muted-foreground))] pl-10">{meta}</span>}
     </div>
   );
 }

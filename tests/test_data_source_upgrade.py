@@ -207,7 +207,9 @@ def test_snapshot_store_builds_market_movement_from_snapshot_history(tmp_path):
     movement = snapshot_store.build_market_movement_summary(rows, home_team="Arsenal", away_team="Chelsea")
 
     assert movement["status"] == "available"
+    assert movement["snapshot_strategy"] == "sparse_key_frames"
     assert movement["markets"]["h2h"]["selections"]["home"]["direction"] == "shortening"
+    assert movement["markets"]["h2h"]["selections"]["home"]["anchors"]["opening"]["available"] is True
     assert movement["markets"]["h2h"]["selections"]["home"]["odds_delta"] == -0.2
     assert movement["markets"]["h2h"]["selections"]["home"]["implied_probability_delta"] == 0.050125
     assert movement["markets"]["asian_handicap"]["selections"]["home_cover"]["line_delta"] == -0.25
@@ -316,6 +318,8 @@ def test_snapshot_store_calculates_closing_line_value_from_snapshots(tmp_path):
     assert tracking["available_count"] == 1
     assert tracking["positive_clv_count"] == 1
     assert tracking["records"][0]["clv"]["closing_decimal_odds"] == 1.92
+    assert tracking["records"][0]["evaluation_evidence"]["prediction"]["decimal_odds"] == 2.10
+    assert tracking["records"][0]["evaluation_evidence"]["closing"]["decimal_odds"] == 1.92
 
 
 def test_snapshot_store_prefers_persisted_clv_tracking_without_querying_snapshots(tmp_path):

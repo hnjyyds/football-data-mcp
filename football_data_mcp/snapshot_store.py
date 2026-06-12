@@ -862,25 +862,81 @@ def _market_movement_selection_summary(
     }
 
 
+def _latest_rows_by_bookmaker(
+    timed_rows: list[tuple[dict[str, Any], datetime]],
+) -> list[tuple[dict[str, Any], datetime]]:
+    latest_by_bookmaker: dict[str, tuple[dict[str, Any], datetime]] = {}
+    for row, row_time in timed_rows:
+        bookmaker = str(row.get("bookmaker") or "")
+        existing = latest_by_bookmaker.get(bookmaker)
+        if existing is None or row_time > existing[1]:
+            latest_by_bookmaker[bookmaker] = (row, row_time)
+    return list(latest_by_bookmaker.values())
+
+
+def _earliest_rows_by_bookmaker(
+    timed_rows: list[tuple[dict[str, Any], datetime]],
+) -> list[tuple[dict[str, Any], datetime]]:
+    earliest_by_bookmaker: dict[str, tuple[dict[str, Any], datetime]] = {}
+    for row, row_time in timed_rows:
+        bookmaker = str(row.get("bookmaker") or "")
+        existing = earliest_by_bookmaker.get(bookmaker)
+        if existing is None or row_time < existing[1]:
+            earliest_by_bookmaker[bookmaker] = (row, row_time)
+    return list(earliest_by_bookmaker.values())
+
+
+def _anchor_point_summary(
+    timed_rows: list[tuple[dict[str, Any], datetime]],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    if not timed_rows:
+        return {
+            "label": label,
+            "available": False,
+        }
+    rows = [row for row, _row_time in timed_rows]
+    row_times = [row_time for _row, row_time in timed_rows]
+    prices = [float(row["decimal_odds"]) for row in rows if float(row.get("decimal_odds") or 0.0) > 1.0]
+    lines = [float(row["line"]) for row in rows if row.get("line") is not None]
+    return {
+        "label": label,
+        "available": bool(prices),
+        "decimal_odds": _market_movement_round(_market_movement_median(prices), 4),
+        "line": _market_movement_round(_market_movement_median(lines), 4),
+        "bookmaker_count": len({str(row.get("bookmaker") or "") for row in rows if row.get("bookmaker")}),
+        "snapshot_count": len(rows),
+        "observed_at_utc": max((row_time.isoformat() for row_time in row_times), default=""),
+    }
+
+
 def build_market_movement_summary(
     rows: list[dict[str, Any]],
     *,
     home_team: str = "",
     away_team: str = "",
+    kickoff_utc: str | None = None,
+    reference_time_utc: str | None = None,
+    closing_window_minutes: int = 30,
 ) -> dict[str, Any]:
-    """Summarize opening-to-latest movement from persisted multi-bookmaker snapshots."""
+    """Summarize persisted snapshots as sparse anchor points instead of a full curve."""
     if not rows:
         return {
             "status": "unavailable",
-            "method": "market_snapshot_movement_v1",
+            "method": "market_snapshot_sparse_summary_v2",
             "reason": "matching_market_snapshots_missing",
             "snapshot_count": 0,
             "bookmaker_count": 0,
             "market_type_count": 0,
             "markets": {},
+            "primary_anchor": {},
+            "key_anchors": [],
             "key_movements": [],
         }
 
+    kickoff_time = _parse_snapshot_time(kickoff_utc) or _parse_snapshot_time(rows[0].get("kickoff_utc"))
+    reference_time = _parse_snapshot_time(reference_time_utc)
     grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for row in rows:
         market_type = _canonical_market_type(row.get("market_type"))
@@ -892,16 +948,65 @@ def build_market_movement_summary(
         grouped.setdefault(market_type, {}).setdefault(selection_key, []).append(row)
 
     markets: dict[str, Any] = {}
-    key_movements: list[dict[str, Any]] = []
+    key_anchors: list[dict[str, Any]] = []
     for market_type, selections in grouped.items():
-        selection_summaries = {
-            selection_key: _market_movement_selection_summary(
+        selection_summaries = {}
+        for selection_key, selection_rows in selections.items():
+            summary = _market_movement_selection_summary(
                 selection_rows,
                 market_type=market_type,
                 selection_key=selection_key,
             )
-            for selection_key, selection_rows in selections.items()
-        }
+            timed_rows = [
+                (row, row_time)
+                for row in selection_rows
+                if (row_time := _snapshot_row_time(row)) is not None and float(row.get("decimal_odds") or 0.0) > 1.0
+            ]
+            opening_rows = _earliest_rows_by_bookmaker(timed_rows)
+            latest_rows = _latest_rows_by_bookmaker(timed_rows)
+            decision_rows = []
+            if reference_time is not None:
+                decision_rows = _latest_rows_by_bookmaker(
+                    [(row, row_time) for row, row_time in timed_rows if row_time <= reference_time]
+                )
+            pre_kickoff_rows = timed_rows
+            if kickoff_time is not None:
+                pre_kickoff_rows = [(row, row_time) for row, row_time in timed_rows if row_time <= kickoff_time]
+            closing_rows = []
+            if pre_kickoff_rows:
+                if kickoff_time is not None:
+                    window_start = kickoff_time - timedelta(minutes=max(1, int(closing_window_minutes or 30)))
+                    closing_window_rows = [(row, row_time) for row, row_time in pre_kickoff_rows if row_time >= window_start]
+                    closing_rows = _latest_rows_by_bookmaker(closing_window_rows or pre_kickoff_rows)
+                else:
+                    closing_rows = _latest_rows_by_bookmaker(pre_kickoff_rows)
+            anchors = {
+                "opening": _anchor_point_summary(opening_rows, label="opening"),
+                "latest": _anchor_point_summary(latest_rows, label="latest"),
+                "decision": _anchor_point_summary(decision_rows, label="decision"),
+                "closing": _anchor_point_summary(closing_rows, label="closing"),
+            }
+            available_anchor_count = sum(1 for item in anchors.values() if item.get("available"))
+            summary.update(
+                {
+                    "anchor_strategy": "sparse_key_frames",
+                    "anchors": anchors,
+                    "available_anchor_count": available_anchor_count,
+                    "opening_decimal_odds": anchors["opening"].get("decimal_odds"),
+                    "opening_line": anchors["opening"].get("line"),
+                    "first_observed_at_utc": anchors["opening"].get("observed_at_utc") or summary.get("first_observed_at_utc"),
+                    "latest_decimal_odds": anchors["latest"].get("decimal_odds"),
+                    "latest_line": anchors["latest"].get("line"),
+                    "latest_observed_at_utc": anchors["latest"].get("observed_at_utc") or summary.get("latest_observed_at_utc"),
+                    "decision_decimal_odds": anchors["decision"].get("decimal_odds"),
+                    "decision_line": anchors["decision"].get("line"),
+                    "decision_observed_at_utc": anchors["decision"].get("observed_at_utc"),
+                    "closing_decimal_odds": anchors["closing"].get("decimal_odds"),
+                    "closing_line": anchors["closing"].get("line"),
+                    "closing_observed_at_utc": anchors["closing"].get("observed_at_utc"),
+                }
+            )
+            selection_summaries[selection_key] = summary
         available = [
             item
             for item in selection_summaries.values()
@@ -928,7 +1033,7 @@ def build_market_movement_summary(
             "selections": selection_summaries,
         }
         for item in available:
-            key_movements.append(
+            key_anchors.append(
                 {
                     "market_type": item.get("market_type"),
                     "selection_key": item.get("selection_key"),
@@ -936,35 +1041,47 @@ def build_market_movement_summary(
                     "direction": item.get("direction"),
                     "direction_label": item.get("direction_label"),
                     "opening_decimal_odds": item.get("opening_decimal_odds"),
+                    "decision_decimal_odds": item.get("decision_decimal_odds"),
+                    "closing_decimal_odds": item.get("closing_decimal_odds"),
                     "latest_decimal_odds": item.get("latest_decimal_odds"),
                     "odds_delta": item.get("odds_delta"),
                     "opening_line": item.get("opening_line"),
+                    "decision_line": item.get("decision_line"),
+                    "closing_line": item.get("closing_line"),
                     "latest_line": item.get("latest_line"),
                     "line_delta": item.get("line_delta"),
                     "implied_probability_delta": item.get("implied_probability_delta"),
                     "bookmaker_count": item.get("bookmaker_count"),
                     "snapshot_count": item.get("snapshot_count"),
+                    "available_anchor_count": item.get("available_anchor_count"),
+                    "first_observed_at_utc": item.get("first_observed_at_utc"),
+                    "decision_observed_at_utc": item.get("decision_observed_at_utc"),
+                    "closing_observed_at_utc": item.get("closing_observed_at_utc"),
                     "latest_observed_at_utc": item.get("latest_observed_at_utc"),
+                    "anchors": item.get("anchors") or {},
                 }
             )
 
-    key_movements.sort(key=lambda item: abs(float(item.get("implied_probability_delta") or 0.0)), reverse=True)
-    primary_movement = key_movements[0] if key_movements else {}
+    key_anchors.sort(key=lambda item: abs(float(item.get("implied_probability_delta") or 0.0)), reverse=True)
+    primary_anchor = key_anchors[0] if key_anchors else {}
     return {
-        "status": "available" if key_movements else "insufficient_history",
-        "method": "market_snapshot_movement_v1",
-        "reason": "" if key_movements else "need_multiple_time_ordered_snapshots_per_selection",
+        "status": "available" if key_anchors else "insufficient_history",
+        "method": "market_snapshot_sparse_summary_v2",
+        "reason": "" if key_anchors else "need_sparse_anchor_snapshots",
         "snapshot_count": len(rows),
         "bookmaker_count": len({str(row.get("bookmaker") or "") for row in rows if row.get("bookmaker")}),
         "market_type_count": len({str(row.get("market_type") or "") for row in rows if row.get("market_type")}),
         "first_fetched_at_utc": min((str(row.get("fetched_at_utc") or "") for row in rows), default=""),
         "latest_fetched_at_utc": max((str(row.get("fetched_at_utc") or "") for row in rows), default=""),
-        "primary_movement": primary_movement,
+        "snapshot_strategy": "sparse_key_frames",
+        "primary_anchor": primary_anchor,
+        "primary_movement": primary_anchor,
         "markets": markets,
-        "key_movements": key_movements[:8],
+        "key_anchors": key_anchors[:8],
+        "key_movements": key_anchors[:8],
         "usage_policy": (
-            "Use movement as professional market evidence. It can support or warn against a pick, "
-            "but it does not replace model probability, settlement, or recommendation gates."
+            "Use sparse anchor snapshots as market evidence. Opening, decision, latest, and closing "
+            "are enough for audit and CLV; do not assume a full intraday curve is required."
         ),
     }
 
@@ -975,9 +1092,17 @@ def market_movement_for_match(
     *,
     league: str | None = None,
     db_path: str | None = None,
+    kickoff_utc: str | None = None,
+    reference_time_utc: str | None = None,
 ) -> dict[str, Any]:
     rows = find_market_snapshots(home_team, away_team, league=league, db_path=db_path, limit=20000)
-    return build_market_movement_summary(rows, home_team=home_team, away_team=away_team)
+    return build_market_movement_summary(
+        rows,
+        home_team=home_team,
+        away_team=away_team,
+        kickoff_utc=kickoff_utc,
+        reference_time_utc=reference_time_utc,
+    )
 
 
 def closing_line_value_for_pick(
@@ -1230,6 +1355,17 @@ def _persisted_clv_tracking_for_record(record: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _record_outcome_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "settlement_status": record.get("settlement_status"),
+        "home_score": record.get("home_score"),
+        "away_score": record.get("away_score"),
+        "hit": record.get("hit"),
+        "profit_units": record.get("profit_units"),
+        "settled_at_utc": record.get("settled_at_utc"),
+    }
+
+
 def closing_line_value_for_records(
     records: list[dict[str, Any]],
     *,
@@ -1278,6 +1414,22 @@ def closing_line_value_for_records(
                 "selection_key": record.get("selection_key"),
                 "status": clv.get("status"),
                 "clv": clv,
+                "evaluation_evidence": {
+                    "prediction": {
+                        "decimal_odds": float(prediction_decimal_odds),
+                        "time_utc": str(record.get("created_at_utc") or ""),
+                        "market": record.get("market"),
+                        "selection": record.get("selection"),
+                        "line": record.get("line"),
+                    },
+                    "closing": {
+                        "status": clv.get("status"),
+                        "decimal_odds": clv.get("closing_decimal_odds"),
+                        "time_utc": clv.get("latest_closing_snapshot_utc"),
+                        "bookmaker_count": clv.get("closing_bookmaker_count"),
+                    },
+                    "outcome": _record_outcome_evidence(record),
+                },
             }
         )
 

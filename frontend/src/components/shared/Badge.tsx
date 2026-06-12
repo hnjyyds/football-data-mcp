@@ -3,14 +3,14 @@ import type { ReactNode } from "react";
 type Variant = "success" | "error" | "warning" | "info" | "neutral" | "good" | "bad" | "caution";
 
 const VARIANT_CLASSES: Record<Variant, string> = {
-  success: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
-  good:    "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
-  error:   "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
-  bad:     "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
-  warning: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
-  caution: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
-  info:    "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300",
-  neutral: "bg-slate-100 text-slate-700 dark:bg-slate-700/50 dark:text-slate-300",
+  success: "border-emerald-600/20 bg-transparent text-emerald-700 dark:text-emerald-400",
+  good:    "border-emerald-600/20 bg-transparent text-emerald-700 dark:text-emerald-400",
+  error:   "border-transparent bg-[hsl(var(--destructive))] text-[hsl(var(--destructive-foreground))]",
+  bad:     "border-transparent bg-[hsl(var(--destructive))] text-[hsl(var(--destructive-foreground))]",
+  warning: "border-amber-500/25 bg-transparent text-amber-700 dark:text-amber-400",
+  caution: "border-amber-500/25 bg-transparent text-amber-700 dark:text-amber-400",
+  info:    "border-[hsl(var(--border))] bg-transparent text-[hsl(var(--foreground))]",
+  neutral: "border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--foreground))]",
 };
 
 export function Badge({
@@ -23,7 +23,7 @@ export function Badge({
   className?: string;
 }) {
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${VARIANT_CLASSES[variant]} ${className}`}>
+    <span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-medium leading-5 transition-colors ${VARIANT_CLASSES[variant]} ${className}`}>
       {children}
     </span>
   );

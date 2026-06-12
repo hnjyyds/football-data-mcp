@@ -278,6 +278,33 @@ def test_health_api_reports_auto_learning_state_cycle_status(monkeypatch):
     assert body["task_queue"]["backend"] in {"thread", "arq"}
 
 
+def test_health_api_includes_odds_source_runtime_support(monkeypatch):
+    monkeypatch.setattr(server, "learning_cycle_status", lambda: (None, None))
+    monkeypatch.setattr(
+        "football_data_mcp.services.health_service.DataSourceService.odds_source_status",
+        lambda self: {
+            "status": "ok",
+            "sources": {
+                "leisu": {
+                    "status": "ok",
+                    "snapshot_count": 0,
+                    "runtime_support": {
+                        "engine": "crawlee_playwright",
+                        "supported": False,
+                        "message": "未安装 Crawlee / Playwright 运行时。",
+                    },
+                }
+            },
+        },
+    )
+
+    response = asyncio.run(server.health_api(_request()))
+    body = json.loads(response.body)
+
+    assert body["odds_source_status"]["status"] == "ok"
+    assert body["odds_source_status"]["sources"]["leisu"]["runtime_support"]["engine"] == "crawlee_playwright"
+
+
 def test_dashboard_match_not_found_uses_unified_error(monkeypatch):
     async def fake_to_thread(func, *args, **kwargs):
         return func(*args, **kwargs)

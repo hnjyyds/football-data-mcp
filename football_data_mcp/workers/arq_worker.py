@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from football_data_mcp.config import load_task_queue_settings
+from football_data_mcp.services.data_source_service import DataSourceService
 from football_data_mcp import sources
 from football_data_mcp.services.task_queue import redis_settings_from_task_queue
 from football_data_mcp.services.validation_service import ValidationJobService
@@ -48,8 +49,24 @@ async def run_oddsportal_snapshot_sync_job(ctx: dict[str, Any], payload: dict[st
     }
 
 
+async def run_leisu_session_refresh_job(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """ARQ entrypoint: bootstrap or refresh a Leisu browser session via Crawlee."""
+    job_id = str(payload.get("job_id") or ctx.get("job_id") or "")
+    queue_job_id = str(ctx.get("job_id") or f"leisu-session-refresh:{job_id}")
+    logger.info("arq run_leisu_session_refresh_job: job_id=%s", job_id or "<missing>")
+    allowed = {"match_id", "url", "profile_dir", "headless", "job_id"}
+    kwargs = {key: value for key, value in payload.items() if key in allowed}
+    result = await DataSourceService().run_leisu_session_refresh_inline(kwargs)
+    return {
+        **result,
+        "job_id": job_id or kwargs.get("job_id"),
+        "queue_job_id": queue_job_id,
+        "execution_backend": "arq",
+    }
+
+
 class WorkerSettings:
-    functions = [run_holdout_validation_job, run_oddsportal_snapshot_sync_job]
+    functions = [run_holdout_validation_job, run_oddsportal_snapshot_sync_job, run_leisu_session_refresh_job]
     redis_settings = redis_settings_from_task_queue(_settings)
     queue_name = _settings.arq_queue_name
     job_timeout = _settings.arq_job_timeout_seconds

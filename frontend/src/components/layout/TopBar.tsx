@@ -1,6 +1,6 @@
 import { Icon } from "../shared/Icon";
 import type { DashboardSnapshot } from "../../types";
-import { BrandLogo, BrandWordmark } from "../shared/BrandLogo";
+import { BrandLogo } from "../shared/BrandLogo";
 
 function localTime(value: string | null | undefined): string {
   if (!value) return "—";
@@ -37,40 +37,58 @@ export function TopBar({
   const isCalibrationActive = snapshot?.kpis.live_calibration_active;
   const cacheStatus = snapshot?.dashboard_cache?.status;
   const isStaleRefreshing = cacheStatus === "stale_refreshing";
+  const openPredictions = snapshot?.prediction_kpis.open_count ?? 0;
+  const roi = snapshot?.prediction_kpis.roi;
+  const roiText = roi == null ? "ROI —" : `ROI ${roi >= 0 ? "+" : ""}${(roi * 100).toFixed(1)}%`;
+  const signalText = openPredictions > 0 ? `${openPredictions} 开放预测` : "无开放预测";
   return (
-    <header className="sticky top-0 z-40 bg-white/95 dark:bg-ink-950/95 backdrop-blur-md border-b border-ink-200 dark:border-ink-800">
+    <header className="sticky top-0 z-40 border-b border-[hsl(var(--border))] bg-[hsl(var(--background))]/90 backdrop-blur-xl">
       <div className="max-w-screen-2xl mx-auto px-3 sm:px-4 h-12 flex items-center gap-2 sm:gap-4">
         {/* Brand */}
         <div className="flex items-center gap-2 mr-auto min-w-0">
-          <BrandLogo size={26} glow />
-          <div className="hidden sm:block min-w-0">
-            <BrandWordmark className="text-base leading-none" />
-            <div className="text-2xs text-ink-500 dark:text-ink-500 leading-none mt-0.5">足球策略控制台</div>
-          </div>
+          <BrandLogo size={24} />
         </div>
 
         {/* Live status */}
-        <div className="flex items-center gap-1.5 sm:gap-3 text-xs">
+        <div className="flex items-center gap-1.5 sm:gap-2 text-xs">
           {lastRefreshError ? (
             <span className="hidden sm:flex items-center gap-1 px-2 py-1 rounded-md bg-danger-500/10 text-danger-600 dark:text-danger-500 text-2xs font-medium">
-              <Icon name="alert" size={11} />
+              <Icon name="alert" size={10} />
               刷新失败
             </span>
           ) : (
             <span className="hidden sm:flex items-center gap-1.5 text-2xs">
               <span className="live-dot" />
-              <span className="text-ink-600 dark:text-ink-400 font-medium">LIVE</span>
+              <span className="text-[hsl(var(--muted-foreground))] font-medium">LIVE</span>
             </span>
           )}
           <span className={`hidden md:flex items-center gap-1 px-2 py-1 rounded-md text-2xs font-medium ${
             isCalibrationActive
-              ? "bg-success-500/10 text-success-700 dark:text-success-500"
-              : "bg-warning-500/10 text-warning-700 dark:text-warning-500"
+              ? "text-[hsl(var(--muted-foreground))]"
+              : "text-amber-700 dark:text-amber-400"
           }`}>
             <Icon name="database" size={11} />
             {isCalibrationActive ? "实时校准" : "收集中"}
           </span>
-          <span className="hidden sm:flex items-center gap-1 text-2xs text-ink-500 dark:text-ink-400 tabular-nums font-mono">
+          <span className={`hidden md:flex items-center gap-1 px-2 py-1 rounded-md text-2xs font-medium ${
+            openPredictions > 0
+              ? "text-[hsl(var(--foreground))]"
+              : "text-[hsl(var(--muted-foreground))]"
+          }`}>
+            <Icon name="signals" size={11} />
+            {signalText}
+          </span>
+          <span className={`hidden lg:flex items-center gap-1 px-2 py-1 rounded-md text-2xs font-medium tabular-nums ${
+            roi != null && roi > 0
+              ? "text-emerald-700 dark:text-emerald-400"
+              : roi != null && roi < 0
+                ? "text-[hsl(var(--destructive))]"
+                : "text-[hsl(var(--muted-foreground))]"
+          }`}>
+            <Icon name={roi != null && roi < 0 ? "trendDown" : "trendUp"} size={11} />
+            {roiText}
+          </span>
+          <span className="hidden sm:flex items-center gap-1 text-2xs text-[hsl(var(--muted-foreground))] tabular-nums">
             <Icon name="clock" size={11} />
             {snapshot ? localTime(snapshot.generated_at_utc) : "—"}
           </span>
@@ -80,14 +98,14 @@ export function TopBar({
             disabled={refreshing || !onRefresh}
             aria-label="强制刷新看板"
             title="强制刷新看板"
-            className="flex items-center gap-1 rounded-md px-1 py-0.5 text-2xs text-ink-500 dark:text-ink-400 hover:bg-ink-100 dark:hover:bg-ink-800 hover:text-brand-600 dark:hover:text-brand-400 disabled:cursor-not-allowed disabled:opacity-70"
+            className="shadcn-button-ghost min-h-8 rounded-md px-2 py-1 text-2xs disabled:cursor-not-allowed"
           >
-            <Icon name="refresh" size={11} className={refreshing ? "animate-spin text-brand-500" : ""} />
+            <Icon name="refresh" size={11} className={refreshing ? "animate-spin text-[hsl(var(--foreground))]" : ""} />
             <span className="hidden lg:inline tabular-nums">{snapshot ? relativeTime(snapshot.generated_at_utc) : "—"}</span>
           </button>
           {isStaleRefreshing && (
             <span
-              className="hidden md:flex items-center gap-1 px-2 py-1 rounded-md bg-warning-500/10 text-warning-700 dark:text-warning-500 text-2xs font-medium"
+              className="hidden md:flex items-center gap-1 rounded-md border border-[hsl(var(--border))] px-2 py-1 text-2xs font-medium text-[hsl(var(--muted-foreground))]"
               title="正在后台刷新 dashboard 快照"
             >
               <Icon name="refresh" size={11} className="animate-spin" />
@@ -100,7 +118,7 @@ export function TopBar({
         <button
           type="button"
           onClick={onToggleDark}
-          className="p-1.5 rounded-lg text-ink-500 dark:text-ink-400 hover:bg-ink-100 dark:hover:bg-ink-800 hover:text-brand-600 dark:hover:text-brand-400 transition-colors"
+          className="shadcn-button-ghost grid h-9 w-9 place-items-center rounded-md p-0"
           aria-label={darkMode ? "切换浅色模式" : "切换深色模式"}
         >
           <Icon name={darkMode ? "sun" : "moon"} size={15} />

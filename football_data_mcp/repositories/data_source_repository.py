@@ -214,6 +214,7 @@ class DataSourceRepository:
         limit: int,
         force: bool,
         job_id: str,
+        target_map: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         from football_data_mcp import sources
 
@@ -223,4 +224,5 @@ class DataSourceRepository:
             limit=limit,
             force=force,
             job_id=job_id,
+            target_map=target_map,
         )

@@ -125,6 +125,14 @@ export interface DashboardRecord {
   settlement_status: string;
   created_at_utc: string;
   score?: string;
+  score_type?: string;
+  status_label?: string;
+  true_result?: {
+    home_score: number | null;
+    away_score: number | null;
+    score: string;
+  };
+  match_state?: DashboardMatchState;
   hit?: number | null;
   payout_multiplier?: number | null;
   profit_units?: number | null;
@@ -378,6 +386,7 @@ export interface DashboardOddsSnapshotDetail {
   latest_rows: DashboardOddsSnapshotRow[];
   resolution?: DashboardOddsResolution;
   consensus: Record<string, unknown>;
+  sparse_summary?: Record<string, unknown>;
   movement?: Record<string, unknown>;
 }
 
@@ -1459,6 +1468,38 @@ export interface OddsSourceStatusEntry {
   last_error?: string | null;
   next_action?: string;
   sync?: OddsSourceSyncState;
+  browser_session_status?: string;
+  browser_session?: {
+    status?: string;
+    mode?: string;
+    browser?: string;
+    message?: string;
+    updated_at_utc?: string;
+    last_ready_at_utc?: string;
+    last_fetch_at_utc?: string;
+    last_verification_url?: string;
+    last_error?: string;
+    connect_cdp?: boolean;
+    headless?: boolean;
+    profile_dir?: string;
+    [key: string]: unknown;
+  };
+  runtime_support?: {
+    engine?: string;
+    status?: string;
+    supported?: boolean;
+    crawlee_installed?: boolean;
+    playwright_installed?: boolean;
+    message?: string;
+    provider?: string;
+    profile_dir?: string;
+    recommended_entrypoint?: string;
+    browser_proxy_status_url?: string;
+    browser_proxy_url?: string;
+    uses_persistent_profile?: boolean;
+    notes?: string[];
+    [key: string]: unknown;
+  };
 }
 
 export interface OddsSourceClosureEntry {
@@ -1535,6 +1576,7 @@ export interface DashboardSnapshot {
   task_queue?: TaskQueueHealth;
   odds_source_status?: OddsSourceStatus;
   market_breakdown?: DashboardMarketBreakdown;
+  league_breakdown?: DashboardLeagueBreakdown | null;
   model_failure_diagnostics?: DashboardModelFailureDiagnostics;
   latest_validation?: LatestValidation | null;
   validation_job?: ValidationJob | null;
@@ -1588,6 +1630,23 @@ export interface DashboardMarketBreakdown {
   total_settled: number;
   markets: string[];
   leagues: string[];
+}
+
+export interface DashboardLeagueBreakdown {
+  by_league: Record<string, {
+    samples: number;
+    hit_rate: number | null;
+    roi: number | null;
+    log_loss_diff: number | null;
+    classification: string;
+  }>;
+  winning_leagues?: string[];
+  losing_leagues?: string[];
+  uncertain_leagues?: string[];
+  manual_blocked_leagues?: string[];
+  effective_blocked_leagues?: string[];
+  min_samples_required?: number;
+  classification_method?: string;
 }
 
 export interface DashboardModelFailureDriver {
@@ -1872,12 +1931,17 @@ export interface BacktestCurveView {
   }>;
   points: Array<{
     index: number;
+    atUtc: string;
     matchup: string;
     typeText: string;
     resultText: string;
+    hitValue: number;
     cumulativeValue: number;
     cumulativeText: string;
+    cumulativeHitRateValue: number | null;
+    cumulativeHitRateText: string;
     drawdownText: string;
+    rollingHitValue: number | null;
     rollingHitText: string;
     profitValue: number;
     profitText: string;
@@ -2267,9 +2331,11 @@ export interface MatchDetailView extends RecordDetailView {
       selectionText: string;
       directionText: string;
       priceText: string;
+      anchorText: string;
       probabilityText: string;
       lineText: string;
       metaText: string;
+      timeText: string;
       tone: KpiCard["tone"];
     }>;
   };

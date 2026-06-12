@@ -4,7 +4,6 @@ import { Badge, toneVariant } from "../components/shared/Badge";
 import { LoadingSpinner } from "../components/shared/LoadingSpinner";
 import { TeamMatchup } from "../components/shared/TeamLogo";
 import { Panel, Metric } from "../components/shared/Panel";
-import { OddsChart } from "../components/detail/OddsChart";
 import {
   buildMatchDetailView,
   formatOdds,
@@ -268,21 +267,6 @@ export function MatchDetailPage({
             </Panel>
           )}
 
-          {view.oddsTrend && view.oddsTrend.points.length > 0 && (
-            <OddsChart
-              title={view.oddsTrend.title || "赔率走势"}
-              points={view.oddsTrend.points.map((p) => {
-                const point = p as Record<string, unknown> & { label?: string; x?: string | number };
-                const label = typeof point.label === "string" ? point.label : String(point.x ?? "");
-                return { ...point, label };
-              })}
-              lines={(view.oddsTrend.series ?? []).map((s) => {
-                const series = s as { key?: string; id?: string };
-                return series.key ?? series.id ?? "";
-              }).filter(Boolean)}
-            />
-          )}
-
           {view.clvTracking?.detail && (
             <Panel title={view.clvTracking.title || "CLV 收盘价"} icon="trendUp">
               <div className="grid grid-cols-3 gap-3">
@@ -297,7 +281,7 @@ export function MatchDetailPage({
           )}
 
           {view.marketMovement?.rows?.length > 0 && (
-            <Panel title={view.marketMovement.title || "盘口移动"} icon="trendUp">
+            <Panel title={view.marketMovement.title || "关键赔率锚点"} icon="trendUp">
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead className="text-2xs text-ink-500 dark:text-ink-400 border-b border-ink-100 dark:border-ink-700/50">
@@ -305,7 +289,8 @@ export function MatchDetailPage({
                       <th className="text-left py-2 px-2 font-medium">市场</th>
                       <th className="text-left py-2 px-2 font-medium">选项</th>
                       <th className="text-left py-2 px-2 font-medium">方向</th>
-                      <th className="text-right py-2 px-2 font-medium">价格</th>
+                      <th className="text-left py-2 px-2 font-medium">锚点价格</th>
+                      <th className="text-left py-2 px-2 font-medium">时间</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -316,7 +301,11 @@ export function MatchDetailPage({
                         <td className="py-1.5 px-2">
                           <Badge variant={toneVariant(row.tone)}>{row.directionText}</Badge>
                         </td>
-                        <td className="py-1.5 px-2 text-right tabular-nums text-ink-900 dark:text-white">{row.priceText}</td>
+                        <td className="py-1.5 px-2 text-ink-900 dark:text-white">
+                          <div className="tabular-nums">{row.priceText}</div>
+                          <div className="mt-0.5 text-2xs text-ink-500 dark:text-ink-400">{row.anchorText}</div>
+                        </td>
+                        <td className="py-1.5 px-2 text-2xs text-ink-500 dark:text-ink-400">{row.timeText}</td>
                       </tr>
                     ))}
                   </tbody>
