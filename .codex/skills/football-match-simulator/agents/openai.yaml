@@ -1,0 +1,4 @@
+interface:
+  display_name: "Football Match Simulator"
+  short_description: "Poisson and Monte Carlo match checks"
+  default_prompt: "Use $football-match-simulator to convert football assumptions into calibrated scoreline, 1X2, handicap, and goal-band sanity checks."

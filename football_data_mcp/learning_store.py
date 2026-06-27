@@ -2219,14 +2219,12 @@ def update_strategy_state(
 
 def update_all_market_strategy_states(*, db_path: str | None = None) -> list[dict[str, Any]]:
     """
-    Refresh strategy state for each market independently, so 1X2, asian_handicap,
-    over_under, and jingcai_hhad accumulate evidence in parallel rather than
-    competing for the same sample pool.
+    Refresh strategy state for active Jingcai markets independently.
 
-    Multi-market diversification roughly doubles the rate at which any individual
-    market reaches statistical significance because samples are independent.
+    Asian handicap rows remain readable for historical ledger compatibility, but
+    the MCP no longer refreshes or promotes Asian handicap as an active strategy.
     """
-    markets = ["asian_handicap", "1x2", "over_under", "jingcai_hhad"]
+    markets = ["1x2", "jingcai_hhad", "over_under"]
     states = []
     for market in markets:
         try:

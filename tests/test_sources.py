@@ -776,6 +776,86 @@ def test_analyze_single_match_builds_quality_contract_for_candidate_odds(monkeyp
     assert result["analysis_pack"]["data_coverage"]["blocks"]["moneyline_1x2"] is True
 
 
+def test_analyze_single_match_exposes_jingcai_fundamental_policy(monkeypatch):
+    async def fake_get_best_match(*args, **kwargs):
+        return (
+            {
+                "source_name": "sporttery",
+                "source": {"source": "sporttery.cn", "fetched_at_utc": "2026-05-23T10:00:00+00:00"},
+                "match_score": 1.0,
+                "home_team": "主队",
+                "away_team": "客队",
+                "league": "杯赛",
+                "division": "sporttery:HAD",
+                "kickoff_utc": "2026-05-23T12:00:00+00:00",
+                "time_window": {
+                    "in_window": True,
+                    "reason": "in_default_window",
+                    "as_of": "2026-05-23T18:00:00+08:00",
+                    "kickoff": "2026-05-23T20:00:00+08:00",
+                },
+                "odds_summary": {
+                    "has_valid_numeric_odds": True,
+                    "moneyline_1x2": [
+                        {"provider": "Sporttery official HAD", "home": 1.8, "draw": 3.4, "away": 4.2}
+                    ],
+                    "preferred_moneyline_1x2": {
+                        "provider": "Sporttery official HAD",
+                        "current": {"home": 1.8, "draw": 3.4, "away": 4.2},
+                        "market_scope": "jingcai_supported",
+                    },
+                },
+            },
+            {"candidate_count": 1, "time_window_policy": {"as_of_source": "test"}, "candidates": []},
+        )
+
+    async def fake_team_form(*args, **kwargs):
+        return {"available": True, "home": {"sample_size": 5}, "away": {"sample_size": 5}}
+
+    async def fake_get_match_data_bundle(*args, **kwargs):
+        return {"status": "ok", "market_movement": {}, "odds_features": {}}
+
+    monkeypatch.setattr(sources_module, "get_best_match", fake_get_best_match)
+    monkeypatch.setattr(sources_module, "team_form", fake_team_form)
+    monkeypatch.setattr(sources_module, "get_match_data_bundle", fake_get_match_data_bundle)
+
+    result = asyncio.run(
+        sources_module.analyze_single_match(
+            "主队 vs 客队",
+            as_of="2026-05-23T18:00:00+08:00",
+            timezone_name="Asia/Shanghai",
+            include_source_probe=False,
+        )
+    )
+
+    policy = result["analysis_policy"]
+    assert policy["primary_scope"] == "jingcai"
+    assert policy["asian_handicap_role"] == "supporting_signal_only"
+    assert policy["selection_philosophy"]["objective"] == "hit_rate_plus_odds_support_value_combination"
+    assert "不是单场纯 EV" in policy["selection_philosophy"]["value_definition"]
+    assert "命中率" in policy["selection_philosophy"]["pure_value_rule"]
+    assert policy["odds_movement_review"]["required"] is True
+    assert any("是否过热" in item for item in policy["odds_movement_review"]["core_questions"])
+    assert any("是否诱高" in item for item in policy["odds_movement_review"]["core_questions"])
+    assert any("赔率能否支撑球队能力" in item for item in policy["odds_movement_review"]["core_questions"])
+    assert policy["fundamental_review"]["required"] is True
+    assert policy["fundamental_review"]["fixture_assumption"] == "regular_major_competition"
+    assert {
+        "motivation",
+        "schedule",
+        "injuries_and_lineups",
+        "tactical_style",
+        "competition_context",
+        "head_to_head",
+        "historical_performance",
+        "market_movement",
+    } <= set(policy["fundamental_review"]["required_dimensions"])
+    assert "historical_record_review" in policy["default_research_path"]
+    assert "odds_movement_review" in policy["default_research_path"]
+    assert result["agent_brief"]["analysis_policy"] == policy
+    assert result["analysis_pack"]["agent_brief"]["analysis_policy"] == policy
+
+
 def test_analyze_single_match_exposes_analysis_pack_for_agents(monkeypatch):
     async def fake_get_best_match(*args, **kwargs):
         return (
@@ -855,14 +935,21 @@ def test_analyze_single_match_exposes_analysis_pack_for_agents(monkeypatch):
 
     result = asyncio.run(sources_module.analyze_single_match("主队 vs 客队"))
 
-    assert list(result.keys())[:5] == ["status", "agent_brief", "final_decision", "market_candidates", "best_candidate"]
+    assert result["status"] == "ok"
+    for key in ["agent_brief", "analysis_output_policy", "analysis_result", "final_decision", "market_candidates", "best_candidate"]:
+        assert key in result
     assert result["final_decision"] == result["betting_decision_support"]["final_decision"]
     pack = result["analysis_pack"]
     assert "over_under" in pack["data_coverage"]["available_blocks"]
     assert pack["model_inputs"]["recent_form_summary"]["home"]["record"]["wins"] == 1
     assert pack["model_inputs"]["recent_form_summary"]["home"]["same_competition_sample_size"] == 1
     assert pack["model_inputs"]["league_table_summary"]["rank_delta_home_minus_away"] == -5
-    assert pack["agent_brief"]["decision_contract"].startswith("Use betting_decision_support.final_execution_advice")
+    assert result["analysis_output_policy"]["mode"] == "analysis_only"
+    assert result["analysis_result"]["mode"] == "analysis_only"
+    assert result["analysis_result"]["output_instruction"].startswith("Use this as the user-visible conclusion")
+    assert pack["agent_brief"]["decision_contract"].startswith("Use betting_decision_support.analysis_result")
+    assert pack["agent_brief"]["analysis_result"]["mode"] == "analysis_only"
+    assert pack["agent_brief"]["analysis_policy"]["primary_scope"] == "jingcai"
     assert pack["agent_brief"]["final_decision"]["headline"]
     assert pack["agent_brief"]["final_execution_advice"]["action"] in {"bet_now", "observe", "skip"}
     assert pack["agent_brief"]["market_candidates"]
@@ -962,8 +1049,10 @@ def test_analyze_single_match_returns_actionable_decision_support_when_data_is_c
     assert support["blocking_flags"] == []
     assert "lineup_unavailable" in support["caution_flags"]
     assert support["best_candidate"]["recommendation"] in {"immediate_bet", "condition_observe", "no_bet"}
-    assert support["final_decision"]["headline"].startswith(("立即投注", "现在不下单", "不投注"))
-    assert support["final_decision"]["agent_instruction"].startswith("Final agents must use this object")
+    assert support["analysis_output_policy"]["mode"] == "analysis_only"
+    assert support["analysis_result"]["output_instruction"].startswith("Use this as the user-visible conclusion")
+    assert support["final_decision"]["headline"].startswith("分析结论")
+    assert support["final_decision"]["agent_instruction"].startswith("This legacy object")
     assert support["final_execution_advice"]["action"] in {"bet_now", "observe", "skip"}
     assert support["final_execution_advice"]["agent_can_override"] is False
     assert support["risk_overlay"]["severity"] in {"low", "medium"}
@@ -1003,7 +1092,7 @@ def test_analyze_single_match_blocks_only_real_hard_failures(monkeypatch):
     support = result["betting_decision_support"]
     assert "odds_missing" in support["blocking_flags"]
     assert support["best_candidate"]["recommendation"] == "no_bet"
-    assert support["final_decision"]["headline"].startswith("不投注")
+    assert support["final_decision"]["headline"].startswith("分析结论：暂不支持清晰方向")
 
 
 def test_decision_support_rejects_marginal_probability_edge_when_ev_is_negative():
@@ -1295,8 +1384,8 @@ def test_shortlist_value_matches_filters_and_ranks_mcp_decisions(monkeypatch, tm
         "强队B vs 弱队B": {
             "status": "ok",
             "agent_brief": {"match": {"home_team": "强队B", "away_team": "弱队B", "league": "测试联赛", "kickoff_utc_plus_8": "2026-05-23T20:40:00+08:00"}},
-            "final_decision": {"headline": "立即投注：亚盘 强队B -0.5 @ 1.9，small", "recommendation": "immediate_bet"},
-            "best_candidate": {"market": "asian_handicap", "selection": "强队B -0.5", "recommendation": "immediate_bet", "edge": 0.12, "stake_level": "small", "decimal_odds": 1.9},
+            "final_decision": {"headline": "立即投注：胜平负 强队B 主胜 @ 1.9，small", "recommendation": "immediate_bet"},
+            "best_candidate": {"market": "1x2", "selection": "强队B 主胜", "selection_key": "home", "recommendation": "immediate_bet", "edge": 0.12, "stake_level": "small", "decimal_odds": 1.9},
             "market_candidates": [],
             "betting_decision_support": {"blocking_flags": [], "caution_flags": [], "confidence": 0.68},
             "analysis_pack": {"data_coverage": {"blocks": {"moneyline_1x2": True, "asian_handicap": True, "over_under": True, "recent_form": True, "league_table": True, "battle_history": True, "lineup": True}}},
@@ -1490,96 +1579,11 @@ def test_shortlist_defaults_to_confidence_mode(monkeypatch):
     assert [pick["match"]["home_team"] for pick in result["picks"]] == ["高概率队", "高边际队"]
 
 
-def test_shortlist_confidence_mode_can_target_asian_handicap_candidates(monkeypatch):
-    async def fake_list_matches(*args, **kwargs):
-        assert kwargs["window_hours"] == 1
-        return {
-            "status": "ok",
-            "time_window_policy": {"as_of": "2026-05-23T20:00:00+08:00", "window_hours": 1},
-            "matches": [
-                {"home_team": "主队A", "away_team": "客队A", "league": "测试联赛", "kickoff_utc_plus_8": "2026-05-23T20:20:00+08:00"},
-                {"home_team": "主队B", "away_team": "客队B", "league": "测试联赛", "kickoff_utc_plus_8": "2026-05-23T20:40:00+08:00"},
-            ],
-            "total_count": 2,
-        }
+def test_shortlist_rejects_asian_handicap_target_without_analysis(monkeypatch):
+    async def unexpected_list_matches(*args, **kwargs):
+        raise AssertionError("Asian handicap target should be rejected before fixture scan")
 
-    analyses = {
-        "主队A vs 客队A": {
-            "status": "ok",
-            "agent_brief": {"match": {"home_team": "主队A", "away_team": "客队A", "league": "测试联赛"}},
-            "final_decision": {"headline": "立即投注：大小球", "recommendation": "immediate_bet"},
-            "final_execution_advice": {"headline": "最终执行：大小球", "action": "bet_now"},
-            "best_candidate": {
-                "market": "over_under",
-                "selection": "大球 2.5",
-                "recommendation": "immediate_bet",
-                "edge": 0.09,
-                "model_probability": 0.62,
-                "stake_level": "small",
-                "decimal_odds": 1.8,
-            },
-            "market_candidates": [
-                {
-                    "market": "over_under",
-                    "selection": "大球 2.5",
-                    "recommendation": "immediate_bet",
-                    "edge": 0.09,
-                    "model_probability": 0.62,
-                    "stake_level": "small",
-                    "decimal_odds": 1.8,
-                },
-                {
-                    "market": "asian_handicap",
-                    "selection": "主队A -0.25",
-                    "recommendation": "immediate_bet",
-                    "edge": 0.03,
-                    "model_probability": 0.57,
-                    "calibrated_probability": 0.61,
-                    "stake_level": "small",
-                    "decimal_odds": 1.92,
-                },
-            ],
-            "betting_decision_support": {"blocking_flags": [], "caution_flags": ["near_kickoff_under_60m"], "confidence": 0.66},
-            "analysis_pack": {"data_coverage": {"blocks": {"moneyline_1x2": True, "asian_handicap": True, "over_under": True, "recent_form": True}}},
-            "quality": {"is_bettable_input": True},
-        },
-        "主队B vs 客队B": {
-            "status": "ok",
-            "agent_brief": {"match": {"home_team": "主队B", "away_team": "客队B", "league": "测试联赛"}},
-            "final_decision": {"headline": "立即投注：大小球", "recommendation": "immediate_bet"},
-            "final_execution_advice": {"headline": "最终执行：大小球", "action": "bet_now"},
-            "best_candidate": {
-                "market": "over_under",
-                "selection": "小球 2.25",
-                "recommendation": "immediate_bet",
-                "edge": 0.08,
-                "model_probability": 0.6,
-                "stake_level": "small",
-                "decimal_odds": 1.85,
-            },
-            "market_candidates": [
-                {
-                    "market": "asian_handicap",
-                    "selection": "客队B +0.5",
-                    "recommendation": "condition_observe",
-                    "edge": 0.02,
-                    "model_probability": 0.54,
-                    "calibrated_probability": 0.56,
-                    "stake_level": "watch_only_until_condition",
-                    "decimal_odds": 1.9,
-                }
-            ],
-            "betting_decision_support": {"blocking_flags": [], "caution_flags": [], "confidence": 0.66},
-            "analysis_pack": {"data_coverage": {"blocks": {"moneyline_1x2": True, "asian_handicap": True, "over_under": True, "recent_form": True}}},
-            "quality": {"is_bettable_input": True},
-        },
-    }
-
-    async def fake_analyze_single_match(query, **kwargs):
-        return analyses[query]
-
-    monkeypatch.setattr(sources_module, "list_matches", fake_list_matches)
-    monkeypatch.setattr(sources_module, "analyze_single_match", fake_analyze_single_match)
+    monkeypatch.setattr(sources_module, "list_matches", unexpected_list_matches)
 
     result = asyncio.run(
         sources_module.shortlist_value_matches(
@@ -1592,11 +1596,14 @@ def test_shortlist_confidence_mode_can_target_asian_handicap_candidates(monkeypa
         )
     )
 
+    assert result["status"] == "unsupported_market"
     assert result["target_market"] == "asian_handicap"
-    assert [pick["best_candidate"]["market"] for pick in result["picks"]] == ["asian_handicap", "asian_handicap"]
-    assert result["picks"][0]["best_candidate"]["selection"] == "主队A -0.25"
-    assert result["picks"][0]["final_execution_advice"]["market"] == "asian_handicap"
-    assert result["picks"][0]["selection_confidence"]["calibrated_probability"] == 0.61
+    assert result["returned_count"] == 0
+    assert result["picks"] == []
+    assert result["supported_target_markets"] == ["1x2", "jingcai_hhad", "over_under", "any"]
+    assert result["analysis_policy"]["asian_handicap_role"] == "supporting_signal_only"
+    assert result["analysis_output_policy"]["mode"] == "analysis_only"
+    assert "disabled" in result["reason"]
 
 
 def test_shortlist_balanced_mode_requires_confidence_and_fair_odds(monkeypatch):
@@ -1619,8 +1626,9 @@ def test_shortlist_balanced_mode_requires_confidence_and_fair_odds(monkeypatch):
             "final_decision": {"headline": f"立即投注：{selection}", "recommendation": "immediate_bet"},
             "final_execution_advice": {"headline": f"最终执行：{selection}", "action": "bet_now"},
             "best_candidate": {
-                "market": "asian_handicap",
+                "market": "1x2",
                 "selection": selection,
+                "selection_key": "home",
                 "recommendation": "immediate_bet",
                 "edge": edge,
                 "model_probability": probability,
@@ -1635,9 +1643,9 @@ def test_shortlist_balanced_mode_requires_confidence_and_fair_odds(monkeypatch):
         }
 
     analyses = {
-        "低赔热门 vs 客队A": analysis_for("低赔热门", "低赔热门 -1", 0.73, 1.32, 0.02),
-        "概率不足 vs 客队B": analysis_for("概率不足", "概率不足 +0.25", 0.55, 1.9, 0.03),
-        "均衡选择 vs 客队C": analysis_for("均衡选择", "均衡选择 -0.25", 0.62, 1.78, 0.06),
+        "低赔热门 vs 客队A": analysis_for("低赔热门", "低赔热门 主胜", 0.73, 1.32, 0.02),
+        "概率不足 vs 客队B": analysis_for("概率不足", "概率不足 主胜", 0.55, 1.9, 0.03),
+        "均衡选择 vs 客队C": analysis_for("均衡选择", "均衡选择 主胜", 0.62, 1.78, 0.06),
     }
 
     async def fake_analyze_single_match(query, **kwargs):
@@ -1653,7 +1661,7 @@ def test_shortlist_balanced_mode_requires_confidence_and_fair_odds(monkeypatch):
             window_minutes=60,
             top_n=3,
             mode="balance",
-            target_market="asian_handicap",
+            target_market="1x2",
             min_calibrated_probability=0.58,
             min_decimal_odds=1.65,
             max_decimal_odds=2.05,
@@ -1662,7 +1670,7 @@ def test_shortlist_balanced_mode_requires_confidence_and_fair_odds(monkeypatch):
     )
 
     assert result["mode"] == "balanced"
-    assert result["target_market"] == "asian_handicap"
+    assert result["target_market"] == "1x2"
     assert [pick["match"]["home_team"] for pick in result["picks"]] == ["均衡选择"]
     confidence = result["picks"][0]["selection_confidence"]
     assert confidence["fair_break_even_probability"] == 0.561798
@@ -1715,13 +1723,13 @@ def test_recommendation_from_edge_downgrades_low_calibrated_probability_even_wit
     assert recommendation == "condition_observe"
 
 
-def test_shortlist_balanced_mode_rejects_immature_high_risk_formal_picks(monkeypatch):
+def test_shortlist_balanced_mode_rejects_immature_jingcai_formal_picks(monkeypatch):
     async def fake_list_matches(*args, **kwargs):
         return {
             "status": "ok",
             "time_window_policy": {"as_of": "2026-05-23T20:00:00+08:00", "window_hours": 1},
             "matches": [
-                {"home_team": "大盘弱队", "away_team": "客队A", "league": "测试联赛"},
+                {"home_team": "低赔热门", "away_team": "客队A", "league": "测试联赛"},
                 {"home_team": "缺少多公司", "away_team": "客队B", "league": "测试联赛"},
                 {"home_team": "缺少阵容", "away_team": "客队C", "league": "测试联赛"},
                 {"home_team": "稳妥选择", "away_team": "客队D", "league": "测试联赛"},
@@ -1732,8 +1740,8 @@ def test_shortlist_balanced_mode_rejects_immature_high_risk_formal_picks(monkeyp
     def analysis_for(
         home: str,
         selection: str,
-        line: float,
         *,
+        decimal_odds: float = 1.88,
         multi_bookmaker_snapshot: bool = True,
         caution_flags: list[str] | None = None,
     ) -> dict:
@@ -1743,15 +1751,15 @@ def test_shortlist_balanced_mode_rejects_immature_high_risk_formal_picks(monkeyp
             "final_decision": {"headline": f"立即投注：{selection}", "recommendation": "immediate_bet"},
             "final_execution_advice": {"headline": f"最终执行：{selection}", "action": "bet_now"},
             "best_candidate": {
-                "market": "asian_handicap",
+                "market": "1x2",
                 "selection": selection,
-                "line": line,
+                "selection_key": "home",
                 "recommendation": "immediate_bet",
                 "edge": 0.08,
                 "model_probability": 0.62,
                 "calibrated_probability": 0.62,
                 "stake_level": "small",
-                "decimal_odds": 1.88,
+                "decimal_odds": decimal_odds,
             },
             "market_candidates": [],
             "betting_decision_support": {
@@ -1774,20 +1782,18 @@ def test_shortlist_balanced_mode_rejects_immature_high_risk_formal_picks(monkeyp
         }
 
     analyses = {
-        "大盘弱队 vs 客队A": analysis_for("大盘弱队", "大盘弱队 +2.5", 2.5),
+        "低赔热门 vs 客队A": analysis_for("低赔热门", "低赔热门 主胜", decimal_odds=1.32),
         "缺少多公司 vs 客队B": analysis_for(
             "缺少多公司",
-            "缺少多公司 +0.5",
-            0.5,
+            "缺少多公司 主胜",
             multi_bookmaker_snapshot=False,
         ),
         "缺少阵容 vs 客队C": analysis_for(
             "缺少阵容",
-            "缺少阵容 +0.5",
-            0.5,
+            "缺少阵容 主胜",
             caution_flags=["lineup_unavailable"],
         ),
-        "稳妥选择 vs 客队D": analysis_for("稳妥选择", "稳妥选择 -0.25", -0.25),
+        "稳妥选择 vs 客队D": analysis_for("稳妥选择", "稳妥选择 主胜"),
     }
 
     async def fake_analyze_single_match(query, **kwargs):
@@ -1803,7 +1809,7 @@ def test_shortlist_balanced_mode_rejects_immature_high_risk_formal_picks(monkeyp
             window_minutes=60,
             top_n=4,
             mode="balanced",
-            target_market="asian_handicap",
+            target_market="1x2",
             min_calibrated_probability=0.58,
             min_decimal_odds=1.65,
             max_decimal_odds=2.05,
@@ -1813,7 +1819,7 @@ def test_shortlist_balanced_mode_rejects_immature_high_risk_formal_picks(monkeyp
 
     assert [pick["match"]["home_team"] for pick in result["picks"]] == ["稳妥选择"]
     assert sorted(item["reason"] for item in result["rejected"]) == [
-        "large_handicap_requires_backtest",
+        "decimal_odds_below_threshold",
         "lineup_context_missing",
         "multi_bookmaker_snapshot_missing",
     ]
@@ -1872,6 +1878,7 @@ def test_auto_learning_config_from_env_supports_background_sampling_windows(monk
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_TOP_N", "12")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_LIMIT", "80")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_TIMEZONE", "Asia/Shanghai")
+    monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_JINGCAI_WINDOW_MINUTES", "720")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES", "1440")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES", "2880")
     monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_OBSERVATION_LIMIT", "40")
@@ -1890,6 +1897,7 @@ def test_auto_learning_config_from_env_supports_background_sampling_windows(monk
     assert config["top_n"] == 12
     assert config["limit"] == 80
     assert config["timezone_name"] == "Asia/Shanghai"
+    assert config["jingcai_window_minutes"] == 720
     assert config["asian_window_minutes"] == 1440
     assert config["parlay_window_minutes"] == 2880
     assert config["learning_observation_limit"] == 40
@@ -1909,6 +1917,7 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
         "FOOTBALL_DATA_AUTO_LEARNING_TOP_N",
         "FOOTBALL_DATA_AUTO_LEARNING_LIMIT",
         "FOOTBALL_DATA_AUTO_LEARNING_TIMEZONE",
+        "FOOTBALL_DATA_AUTO_LEARNING_JINGCAI_WINDOW_MINUTES",
         "FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES",
         "FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES",
         "FOOTBALL_DATA_AUTO_LEARNING_SNAPSHOT_WINDOW_MINUTES",
@@ -1931,6 +1940,7 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
     assert config["cycle_timeout_seconds"] == 300
     assert config["top_n"] == 12
     assert config["limit"] == 80
+    assert config["jingcai_window_minutes"] == 10
     assert config["asian_window_minutes"] == 10
     assert config["parlay_window_minutes"] == 10
     assert config["market_snapshot_window_minutes"] == 24 * 60
@@ -1946,12 +1956,23 @@ def test_auto_learning_config_separates_prediction_window_from_snapshot_collecti
     assert config["shadow_prediction_limit"] == 100
 
 
+def test_auto_learning_config_uses_legacy_asian_window_as_jingcai_fallback(monkeypatch):
+    monkeypatch.delenv("FOOTBALL_DATA_AUTO_LEARNING_JINGCAI_WINDOW_MINUTES", raising=False)
+    monkeypatch.setenv("FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES", "45")
+
+    config = server._auto_learning_config_from_env()
+
+    assert config["jingcai_window_minutes"] == 45
+    assert config["asian_window_minutes"] == 45
+
+
 def test_docker_compose_auto_learning_defaults_keep_snapshot_history_wide():
     compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
 
     assert "FOOTBALL_DATA_AUTO_LEARNING_INTERVAL_SECONDS:-120" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_CYCLE_TIMEOUT_SECONDS:-300" in compose_text
-    # 业务预测只持久化近开赛样本，避免过早赔率污染学习标签；盘口快照窗口保持更宽。
+    # 业务预测只持久化近开赛竞彩样本，避免过早赔率污染学习标签；盘口快照窗口保持更宽。
+    assert "FOOTBALL_DATA_AUTO_LEARNING_JINGCAI_WINDOW_MINUTES:-10" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES:-10" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_PARLAY_WINDOW_MINUTES:-10" in compose_text
     assert "FOOTBALL_DATA_AUTO_LEARNING_ANALYSIS_TIMEOUT_SECONDS:-45" in compose_text
@@ -2013,7 +2034,7 @@ def test_shortlist_value_matches_uses_concurrent_fast_analysis_without_repeated_
             "agent_brief": {"match": {"home_team": query.split(" vs ")[0], "away_team": query.split(" vs ")[1], "league": "测试联赛"}},
             "final_decision": {"headline": f"立即投注：{query}", "recommendation": "immediate_bet"},
             "final_execution_advice": {"headline": f"最终执行：立即投注 {query}", "action": "bet_now"},
-            "best_candidate": {"market": "asian_handicap", "selection": query, "recommendation": "immediate_bet", "edge": 0.05, "stake_level": "small", "decimal_odds": 1.9},
+            "best_candidate": {"market": "1x2", "selection": f"{query.split(' vs ')[0]} 主胜", "selection_key": "home", "recommendation": "immediate_bet", "edge": 0.05, "stake_level": "small", "decimal_odds": 1.9},
             "market_candidates": [],
             "betting_decision_support": {"blocking_flags": [], "caution_flags": [], "confidence": 0.6},
             "analysis_pack": {"data_coverage": {"blocks": {"moneyline_1x2": True, "asian_handicap": True, "over_under": True, "recent_form": True}}},
@@ -2032,6 +2053,7 @@ def test_shortlist_value_matches_uses_concurrent_fast_analysis_without_repeated_
             top_n=3,
             limit=6,
             recommendation_log_path="/tmp/football-data-mcp-test-fast-shortlist.jsonl",
+            use_learning_policy=False,
         )
     )
     elapsed = time.perf_counter() - started
@@ -2105,8 +2127,9 @@ def test_shortlist_value_matches_default_analyzes_all_thirty_listed_candidates(m
             "final_decision": {"headline": f"立即投注：{query}", "recommendation": "immediate_bet"},
             "final_execution_advice": {"headline": f"最终执行：立即投注 {query}", "action": "bet_now"},
             "best_candidate": {
-                "market": "asian_handicap",
+                "market": "1x2",
                 "selection": query,
+                "selection_key": "home",
                 "recommendation": "immediate_bet",
                 "edge": 0.05,
                 "model_probability": 0.62,
@@ -2130,7 +2153,7 @@ def test_shortlist_value_matches_default_analyzes_all_thirty_listed_candidates(m
             window_minutes=60,
             limit=30,
             mode="balance",
-            target_market="asian_handicap",
+            target_market="1x2",
         )
     )
 
@@ -2187,10 +2210,9 @@ def test_shortlist_value_matches_can_analyze_sixty_candidates_and_reports_funnel
             "final_decision": {"headline": f"分析：{query}", "recommendation": recommendation},
             "final_execution_advice": {"headline": f"最终执行：{query}", "action": "paper_track"},
             "best_candidate": {
-                "market": "asian_handicap",
+                "market": "1x2",
                 "selection": query,
-                "selection_key": "home_cover",
-                "line": -0.5,
+                "selection_key": "home",
                 "recommendation": recommendation,
                 "edge": edge,
                 "model_probability": probability,
@@ -2224,7 +2246,7 @@ def test_shortlist_value_matches_can_analyze_sixty_candidates_and_reports_funnel
             top_n=5,
             limit=70,
             mode="balance",
-            target_market="asian_handicap",
+            target_market="1x2",
             analysis_candidate_limit=60,
             analysis_concurrency=12,
         )
@@ -2295,10 +2317,9 @@ def test_shortlist_value_matches_hard_excludes_noisy_competitions_before_analysi
             "final_decision": {"headline": "立即投注：英超主队", "recommendation": "immediate_bet"},
             "final_execution_advice": {"headline": "最终执行：立即投注 英超主队", "action": "bet_now"},
             "best_candidate": {
-                "market": "asian_handicap",
-                "selection": "英超主队 -0.5",
-                "selection_key": "home_cover",
-                "line": -0.5,
+                "market": "1x2",
+                "selection": "英超主队 主胜",
+                "selection_key": "home",
                 "recommendation": "immediate_bet",
                 "edge": 0.06,
                 "model_probability": 0.64,
@@ -2332,7 +2353,7 @@ def test_shortlist_value_matches_hard_excludes_noisy_competitions_before_analysi
             top_n=5,
             limit=10,
             mode="balanced",
-            target_market="asian_handicap",
+            target_market="1x2",
             use_learning_policy=False,
             enforce_settlement_coverage=False,
         )
@@ -2410,7 +2431,7 @@ def test_shortlist_scans_schedule_candidates_before_odds_gate(monkeypatch):
             window_minutes=10,
             limit=5,
             mode="balanced",
-            target_market="asian_handicap",
+            target_market="1x2",
         )
     )
 
@@ -2469,10 +2490,9 @@ def test_shortlist_value_matches_preserves_source_match_and_context_for_dashboar
                 }
             },
             "best_candidate": {
-                "market": "asian_handicap",
-                "selection": "上下文主队 -0.5",
-                "selection_key": "home_cover",
-                "line": -0.5,
+                "market": "1x2",
+                "selection": "上下文主队 主胜",
+                "selection_key": "home",
                 "recommendation": "no_value",
                 "edge": -0.01,
                 "model_probability": 0.52,
@@ -2509,7 +2529,7 @@ def test_shortlist_value_matches_preserves_source_match_and_context_for_dashboar
             top_n=5,
             limit=1,
             mode="balanced",
-            target_market="asian_handicap",
+            target_market="1x2",
             analysis_candidate_limit=1,
         )
     )
@@ -2521,82 +2541,90 @@ def test_shortlist_value_matches_preserves_source_match_and_context_for_dashboar
     assert rejected["match_context"]["lineup"]["base"]["referee"] == "测试裁判"
 
 
-def test_recommend_jingcai_parlay_builds_2x1_ticket_from_mcp_shortlist(monkeypatch):
-    async def fake_shortlist_value_matches(**kwargs):
+def test_recommend_jingcai_parlay_builds_2x1_ticket_from_official_jingcai_source(monkeypatch):
+    official_matches = [
+        {
+            "source_name": "sporttery",
+            "match_id": "official-parlay-1",
+            "match_num_str": "周六101",
+            "league": "测试联赛",
+            "home_team": "主队A",
+            "away_team": "客队A",
+            "kickoff_utc_plus_8": "2026-05-24T20:00:00+08:00",
+            "official_odds": {"HAD": {"home": 1.80, "draw": 3.40, "away": 4.20}},
+            "selling_pools": ["HAD"],
+        },
+        {
+            "source_name": "sporttery",
+            "match_id": "official-parlay-2",
+            "match_num_str": "周六102",
+            "league": "测试联赛",
+            "home_team": "主队B",
+            "away_team": "客队B",
+            "kickoff_utc_plus_8": "2026-05-24T21:00:00+08:00",
+            "official_odds": {"HAD": {"home": 1.90, "draw": 3.25, "away": 3.10}},
+            "selling_pools": ["HAD"],
+        },
+    ]
+
+    async def fake_load_sporttery_official_matches(*args, **kwargs):
+        return official_matches, {"url": "https://sporttery.test", "source": "sporttery.cn"}
+
+    async def fake_analyze_single_match(query, **kwargs):
+        if query.startswith("主队A"):
+            probabilities = {"home": 0.62, "draw": 0.23, "away": 0.15}
+        else:
+            probabilities = {"home": 0.61, "draw": 0.22, "away": 0.17}
         return {
             "status": "ok",
-            "tool": "shortlist_value_matches",
-            "window_minutes": kwargs["window_minutes"],
-            "picks": [
-                {
-                    "match": {"home_team": "主队A", "away_team": "客队A", "league": "测试联赛"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "1x2",
-                        "market_label": "胜平负",
-                        "selection": "主队A 主胜",
-                        "decimal_odds": 1.80,
-                        "stake_level": "small",
-                    },
-                    "best_candidate": {
-                        "market": "1x2",
-                        "selection": "主队A 主胜",
-                        "decimal_odds": 1.80,
-                        "model_probability": 0.62,
-                        "market_probability": 0.56,
-                        "edge": 0.06,
-                    },
-                    "confidence": 0.66,
-                    "caution_flags": [],
-                    "value_score": 34.2,
-                },
-                {
-                    "match": {"home_team": "主队B", "away_team": "客队B", "league": "测试联赛"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "1x2",
-                        "market_label": "胜平负",
-                        "selection": "客队B 客胜",
-                        "decimal_odds": 1.90,
-                        "stake_level": "small",
-                    },
-                    "best_candidate": {
-                        "market": "1x2",
-                        "selection": "客队B 客胜",
-                        "decimal_odds": 1.90,
-                        "model_probability": 0.56,
-                        "market_probability": 0.51,
-                        "edge": 0.05,
-                    },
-                    "confidence": 0.63,
-                    "caution_flags": [],
-                    "value_score": 31.5,
-                },
-            ],
+            "agent_brief": {
+                "match": {
+                    "home_team": query.split(" vs ")[0],
+                    "away_team": query.split(" vs ")[1],
+                    "league": "测试联赛",
+                }
+            },
+            "betting_decision_support": {"blocking_flags": [], "caution_flags": [], "confidence": 0.66},
+            "model_engine": {
+                "available": True,
+                "derived_probabilities": {"1x2": probabilities},
+            },
+            "analysis_pack": {"data_coverage": {"blocks": {"moneyline_1x2": True}}},
+            "quality": {"is_bettable_input": True},
         }
 
-    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
+    async def unexpected_shortlist_value_matches(**kwargs):
+        raise AssertionError("Jingcai parlay must use official Sporttery source, not non-official shortlist")
+
+    monkeypatch.setattr(sources_module, "load_sporttery_official_matches", fake_load_sporttery_official_matches)
+    monkeypatch.setattr(sources_module, "analyze_single_match", fake_analyze_single_match)
+    monkeypatch.setattr(sources_module, "shortlist_value_matches", unexpected_shortlist_value_matches)
 
     result = asyncio.run(
         sources_module.recommend_jingcai_parlay(
+            as_of="2026-05-24T19:30:00+08:00",
+            timezone_name="Asia/Shanghai",
             window_minutes=60,
             top_n=1,
             max_legs=2,
-            include_non_official_markets=True,
         )
     )
 
     ticket = result["parlay_tickets"][0]
     assert result["status"] == "ok"
+    assert result["analysis_output_policy"]["mode"] == "analysis_only"
+    assert "not present them as betting recommendations" in result["agent_guidance"]
+    assert result["official_jingcai_source"]["selling_count"] == 2
+    assert result["official_jingcai_source"]["analyzed_count"] == 2
     assert result["eligible_leg_count"] == 2
     assert ticket["parlay_type"] == "2串1"
     assert ticket["combined_decimal_odds"] == 3.42
-    assert ticket["estimated_hit_probability"] == 0.3472
-    assert ticket["edge_proxy"] == 0.1874
     assert ticket["recommendation"] == "parlay_recommended"
     assert ticket["stake_level"] == "small"
     assert ticket["market_scope"] == "jingcai_supported"
-    assert [leg["selection"] for leg in ticket["legs"]] == ["主队A 主胜", "客队B 客胜"]
+    assert [leg["market"] for leg in ticket["legs"]] == ["1x2", "1x2"]
+    assert [leg["official_pool"] for leg in ticket["legs"]] == ["HAD", "HAD"]
+    assert [leg["selection"] for leg in ticket["legs"]] == ["主队A 主胜", "主队B 主胜"]
 
 
 def test_parse_sporttery_match_list_extracts_selling_had_and_hhad():
@@ -2873,7 +2901,7 @@ def test_recommend_jingcai_parlay_defaults_to_jingcai_day_window(monkeypatch):
     assert kwargs_seen["window_minutes"] == 24 * 60
     assert result["official_jingcai_source"]["enabled"] is True
     assert result["parlay_policy"]["default_window_rule"].startswith("Parlay uses a Jingcai day-style")
-    assert "excluded by default" in result["parlay_policy"]["non_official_market_rule"]
+    assert "disabled" in result["parlay_policy"]["non_official_market_rule"]
 
 
 def test_sporttery_fixture_odds_use_fetch_time_as_snapshot_timestamp():
@@ -2966,55 +2994,15 @@ def test_recommend_jingcai_parlay_excludes_non_official_markets_by_default(monke
     assert result["official_jingcai_source"]["selling_count"] == 0
 
 
-def test_recommend_jingcai_parlay_marks_non_official_handicap_legs(monkeypatch):
-    async def fake_shortlist_value_matches(**kwargs):
-        return {
-            "status": "ok",
-            "picks": [
-                {
-                    "match": {"home_team": "主队A", "away_team": "客队A", "league": "测试联赛"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "asian_handicap",
-                        "market_label": "亚盘",
-                        "selection": "主队A -0.5",
-                        "decimal_odds": 1.92,
-                        "stake_level": "small",
-                    },
-                    "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "主队A -0.5",
-                        "decimal_odds": 1.92,
-                        "model_probability": 0.58,
-                        "edge": 0.06,
-                    },
-                    "confidence": 0.62,
-                    "caution_flags": [],
-                },
-                {
-                    "match": {"home_team": "主队B", "away_team": "客队B", "league": "测试联赛"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "over_under",
-                        "market_label": "大小球",
-                        "selection": "大球 2.5",
-                        "decimal_odds": 1.88,
-                        "stake_level": "small",
-                    },
-                    "best_candidate": {
-                        "market": "over_under",
-                        "selection": "大球 2.5",
-                        "decimal_odds": 1.88,
-                        "model_probability": 0.57,
-                        "edge": 0.05,
-                    },
-                    "confidence": 0.61,
-                    "caution_flags": ["near_kickoff_under_60m"],
-                },
-            ],
-        }
+def test_recommend_jingcai_parlay_ignores_non_official_market_request(monkeypatch):
+    async def fake_load_sporttery_official_matches(as_of_dt, window_minutes):
+        return [], {"url": "https://sporttery.test", "source": "sporttery.cn"}
 
-    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
+    async def unexpected_shortlist_value_matches(**kwargs):
+        raise AssertionError("Jingcai-only parlay must not fall back to non-official shortlist")
+
+    monkeypatch.setattr(sources_module, "load_sporttery_official_matches", fake_load_sporttery_official_matches)
+    monkeypatch.setattr(sources_module, "shortlist_value_matches", unexpected_shortlist_value_matches)
 
     result = asyncio.run(
         sources_module.recommend_jingcai_parlay(
@@ -3025,234 +3013,11 @@ def test_recommend_jingcai_parlay_marks_non_official_handicap_legs(monkeypatch):
         )
     )
 
-    ticket = result["parlay_tickets"][0]
-    assert ticket["market_scope"] == "mixed_non_official"
-    assert ticket["stake_level"] == "tiny"
-    assert "contains_non_official_handicap_or_totals" in ticket["risk_flags"]
-    assert result["parlay_policy"]["non_official_market_rule"].startswith("Asian handicap")
-
-
-def test_recommend_jingcai_parlay_downgrades_deep_handicap_combo_probability(monkeypatch):
-    async def fake_shortlist_value_matches(**kwargs):
-        return {
-            "status": "ok",
-            "picks": [
-                {
-                    "match": {"home_team": "红崖", "away_team": "耶龙加", "league": "澳布甲"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "asian_handicap",
-                        "market_label": "亚盘",
-                        "selection": "耶龙加 -2.75",
-                        "decimal_odds": 1.75,
-                        "stake_level": "small",
-                        "line": -2.75,
-                    },
-                    "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "耶龙加 -2.75",
-                        "decimal_odds": 1.75,
-                        "model_probability": 0.814306,
-                        "market_probability": 0.520548,
-                        "edge": 0.293758,
-                        "line": -2.75,
-                    },
-                    "confidence": 0.69,
-                    "caution_flags": ["lineup_unavailable", "near_kickoff_under_60m"],
-                },
-                {
-                    "match": {"home_team": "马尼拉挖掘者", "away_team": "内湖公马", "league": "菲律宾联"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "asian_handicap",
-                        "market_label": "亚盘",
-                        "selection": "马尼拉挖掘者 -2.5",
-                        "decimal_odds": 1.85,
-                        "stake_level": "small",
-                        "line": -2.5,
-                    },
-                    "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "马尼拉挖掘者 -2.5",
-                        "decimal_odds": 1.85,
-                        "model_probability": 0.69485,
-                        "market_probability": 0.513158,
-                        "edge": 0.181692,
-                        "line": -2.5,
-                    },
-                    "confidence": 0.645,
-                    "caution_flags": ["lineup_unavailable", "near_kickoff_under_60m"],
-                },
-            ],
-        }
-
-    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
-
-    result = asyncio.run(
-        sources_module.recommend_jingcai_parlay(
-            window_minutes=60,
-            top_n=1,
-            max_legs=2,
-            include_non_official_markets=True,
-        )
-    )
-
-    ticket = result["parlay_tickets"][0]
-    assert ticket["recommendation"] == "single_bet_preferred"
-    assert ticket["risk_level"] == "high"
-    assert ticket["estimated_hit_probability"] < 0.24
-    assert ticket["edge_proxy"] < 0
-    assert "deep_handicap_line" in ticket["risk_flags"]
-    assert "leg_probability_capped" in ticket["risk_flags"]
-    assert "parlay_dependence_penalty_applied" in ticket["risk_flags"]
-    assert ticket["legs"][0]["raw_model_probability"] == 0.814306
-    assert ticket["legs"][0]["model_probability"] <= 0.48
-    assert ticket["legs"][0]["probability_calibration"]["applied"] is True
-
-
-def test_recommend_jingcai_parlay_returns_single_fallbacks_when_no_ticket_recommended(monkeypatch):
-    async def fake_shortlist_value_matches(**kwargs):
-        return {
-            "status": "ok",
-            "picks": [
-                {
-                    "match": {"home_team": "主队A", "away_team": "客队A", "league": "测试联赛"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "asian_handicap",
-                        "market_label": "亚盘",
-                        "selection": "主队A -1.25",
-                        "decimal_odds": 1.82,
-                        "stake_level": "small",
-                        "line": -1.25,
-                    },
-                    "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "主队A -1.25",
-                        "decimal_odds": 1.82,
-                        "model_probability": 0.60,
-                        "edge": 0.08,
-                        "line": -1.25,
-                    },
-                    "confidence": 0.64,
-                    "caution_flags": ["lineup_unavailable", "near_kickoff_under_60m"],
-                },
-                {
-                    "match": {"home_team": "主队B", "away_team": "客队B", "league": "测试联赛"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "asian_handicap",
-                        "market_label": "亚盘",
-                        "selection": "主队B -1.25",
-                        "decimal_odds": 1.85,
-                        "stake_level": "small",
-                        "line": -1.25,
-                    },
-                    "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "主队B -1.25",
-                        "decimal_odds": 1.85,
-                        "model_probability": 0.60,
-                        "edge": 0.08,
-                        "line": -1.25,
-                    },
-                    "confidence": 0.64,
-                    "caution_flags": ["lineup_unavailable", "near_kickoff_under_60m"],
-                },
-            ],
-        }
-
-    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
-
-    result = asyncio.run(
-        sources_module.recommend_jingcai_parlay(
-            window_minutes=60,
-            top_n=2,
-            max_legs=2,
-            include_non_official_markets=True,
-        )
-    )
-
-    assert result["recommendation_summary"]["action"] == "single_bet_fallback"
-    assert result["recommended_ticket_count"] == 0
-    assert result["risk_candidate_ticket_count"] >= 1
-    assert result["single_bet_fallbacks"]
-    assert result["single_bet_fallbacks"][0]["single_expected_multiplier"] > 0
-    assert result["agent_guidance"].startswith("No recommended parlay ticket")
-
-
-def test_recommend_jingcai_parlay_does_not_stake_negative_single_fallback(monkeypatch):
-    async def fake_shortlist_value_matches(**kwargs):
-        return {
-            "status": "ok",
-            "picks": [
-                {
-                    "match": {"home_team": "主队A", "away_team": "客队A", "league": "测试联赛"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "asian_handicap",
-                        "market_label": "亚盘",
-                        "selection": "主队A -1.25",
-                        "decimal_odds": 1.82,
-                        "line": -1.25,
-                    },
-                    "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "主队A -1.25",
-                        "decimal_odds": 1.82,
-                        "model_probability": 0.60,
-                        "line": -1.25,
-                    },
-                    "confidence": 0.60,
-                    "caution_flags": [
-                        "asian_handicap_consensus_market_line_split",
-                        "over_under_consensus_total_line_split",
-                        "lineup_unavailable",
-                        "near_kickoff_under_60m",
-                    ],
-                },
-                {
-                    "match": {"home_team": "主队B", "away_team": "客队B", "league": "测试联赛"},
-                    "final_execution_advice": {
-                        "action": "bet_now",
-                        "market": "asian_handicap",
-                        "market_label": "亚盘",
-                        "selection": "主队B -1.25",
-                        "decimal_odds": 1.80,
-                        "line": -1.25,
-                    },
-                    "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "主队B -1.25",
-                        "decimal_odds": 1.80,
-                        "model_probability": 0.60,
-                        "line": -1.25,
-                    },
-                    "confidence": 0.60,
-                    "caution_flags": [
-                        "asian_handicap_consensus_market_line_split",
-                        "over_under_consensus_total_line_split",
-                        "lineup_unavailable",
-                        "near_kickoff_under_60m",
-                    ],
-                },
-            ],
-        }
-
-    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
-
-    result = asyncio.run(
-        sources_module.recommend_jingcai_parlay(
-            window_minutes=60,
-            top_n=1,
-            max_legs=2,
-            include_non_official_markets=True,
-        )
-    )
-
-    assert result["recommendation_summary"]["action"] == "no_bettable_candidate"
-    assert result["single_bet_fallbacks"][0]["stake_level"] == "none"
-    assert result["single_bet_fallbacks"][0]["single_recommendation"] == "watch_only"
+    assert result["eligible_leg_count"] == 0
+    assert result["parlay_tickets"] == []
+    assert result["official_jingcai_source"]["requested_include_non_official_markets"] is True
+    assert result["official_jingcai_source"]["non_official_markets_enabled"] is False
+    assert "disabled" in result["parlay_policy"]["non_official_market_rule"]
 
 
 def test_summarize_lineup_exposes_official_starters():

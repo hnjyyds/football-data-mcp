@@ -58,6 +58,9 @@ DEFAULT_USER_TIMEZONE = ZoneInfo("Asia/Shanghai")
 MATCH_SCORE_THRESHOLD = float(os.getenv("FOOTBALL_DATA_MATCH_SCORE_THRESHOLD", "0.68"))
 PRICE_OUTLIER_DEVIATION_THRESHOLD = float(os.getenv("FOOTBALL_DATA_PRICE_OUTLIER_DEVIATION_THRESHOLD", "0.22"))
 JINGCAI_PARLAY_DEFAULT_WINDOW_MINUTES = 24 * 60
+JINGCAI_FINAL_MARKETS = frozenset({"1x2", "jingcai_hhad"})
+SHORTLIST_SUPPORTED_TARGET_MARKETS = ("1x2", "jingcai_hhad", "over_under", "any")
+ASIAN_HANDICAP_TARGET_ALIASES = frozenset({"asian", "ah", "asian_handicap", "亚盘", "handicap"})
 AUTO_LEARNING_STATE: dict[str, Any] = {
     "enabled": False,
     "run_count": 0,
@@ -66,6 +69,212 @@ AUTO_LEARNING_STATE: dict[str, Any] = {
     "last_error": None,
     "last_result_summary": None,
 }
+
+
+def jingcai_analysis_policy() -> dict[str, Any]:
+    """Return the agent-facing policy for Jingcai-first football analysis."""
+    return {
+        "primary_scope": "jingcai",
+        "primary_markets": [
+            "1x2",
+            "jingcai_hhad",
+            "total_goals",
+            "correct_score",
+            "half_full_time",
+            "parlay",
+        ],
+        "market_mapping": {
+            "1x2": "竞彩足球胜平负",
+            "jingcai_hhad": "竞彩足球让球胜平负",
+            "total_goals": "竞彩足球总进球",
+            "correct_score": "竞彩足球比分",
+            "half_full_time": "竞彩足球半全场",
+        },
+        "asian_handicap_role": "supporting_signal_only",
+        "selection_philosophy": {
+            "objective": "hit_rate_plus_odds_support_value_combination",
+            "value_definition": "竞彩足球里的价值优先解释为赔率支撑和组合性价比，不是单场纯 EV 追逐。",
+            "hit_rate_first_rule": (
+                "先判断最稳的足球结果和竞彩映射；只有基本面、历史战绩、市场变化和比分脚本共同支持时，"
+                "才讨论赔率是否具备分析支撑。"
+            ),
+            "combination_rule": (
+                "高证据方向以命中率和稳定性优先，组合分析用高命中腿搭配赔率仍有支撑的腿；"
+                "不要为了高赔率纳入低命中率的所谓价值选项，不输出投注建议。"
+            ),
+            "pure_value_rule": (
+                "MCP 的 edge/EV/value 字段只能作为诊断信号；最终分析必须回到命中率、赔率支撑、"
+                "过热/诱高判断和竞彩组合适配，不输出投注建议。"
+            ),
+        },
+        "non_jingcai_market_rule": (
+            "Asian handicap, overseas over/under, BTTS, team total, DNB, and alternate lines "
+            "may explain market strength, margin, tempo, and price heat, but they must not be "
+            "presented as final MCP outputs. This MCP is configured for Jingcai-only analysis."
+        ),
+        "fundamental_review": {
+            "required": True,
+            "fixture_assumption": "regular_major_competition",
+            "reason": (
+                "竞彩场次通常来自正规大赛和主流赛程，赛事情报密度高；结论必须先做全面基本面审查，"
+                "再映射到胜平负、让球胜平负、总进球、比分、半全场或串关。"
+            ),
+            "required_dimensions": [
+                "motivation",
+                "competition_context",
+                "schedule",
+                "injuries_and_lineups",
+                "tactical_style",
+                "home_away_context",
+                "recent_form",
+                "head_to_head",
+                "historical_performance",
+                "table_position",
+                "weather_and_venue",
+                "market_movement",
+                "scoreline_distribution",
+            ],
+            "minimum_standard": (
+                "If key fundamentals are unavailable, downgrade to observe/skip rather than "
+                "letting price movement or model EV alone drive the Jingcai analysis conclusion."
+            ),
+        },
+        "odds_movement_review": {
+            "required": True,
+            "core_questions": [
+                "是否过热：热门方向是否被压得过低，回报是否不足以覆盖真实风险？",
+                "是否诱高：高赔率或逆向变化是否在吸引下注，但基本面并不支持？",
+                "赔率能否支撑球队能力：当前价格是否匹配球队实力、状态、动机、伤停和赛程？",
+                "赔率变化是否与基本面一致：升降赔、让球和总进球变化是否能被球队/赛程/阵容解释？",
+            ],
+            "downgrade_rules": [
+                "方向对但赔率过热时降级为observe/hold/do not chase。",
+                "赔率好但命中率和基本面不足时不得称为价值，只能列为speculative或skip。",
+                "赔率无法支撑让胜、总进球、比分或半全场脚本时，回退到更窄的胜平负/防/跳过。",
+            ],
+        },
+        "default_research_path": [
+            "source_health",
+            "list_matches or ai_matches_window",
+            "match_odds",
+            "fundamental_review",
+            "historical_record_review",
+            "odds_movement_review",
+            "match_analysis",
+            "recommend_jingcai_parlay for combinations",
+        ],
+    }
+
+
+def analysis_output_policy() -> dict[str, Any]:
+    """Return the user-facing output policy: analysis, not betting recommendation."""
+    return {
+        "mode": "analysis_only",
+        "final_output_rule": (
+            "Return method-based analysis results, evidence strength, Jingcai market mapping, and risk scenarios. "
+            "Do not present the result as a betting recommendation, stake plan, or instruction to buy."
+        ),
+        "allowed_language": [
+            "倾向",
+            "证据支持",
+            "风险点",
+            "防范方向",
+            "价格支撑不足",
+            "等待更多信息",
+        ],
+        "disallowed_language": [
+            "立即投注",
+            "推荐下注",
+            "仓位",
+            "稳胆买入",
+            "必须买",
+        ],
+        "legacy_fields_note": (
+            "Legacy fields such as recommendation, final_decision, final_execution_advice, stake_level, "
+            "parlay_tickets, and recommendation_log are retained for paper-learning/backtest compatibility. "
+            "Downstream agents should treat them as internal diagnostics unless the user explicitly asks for raw MCP internals."
+        ),
+    }
+
+
+def _analysis_result_label(candidate: dict[str, Any]) -> str:
+    recommendation = str(candidate.get("recommendation") or "")
+    if recommendation == "immediate_bet":
+        return "evidence_supported_direction"
+    if recommendation == "condition_observe":
+        return "conditional_or_watch_direction"
+    if recommendation in {"no_bet", "no_value"}:
+        return "insufficient_support"
+    return "diagnostic_only"
+
+
+def _candidate_analysis_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    market = str(candidate.get("market") or "none")
+    return {
+        "market": market,
+        "market_label": _market_label(market),
+        "selection": candidate.get("selection") or "",
+        "result_label": _analysis_result_label(candidate),
+        "model_probability": round_metric(parse_float(candidate.get("model_probability"))),
+        "market_probability": round_metric(parse_float(candidate.get("market_probability"))),
+        "probability_edge": round_metric(parse_float(candidate.get("probability_edge"))),
+        "edge": round_metric(parse_float(candidate.get("edge"))),
+        "decimal_odds": round_metric(parse_float(candidate.get("decimal_odds")), 4),
+        "line": round_metric(parse_float(candidate.get("line")), 4),
+        "evidence": {
+            "probability_source": candidate.get("probability_source") or "",
+            "edge_source": candidate.get("edge_source") or "",
+            "market_movement_signal": candidate.get("market_movement_signal") or "",
+            "odds_research_verdict": candidate.get("odds_research_verdict") or "",
+        },
+        "notes": [
+            note
+            for note in [
+                str(candidate.get("market_movement_note") or "").strip(),
+                str(candidate.get("odds_research_note") or "").strip(),
+            ]
+            if note
+        ],
+    }
+
+
+def build_analysis_result(
+    *,
+    best_candidate: dict[str, Any],
+    market_candidates: list[dict[str, Any]],
+    blocking_flags: list[str],
+    caution_flags: list[str],
+    confidence: float,
+) -> dict[str, Any]:
+    """Translate internal paper-learning signals into analysis-only output."""
+    candidate = best_candidate or {}
+    support_label = _analysis_result_label(candidate)
+    if blocking_flags:
+        conclusion = "data_or_policy_blocked"
+    elif support_label == "evidence_supported_direction":
+        conclusion = "methodology_supports_direction"
+    elif support_label == "conditional_or_watch_direction":
+        conclusion = "methodology_supports_watch_only_direction"
+    elif support_label == "insufficient_support":
+        conclusion = "methodology_does_not_support_clear_direction"
+    else:
+        conclusion = "diagnostic_only"
+    return {
+        "mode": "analysis_only",
+        "conclusion": conclusion,
+        "primary_view": _candidate_analysis_summary(candidate),
+        "candidate_views": [_candidate_analysis_summary(item) for item in (market_candidates or [])[:6]],
+        "evidence_strength": {
+            "confidence": round_metric(confidence),
+            "blocking_flags": blocking_flags,
+            "caution_flags": caution_flags,
+            "risk_level": "high" if blocking_flags else "medium" if caution_flags else "normal",
+        },
+        "output_instruction": (
+            "Use this as the user-visible conclusion. Explain what the method supports and what can go wrong; "
+            "do not convert it into a betting recommendation, stake size, or command to place a bet."
+        ),
+    }
 
 CACHE_SECONDS = int(os.getenv("FOOTBALL_DATA_CACHE_SECONDS", "300"))
 HTTP_TIMEOUT_SECONDS = float(os.getenv("FOOTBALL_DATA_HTTP_TIMEOUT", "20"))
@@ -1478,8 +1687,8 @@ def odds_from_leisu_odds_payload(data: dict[str, Any] | None, *, match_id: str =
             "has_valid_numeric_odds": bool(moneyline or asian_handicap or over_under),
             "market_policy": {
                 "moneyline_1x2": "Use preferred_moneyline_1x2 for calculations only after leisu_quality_gate permits promotion.",
-                "asian_handicap": "Use preferred_asian_handicap only after inspecting leisu_quality_gate and asian_handicap_consensus.",
-                "over_under": "Use preferred_over_under only after inspecting leisu_quality_gate and over_under_consensus.",
+                "asian_handicap": "Use preferred_asian_handicap only as supporting context after inspecting leisu_quality_gate and asian_handicap_consensus; do not output it as a final MCP direction.",
+                "over_under": "Use preferred_over_under only as supporting context after inspecting leisu_quality_gate and over_under_consensus unless a Jingcai total-goals mapping is explicitly available.",
                 "source": source_name,
             },
             "source_detail": {
@@ -3015,10 +3224,10 @@ def odds_from_dongqiudi_odds_index(data: dict[str, Any] | None) -> dict[str, Any
         "over_under_consensus": over_under_consensus,
         "has_valid_numeric_odds": bool(data.get("has_odds")) and bool(moneyline or asian_handicap or over_under),
         "market_policy": {
-            "moneyline_1x2": "Use preferred_moneyline_1x2 for calculations and recommendations. Keep moneyline_1x2 as audit evidence only.",
-            "asian_handicap": "Use the freshest complete non-outlier preferred_asian_handicap from the main consensus line. Do not mix handicap waters with 1X2 prices.",
-            "asian_handicap_consensus": "Read asian_handicap_consensus together with preferred_asian_handicap before any Asian handicap recommendation.",
-            "over_under_consensus": "Read over_under_consensus together with preferred_over_under before any totals recommendation.",
+            "moneyline_1x2": "Use preferred_moneyline_1x2 for calculations and analysis. Keep moneyline_1x2 as audit evidence only.",
+            "asian_handicap": "Use the freshest complete non-outlier preferred_asian_handicap from the main consensus line only as supporting context. Do not mix handicap waters with 1X2 prices or output Asian handicap recommendations.",
+            "asian_handicap_consensus": "Read asian_handicap_consensus together with preferred_asian_handicap when using handicap as supporting evidence.",
+            "over_under_consensus": "Read over_under_consensus together with preferred_over_under before using totals as supporting evidence or Jingcai total-goals context.",
             "preferred_order": ["main_consensus_line", "exclude_decimal_price_outliers", "freshest_complete_market", "竞彩官方", "平均值", "最高值", "最低值"],
             "source": "dongqiudi_odds_index",
         },
@@ -3313,7 +3522,7 @@ def build_asian_handicap_consensus(
             "complete_market_count": 0,
             "incomplete_market_count": len(markets),
             "warnings": ["asian_handicap_complete_market_missing"],
-            "guidance": "No complete Asian handicap market is available; do not make Asian handicap recommendations.",
+            "guidance": "No complete Asian handicap market is available; do not make Asian handicap conclusions.",
         }
 
     latest_market = max(
@@ -3484,7 +3693,7 @@ def build_over_under_consensus(
             "complete_market_count": 0,
             "incomplete_market_count": len(markets),
             "warnings": ["over_under_complete_market_missing"],
-            "guidance": "No complete over/under market is available; do not make totals recommendations.",
+            "guidance": "No complete over/under market is available; do not make totals conclusions.",
         }
 
     latest_market = max(
@@ -4104,9 +4313,9 @@ def build_odds_quality_contract(odds: dict[str, Any], source: dict[str, Any] | N
         "preferred_asian_handicap": asian_contract,
         "preferred_over_under": over_under_contract,
         "calculation_policy": (
-            "Supported betting markets are 1X2 and Asian handicap. For 1X2 use preferred_moneyline_1x2.current only. "
-            "For Asian handicap calculation use preferred_asian_handicap.current only after checking asian_handicap_consensus; "
-            "For totals use preferred_over_under.current only after checking over_under_consensus; "
+            "Final MCP analysis markets are Jingcai 1X2/HAD and official HHAD when available. For 1X2 use preferred_moneyline_1x2.current only. "
+            "For Asian handicap support use preferred_asian_handicap.current only after checking asian_handicap_consensus; "
+            "For totals support use preferred_over_under.current only after checking over_under_consensus; "
             "convert HK-style water to decimal_odds=water+1 before probability math. "
             "Do not mix 1X2, handicap, schedule_snapshot, or bookmaker rows in one calculation. "
             "raw_implied_probability=1/odds; overround=sum(raw)-1; payout_rate=1/sum(raw). "
@@ -4944,10 +5153,10 @@ def _edge_text(value: Any) -> str:
 
 def _decision_action_text(recommendation: str) -> str:
     if recommendation == "immediate_bet":
-        return "立即投注"
+        return "证据支持方向"
     if recommendation == "condition_observe":
-        return "条件观察"
-    return "不投注"
+        return "条件观察方向"
+    return "证据不足"
 
 
 def _build_final_decision(
@@ -4969,13 +5178,13 @@ def _build_final_decision(
     odds_part = f" @ {decimal_odds:g}" if isinstance(decimal_odds, (int, float)) else ""
     provider_part = f"（{provider}）" if provider else ""
     if recommendation == "immediate_bet":
-        headline = f"立即投注：{market_label} {selection}{odds_part}，{stake_level}{provider_part}"
+        headline = f"分析结论：{market_label} {selection}{odds_part} 有证据支撑{provider_part}"
     elif recommendation == "condition_observe":
         condition = str(best_candidate.get("condition") or "等待盘口与 MCP 共识保持一致且无新增 blocking_flags")
-        headline = f"现在不下单：{market_label} {selection} 条件观察，触发条件：{condition}"
+        headline = f"分析结论：{market_label} {selection} 仅作条件观察，观察条件：{condition}"
     else:
         reason = str(best_candidate.get("reason") or "无正边际或存在硬阻断")
-        headline = f"不投注：{reason}"
+        headline = f"分析结论：暂不支持清晰方向，原因：{reason}"
 
     rationale = []
     market_probability = _percent_text(best_candidate.get("market_probability"))
@@ -5016,8 +5225,8 @@ def _build_final_decision(
         "blocking_flags": blocking_flags,
         "caution_flags": caution_flags,
         "agent_instruction": (
-            "Final agents must use this object as the visible conclusion anchor. "
-            "They may explain it with MCP facts, but must not override it with self-made probability adjustments."
+            "This legacy object is retained for paper-learning diagnostics. "
+            "Use analysis_result as the visible conclusion and do not turn this into betting advice."
         ),
     }
 
@@ -5062,7 +5271,7 @@ def _build_risk_overlay(
         "over_under_outlier_count": len(totals_consensus.get("outlier_markets") or []),
         "stake_adjustment": stake_adjustment,
         "agent_rule": (
-            "Agents may quote this overlay but must not invent new risk facts or independently change the final action."
+            "Agents may quote this overlay as risk evidence, but must not invent new risk facts or turn it into a betting action."
         ),
     }
 
@@ -5076,16 +5285,16 @@ def _build_final_execution_advice(
     raw_recommendation = str(final_decision.get("recommendation") or best_candidate.get("recommendation") or "no_bet")
     if risk_overlay.get("blocking_flags"):
         action = "skip"
-        action_label = "不投注"
+        action_label = "证据不足"
     elif raw_recommendation == "immediate_bet":
         action = "bet_now"
-        action_label = "立即投注"
+        action_label = "证据支持方向"
     elif raw_recommendation == "condition_observe":
         action = "observe"
-        action_label = "条件观察"
+        action_label = "条件观察方向"
     else:
         action = "skip"
-        action_label = "不投注"
+        action_label = "证据不足"
 
     stake_level = str(final_decision.get("stake_level") or best_candidate.get("stake_level") or "none")
     if risk_overlay.get("stake_adjustment") == "cap_to_small" and stake_level == "small_to_normal":
@@ -5101,13 +5310,13 @@ def _build_final_execution_advice(
     odds_part = f" @ {decimal_odds:g}" if isinstance(decimal_odds, (int, float)) else ""
 
     if action == "bet_now":
-        headline = f"最终执行：立即投注 {market_label} {selection}{odds_part}，仓位 {stake_level}"
+        headline = f"分析结论：{market_label} {selection}{odds_part} 的证据支撑较强"
     elif action == "observe":
         condition = str(best_candidate.get("condition") or "等待 MCP 最新盘口仍满足当前条件且无 blocking_flags")
-        headline = f"最终执行：条件观察 {market_label} {selection}，触发条件：{condition}"
+        headline = f"分析结论：{market_label} {selection} 仅作条件观察，观察条件：{condition}"
     else:
         reason = str(best_candidate.get("reason") or "无正边际或存在硬阻断")
-        headline = f"最终执行：不投注，原因：{reason}"
+        headline = f"分析结论：暂不支持清晰方向，原因：{reason}"
 
     return {
         "source": "mcp_calculated_final_execution_advice",
@@ -5126,8 +5335,8 @@ def _build_final_execution_advice(
         "risk_overlay_applied": risk_overlay.get("stake_adjustment"),
         "agent_can_override": False,
         "agent_instruction": (
-            "All downstream agents must use this object as the only final execution conclusion. "
-            "They may compare it with final_decision as raw MCP recommendation, but must not rewrite action or stake_level."
+            "This is a legacy paper-learning diagnostic, not user-facing betting advice. "
+            "Downstream agents should show analysis_result instead and must not rewrite stake_level or create buy instructions."
         ),
     }
 
@@ -5176,7 +5385,9 @@ def build_betting_decision_support(
     if odds_quality and not odds_quality.get("can_use_for_calculation", True):
         for flag in odds_quality.get("hard_flags") or []:
             _append_unique(blocking_flags, flag)
-    if not supported.get("moneyline_1x2") and not supported.get("asian_handicap"):
+    official_hhad = odds.get("official_jingcai_hhad") or {}
+    official_hhad_ready = bool((official_hhad.get("current_metrics") or {}).get("available"))
+    if not supported.get("moneyline_1x2") and not official_hhad_ready:
         _append_unique(blocking_flags, "supported_market_missing")
 
     consensus = odds.get("asian_handicap_consensus") or {}
@@ -5328,7 +5539,6 @@ def build_betting_decision_support(
             }
         )
 
-    official_hhad = odds.get("official_jingcai_hhad") or {}
     hhad_metrics = official_hhad.get("current_metrics") or {}
     hhad_market = hhad_metrics.get("normalized_probability") or {}
     hhad_goal_line = parse_float(official_hhad.get("home_goal_line"))
@@ -5619,21 +5829,39 @@ def build_betting_decision_support(
             "reason": "blocking_flags_present",
         }
     else:
+        final_candidates = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("market") or "") in JINGCAI_FINAL_MARKETS
+        ]
         ranked = sorted(
-            candidates,
+            final_candidates,
             key=lambda item: (
                 {"immediate_bet": 2, "condition_observe": 1, "no_value": 0}.get(str(item.get("recommendation")), 0),
                 parse_float(item.get("edge")) or -999,
             ),
             reverse=True,
         )
-        best_candidate = ranked[0] if ranked else {
-            "market": "none",
-            "selection": "",
-            "recommendation": "no_bet",
-            "stake_level": "none",
-            "reason": "no_supported_candidate",
-        }
+        if ranked:
+            best_candidate = ranked[0]
+        elif candidates:
+            best_candidate = {
+                "market": "none",
+                "selection": "",
+                "recommendation": "no_bet",
+                "stake_level": "none",
+                "reason": "jingcai_final_candidate_missing",
+                "supporting_candidate_count": len(candidates),
+                "supporting_markets": sorted({str(item.get("market") or "") for item in candidates if item.get("market")}),
+            }
+        else:
+            best_candidate = {
+                "market": "none",
+                "selection": "",
+                "recommendation": "no_bet",
+                "stake_level": "none",
+                "reason": "no_supported_candidate",
+            }
         if best_candidate.get("recommendation") == "no_value":
             best_candidate = {
                 **best_candidate,
@@ -5668,6 +5896,13 @@ def build_betting_decision_support(
         best_candidate=best_candidate,
         risk_overlay=risk_overlay,
     )
+    analysis_result = build_analysis_result(
+        best_candidate=best_candidate,
+        market_candidates=candidates,
+        blocking_flags=blocking_flags,
+        caution_flags=caution_flags,
+        confidence=confidence,
+    )
 
     return {
         "blocking_flags": blocking_flags,
@@ -5680,15 +5915,17 @@ def build_betting_decision_support(
         "odds_features": odds_features,
         "market_candidates": candidates,
         "best_candidate": best_candidate,
+        "final_market_scope": "jingcai_only",
         "final_decision": final_decision,
         "risk_overlay": risk_overlay,
         "final_execution_advice": final_execution_advice,
+        "analysis_output_policy": analysis_output_policy(),
+        "analysis_result": analysis_result,
         "decision_rule": "Only blocking_flags can force skip/no-bet; caution_flags are handled by MCP risk_overlay and final_execution_advice.",
         "agent_guidance": (
-            "Use final_execution_advice as the only final action. Do not convert caution_flags such as lineup_unavailable, "
-            "near_kickoff_under_60m, tactical gaps, timestamp soft warnings, or market line split into no-bet by yourself. "
-            "If final_execution_advice.action is bet_now, output how to bet with its stake_level; "
-            "if observe, output the exact condition; if skip, output the MCP blocker/reason."
+            "Use analysis_result as the user-visible conclusion. Explain evidence, market mapping, and risks without presenting "
+            "a betting recommendation, stake size, or instruction to buy. Treat final_execution_advice/final_decision as "
+            "legacy paper-learning diagnostics unless the user explicitly asks for raw MCP internals."
         ),
     }
 
@@ -5950,6 +6187,8 @@ def build_analysis_pack(
                 "kickoff_utc_plus_8": match.get("kickoff_utc_plus_8") or "",
             },
             "best_candidate": betting_decision_support.get("best_candidate") or {},
+            "analysis_output_policy": betting_decision_support.get("analysis_output_policy") or analysis_output_policy(),
+            "analysis_result": betting_decision_support.get("analysis_result") or {},
             "final_decision": betting_decision_support.get("final_decision") or {},
             "risk_overlay": betting_decision_support.get("risk_overlay") or {},
             "final_execution_advice": betting_decision_support.get("final_execution_advice") or {},
@@ -5972,17 +6211,17 @@ def build_analysis_pack(
                 "agent_contract": (data_bundle or {}).get("agent_contract") or {},
             },
             "decision_contract": (
-                "Use betting_decision_support.final_execution_advice as the visible final-action anchor. "
-                "Show final_decision only as raw MCP recommendation before risk overlay. "
+                "Use betting_decision_support.analysis_result as the visible analysis conclusion. "
+                "Show final_decision/final_execution_advice only as legacy paper-learning diagnostics when raw internals are requested. "
                 "Use market_candidates for per-market facts. Do not replace MCP model_probability/edge with self-made adjustments. "
-                "Only MCP blocking_flags can force skip/no-bet; caution_flags are handled by MCP risk_overlay."
+                "Do not convert analysis results into betting recommendations, stake sizes, or buy instructions."
             ),
             "recommended_agent_order": [
                 "情报采集读取 data_coverage 与质量合同",
                 "盘口 Agent 读取 market_intelligence 与完整盘口",
                 "模型 Agent 读取 model_card 与 candidates",
                 "风控 Agent 只解释 MCP risk_overlay",
-                "汇总 Agent 输出 final_execution_advice 的 bet_now/observe/skip 之一",
+                "汇总 Agent 输出 analysis_result 的倾向、证据强度和风险点",
             ],
         },
     }
@@ -6967,6 +7206,347 @@ async def leisu_match_context(match_id: str) -> dict[str, Any]:
         lineup_source=_leisu_mobile_result_source(lineup_result),
         detail_source=_leisu_mobile_result_source(detail_result),
     )
+
+
+def _normalize_leisu_live_text_events(items: Any, *, limit: int = 20) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("data") or item.get("text") or item.get("content") or "").strip()
+        if not text:
+            continue
+        events.append(
+            {
+                "time": str(item.get("time") or "").strip(),
+                "type": item.get("type"),
+                "text": text,
+                "position": item.get("position"),
+            }
+        )
+    return events[-limit:]
+
+
+def _normalize_leisu_live_stat_item(item: dict[str, Any]) -> dict[str, Any]:
+    name = (
+        item.get("name")
+        or item.get("type_name")
+        or item.get("text")
+        or item.get("title")
+        or item.get("cn")
+        or item.get("zh")
+        or item.get("key")
+        or item.get("type")
+    )
+    home = (
+        item.get("home")
+        or item.get("home_value")
+        or item.get("home_count")
+        or item.get("team_a")
+        or item.get("team_A")
+        or item.get("home_score")
+    )
+    away = (
+        item.get("away")
+        or item.get("away_value")
+        or item.get("away_count")
+        or item.get("team_b")
+        or item.get("team_B")
+        or item.get("away_score")
+    )
+    return {
+        "name": str(name or "").strip(),
+        "home": home,
+        "away": away,
+        "raw": item,
+    }
+
+
+def _normalize_leisu_live_stats(items: Any) -> list[dict[str, Any]]:
+    stats: list[dict[str, Any]] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            stats.append(_normalize_leisu_live_stat_item(item))
+    return stats
+
+
+def _normalize_leisu_live_event_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "time": str(item.get("time") or item.get("minute") or "").strip(),
+        "type": item.get("type") or item.get("kind") or item.get("event_type"),
+        "team": item.get("position") or item.get("team") or item.get("side"),
+        "player": item.get("player") or item.get("player_name") or item.get("name") or "",
+        "text": item.get("data") or item.get("text") or item.get("title") or "",
+        "raw": item,
+    }
+
+
+def _normalize_leisu_live_events(items: Any, *, limit: int = 40) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            events.append(_normalize_leisu_live_event_item(item))
+    return events[-limit:]
+
+
+def normalize_leisu_live_detail_payload(
+    payload: dict[str, Any] | None,
+    *,
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = payload or {}
+    text_events = _normalize_leisu_live_text_events(payload.get("tlive"))
+    stats = _normalize_leisu_live_stats(payload.get("stats"))
+    events = _normalize_leisu_live_events(payload.get("event"))
+    trend = payload.get("trend") if isinstance(payload.get("trend"), dict) else {}
+    return {
+        "available": bool(payload),
+        "source": source or {},
+        "text_events": text_events,
+        "stats": stats,
+        "events": events,
+        "trend": trend,
+        "coverage": {
+            "text_event_count": len(text_events),
+            "stat_count": len(stats),
+            "event_count": len(events),
+            "trend_available": bool(trend),
+        },
+        "raw_keys": sorted(str(key) for key in payload.keys()),
+        "usage_note": (
+            "Use this as live context evidence only. It is not enough for in-play betting "
+            "unless score/minute and current in-play odds are also verified."
+        ),
+    }
+
+
+def _live_data_quality(
+    *,
+    match: dict[str, Any] | None,
+    leisu_candidate: dict[str, Any],
+    leisu_live_detail: dict[str, Any],
+    leisu_odds: dict[str, Any] | None,
+) -> dict[str, Any]:
+    coverage = leisu_live_detail.get("coverage") or {}
+    odds_available = bool((leisu_odds or {}).get("has_valid_numeric_odds"))
+    return {
+        "match_anchor": "available" if match else "missing",
+        "leisu_match": "available" if leisu_candidate.get("available") else "missing",
+        "live_text": "available" if int(coverage.get("text_event_count") or 0) > 0 else "missing",
+        "live_stats": "available" if int(coverage.get("stat_count") or 0) > 0 else "missing",
+        "live_events": "available" if int(coverage.get("event_count") or 0) > 0 else "missing",
+        "trend": "available" if coverage.get("trend_available") else "missing",
+        "in_play_odds": "available" if odds_available else "missing",
+        "overall": (
+            "usable_for_live_context"
+            if leisu_candidate.get("available") and (coverage.get("stat_count") or coverage.get("event_count") or odds_available)
+            else "limited"
+        ),
+    }
+
+
+async def _fetch_leisu_live_blocks(
+    match_id: str,
+    *,
+    include_odds: bool,
+) -> dict[str, Any]:
+    match_id = str(match_id or "").strip()
+    if not match_id:
+        return {
+            "status": "missing_match_id",
+            "detail": normalize_leisu_live_detail_payload({}),
+            "lineup": {},
+            "odds_result": {},
+        }
+    referer = f"{LEISU_MOBILE_WEBSITE_URL}/live/detail-{match_id}"
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        detail_result, lineup_result = await asyncio.gather(
+            fetch_leisu_mobile_api(
+                "/v1/web/match/football/match_detail",
+                {"match_id": match_id},
+                referer=referer,
+                client=client,
+            ),
+            fetch_leisu_mobile_api(
+                "/v1/web/match/football/match_lineup",
+                {"match_id": match_id},
+                referer=referer,
+                client=client,
+            ),
+        )
+    odds_result: dict[str, Any] = {}
+    if include_odds:
+        odds_result = await fetch_leisu_mobile_odds_payload(match_id=match_id, detail_company_limit=1)
+    detail_payload = detail_result.get("data") if isinstance(detail_result.get("data"), dict) else {}
+    lineup_payload = lineup_result.get("data") if isinstance(lineup_result.get("data"), dict) else {}
+    return {
+        "status": "ok" if detail_result.get("status") == "ok" else detail_result.get("status") or "error",
+        "detail_result_status": detail_result.get("status"),
+        "lineup_result_status": lineup_result.get("status"),
+        "detail": normalize_leisu_live_detail_payload(
+            detail_payload,
+            source=_leisu_mobile_result_source(detail_result),
+        ),
+        "lineup": {
+            **summarize_lineup(
+                {
+                    "persons": {
+                        "team_A": _leisu_lineup_side(lineup_payload, "home"),
+                        "team_B": _leisu_lineup_side(lineup_payload, "away"),
+                    }
+                },
+                _leisu_mobile_result_source(lineup_result),
+            ),
+            "source_name": "leisu",
+        },
+        "odds_result": odds_result,
+    }
+
+
+async def live_match_snapshot(
+    query: str = "",
+    *,
+    home_team: str | None = None,
+    away_team: str | None = None,
+    league: str | None = None,
+    as_of: str | None = None,
+    timezone_name: str | None = "Asia/Shanghai",
+    lookback_hours: int | float = 4,
+    window_hours: int | float = 8,
+    leisu_match_id: str | None = None,
+    include_odds: bool = True,
+) -> dict[str, Any]:
+    """Collect live-match context for in-play analysis without making a pick.
+
+    The payload intentionally separates what was collected from what is still
+    missing. In-play betting decisions should not proceed when score/minute,
+    event/stat pressure, or in-play odds are unavailable.
+    """
+
+    as_of_dt = parse_as_of(as_of, timezone_name)
+    bounded_lookback = max(0.0, min(float(lookback_hours or 0), 12.0))
+    bounded_window = max(1.0, min(float(window_hours or 8), 24.0))
+    search_as_of = as_of_dt - timedelta(hours=bounded_lookback)
+    search_window = bounded_lookback + bounded_window
+    search_query = query or " ".join(part for part in [home_team or "", away_team or ""] if part).strip()
+
+    best: dict[str, Any] | None = None
+    search: dict[str, Any] = {}
+    if search_query:
+        best, search = await get_best_match(
+            search_query,
+            home_team=home_team or None,
+            away_team=away_team or None,
+            league=league or None,
+            as_of=search_as_of.isoformat(),
+            timezone_name=timezone_name or "Asia/Shanghai",
+            window_hours=search_window,
+        )
+
+    match_context: dict[str, Any] | None = None
+    odds = (best or {}).get("odds_summary") or {}
+    if best and best.get("source_name") == "dongqiudi" and best.get("match_id"):
+        match_context = await dongqiudi_match_context(str(best["match_id"]))
+        odds = merge_odds(odds, ((match_context.get("odds_index") or {}).get("odds") or {}))
+
+    resolved_home = home_team or (best or {}).get("home_team") or ""
+    resolved_away = away_team or (best or {}).get("away_team") or ""
+    leisu_candidate: dict[str, Any]
+    if leisu_match_id:
+        leisu_candidate = {
+            "status": "manual_match_id",
+            "available": True,
+            "provider": "leisu",
+            "match_score": None,
+            "match": {
+                "source_name": "leisu",
+                "match_id": str(leisu_match_id),
+                "home_team": resolved_home,
+                "away_team": resolved_away,
+                "detail_url": f"{LEISU_MOBILE_WEBSITE_URL}/live/detail-{leisu_match_id}",
+                "odds_url": f"{LEISU_MOBILE_WEBSITE_URL}/live/odds-{leisu_match_id}",
+            },
+            "source": {"source": "caller_supplied"},
+        }
+    else:
+        leisu_candidate = await leisu_odds_candidate_for_match(
+            query=search_query,
+            home_team=resolved_home,
+            away_team=resolved_away,
+            league=league,
+            as_of=as_of_dt,
+        )
+        leisu_candidate["provider"] = "leisu"
+
+    leisu_id = str(((leisu_candidate.get("match") or {}).get("match_id")) or "").strip()
+    leisu_live: dict[str, Any] = {
+        "status": "not_collected",
+        "detail": normalize_leisu_live_detail_payload({}),
+        "lineup": {},
+        "odds_result": {},
+    }
+    if leisu_candidate.get("available") and leisu_id:
+        try:
+            leisu_live = await _fetch_leisu_live_blocks(leisu_id, include_odds=include_odds)
+        except Exception as exc:
+            leisu_live = {
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "detail": normalize_leisu_live_detail_payload({}),
+                "lineup": {},
+                "odds_result": {},
+            }
+
+    leisu_odds = (leisu_live.get("odds_result") or {}).get("odds") or {}
+    quality = _live_data_quality(
+        match=best,
+        leisu_candidate=leisu_candidate,
+        leisu_live_detail=leisu_live.get("detail") or {},
+        leisu_odds=leisu_odds,
+    )
+    missing = [key for key, value in quality.items() if key != "overall" and value == "missing"]
+    actionability = (
+        "can_analyze_live_context"
+        if quality["overall"] == "usable_for_live_context"
+        else "needs_manual_live_inputs"
+    )
+    return {
+        "status": "ok" if best or leisu_candidate.get("available") else "not_found",
+        "query": query or "",
+        "league": league or "",
+        "as_of": as_of_dt.isoformat(),
+        "time_window": {
+            "lookback_hours": bounded_lookback,
+            "window_hours": bounded_window,
+            "search_as_of": search_as_of.isoformat(),
+            "search_window_hours": search_window,
+        },
+        "match": best or {},
+        "match_search": search,
+        "match_context_readiness": (match_context or {}).get("readiness") or {},
+        "pregame_odds": odds,
+        "leisu_candidate": leisu_candidate,
+        "live": {
+            "provider": "leisu",
+            "match_id": leisu_id,
+            "detail": leisu_live.get("detail") or {},
+            "lineup": leisu_live.get("lineup") or {},
+            "odds": leisu_odds,
+            "odds_status": (leisu_live.get("odds_result") or {}).get("status") or "",
+            "source_status": {
+                "detail": leisu_live.get("detail_result_status") or leisu_live.get("status"),
+                "lineup": leisu_live.get("lineup_result_status") or "",
+                "odds": (leisu_live.get("odds_result") or {}).get("status") or "",
+            },
+        },
+        "coverage": quality,
+        "missing_for_inplay_analysis": missing,
+        "actionability": actionability,
+        "analyst_note": (
+            "For in-play betting, combine this snapshot with the user's live book price and visible match state. "
+            "If live_stats/live_events/in_play_odds are missing, ask for manual stats or a Leisu match id/link before betting."
+        ),
+    }
 
 
 def merge_match_contexts(primary: dict[str, Any] | None, supplemental: dict[str, Any] | None) -> dict[str, Any]:
@@ -8221,7 +8801,7 @@ def _shortlist_coverage_score(analysis: dict[str, Any]) -> dict[str, Any]:
 
     available = [key for key, value in blocks.items() if bool(value)]
     missing = [key for key, value in blocks.items() if not bool(value)]
-    core_markets = ["moneyline_1x2", "asian_handicap", "over_under"]
+    core_markets = ["moneyline_1x2"]
     core_ready = all(bool(blocks.get(key)) for key in core_markets)
     return {
         "ratio": round_metric(len(available) / len(blocks)) or 0.0,
@@ -8293,21 +8873,15 @@ def _shortlist_rejection_reason(
         return "edge_below_threshold"
 
     if mode == "balanced":
-        market = str(best.get("market") or analysis.get("_shortlist_target_market") or "")
-        if market == "asian_handicap":
-            line = parse_float(best.get("line"))
-            if line is not None and abs(line) >= 2.0:
-                return "large_handicap_requires_backtest"
+        if _shortlist_data_block_state(analysis, "multi_bookmaker_snapshot") is False:
+            return "multi_bookmaker_snapshot_missing"
 
-            if _shortlist_data_block_state(analysis, "multi_bookmaker_snapshot") is False:
-                return "multi_bookmaker_snapshot_missing"
-
-            caution_flags = _shortlist_caution_flag_set(analysis)
-            if (
-                _shortlist_data_block_state(analysis, "lineup") is False
-                or {"lineup_unavailable", "lineup_context_limited"} & caution_flags
-            ):
-                return "lineup_context_missing"
+        caution_flags = _shortlist_caution_flag_set(analysis)
+        if (
+            _shortlist_data_block_state(analysis, "lineup") is False
+            or {"lineup_unavailable", "lineup_context_limited"} & caution_flags
+        ):
+            return "lineup_context_missing"
 
         confidence = _shortlist_selection_confidence(analysis, mode=mode)
         calibrated_probability = parse_float(confidence.get("calibrated_probability"))
@@ -8336,16 +8910,92 @@ def _normalize_shortlist_target_market(target_market: str | None) -> str:
         "1x2": "1x2",
         "moneyline": "1x2",
         "胜平负": "1x2",
-        "asian": "asian_handicap",
-        "ah": "asian_handicap",
-        "asian_handicap": "asian_handicap",
-        "亚盘": "asian_handicap",
-        "handicap": "asian_handicap",
+        "hhad": "jingcai_hhad",
+        "jingcai_hhad": "jingcai_hhad",
+        "让球胜平负": "jingcai_hhad",
         "over_under": "over_under",
         "totals": "over_under",
         "大小球": "over_under",
     }
     return aliases.get(normalized, "any")
+
+
+def _is_asian_handicap_target_alias(target_market: str | None) -> bool:
+    return str(target_market or "").strip().lower() in ASIAN_HANDICAP_TARGET_ALIASES
+
+
+def _unsupported_asian_handicap_shortlist_response(
+    *,
+    query: str,
+    league: str | None,
+    mode: str,
+    target_market: str,
+    window_minutes: int,
+) -> dict[str, Any]:
+    analysis_policy = jingcai_analysis_policy()
+    return {
+        "status": "unsupported_market",
+        "tool": "shortlist_value_matches",
+        "query": query or "",
+        "league": league or "",
+        "mode": mode,
+        "target_market": target_market,
+        "normalized_target_market": "unsupported_asian_handicap",
+        "analysis_output_policy": analysis_output_policy(),
+        "supported_target_markets": list(SHORTLIST_SUPPORTED_TARGET_MARKETS),
+        "reason": "asian_handicap_target_disabled_jingcai_only",
+        "message": "MCP is configured for Jingcai-only analysis; Asian handicap is no longer analyzed as a shortlist target.",
+        "analysis_policy": analysis_policy,
+        "jingcai_scope": {
+            "primary": False,
+            "market_label": "unsupported_non_jingcai_market",
+            "asian_handicap_role": analysis_policy["asian_handicap_role"],
+        },
+        "learning_policy": {"status": "disabled", "active": False, "reason": "unsupported_market"},
+        "window_minutes": window_minutes,
+        "total_candidates": 0,
+        "analyzed_count": 0,
+        "analysis_candidate_limit": 0,
+        "analysis_concurrency": 0,
+        "not_analyzed_count": 0,
+        "eligible_count": 0,
+        "returned_count": 0,
+        "rejected_count": 0,
+        "funnel_report": {
+            "candidate_counts": {
+                "total": 0,
+                "analyzed": 0,
+                "not_analyzed": 0,
+                "eligible": 0,
+                "returned": 0,
+                "rejected": 0,
+            },
+            "rejection_reasons": {"unsupported_market": 1},
+            "hard_blockers": {},
+            "quality_gaps": {},
+            "policy": "Asian handicap shortlist target is disabled; use 1x2 or jingcai_hhad for Jingcai analysis.",
+        },
+        "picks": [],
+        "rejected": [],
+        "analysis_market_snapshot_sync": {
+            "enabled": False,
+            "provider": "analysis_odds",
+            "status": "disabled",
+            "generated_snapshot_count": 0,
+            "saved_snapshot_count": 0,
+            "reason": "unsupported_market",
+        },
+        "analysis_input_policy": (
+            "MCP now analyzes Jingcai markets only. Asian handicap can appear as supporting evidence inside "
+            "single-match analysis but is not a shortlist target or final recommendation market."
+        ),
+        "ranking_policy": "No ranking performed because asian_handicap target is disabled.",
+        "recommendation_log": {"enabled": False, "status": "skipped"},
+        "agent_guidance": (
+            "Ask for or use target_market=1x2 / jingcai_hhad for analysis. Do not output Asian handicap or any market "
+            "as a betting recommendation; explain the unsupported scope and continue with Jingcai-only methodology."
+        ),
+    }
 
 
 def _shortlist_candidate_rank(candidate: dict[str, Any]) -> tuple[float, float, float, float]:
@@ -8405,6 +9055,13 @@ def _shortlist_analysis_for_target_market(analysis: dict[str, Any], target_marke
         best_candidate=selected,
         risk_overlay=risk_overlay,
     )
+    analysis_result = build_analysis_result(
+        best_candidate=selected,
+        market_candidates=matching,
+        blocking_flags=blocking_flags,
+        caution_flags=caution_flags,
+        confidence=confidence,
+    )
     return {
         **analysis,
         "_shortlist_target_market": target_market,
@@ -8412,12 +9069,16 @@ def _shortlist_analysis_for_target_market(analysis: dict[str, Any], target_marke
         "final_decision": final_decision,
         "risk_overlay": risk_overlay,
         "final_execution_advice": final_execution_advice,
+        "analysis_output_policy": analysis_output_policy(),
+        "analysis_result": analysis_result,
         "betting_decision_support": {
             **support,
             "best_candidate": selected,
             "final_decision": final_decision,
             "risk_overlay": risk_overlay,
             "final_execution_advice": final_execution_advice,
+            "analysis_output_policy": analysis_output_policy(),
+            "analysis_result": analysis_result,
         },
     }
 
@@ -8556,6 +9217,8 @@ def _shortlist_pick_from_analysis(analysis: dict[str, Any], *, mode: str = "conf
     return {
         "match": analysis.get("match") or (analysis.get("agent_brief") or {}).get("match") or {},
         "match_context": analysis.get("match_context") or {},
+        "analysis_output_policy": analysis.get("analysis_output_policy") or support.get("analysis_output_policy") or analysis_output_policy(),
+        "analysis_result": analysis.get("analysis_result") or support.get("analysis_result") or {},
         "final_decision": analysis.get("final_decision") or support.get("final_decision") or {},
         "final_execution_advice": analysis.get("final_execution_advice") or support.get("final_execution_advice") or {},
         "risk_overlay": analysis.get("risk_overlay") or support.get("risk_overlay") or {},
@@ -9326,7 +9989,7 @@ def _build_parlay_ticket(
         "required_combined_odds": round_metric(required_combined_odds, 4) if confidence_jingcai_mode else None,
         "risk_flags": risk_flags,
         "confidence_mode_note": (
-            "置信模式推荐：优先高命中率与低波动，不代表正EV价值单；edge_proxy<0 时必须标注负EV风险。"
+            "置信模式分析：优先高命中率与低波动，不代表正EV价值；edge_proxy<0 时必须标注负EV风险。"
             if confidence_jingcai_mode
             else ""
         ),
@@ -9372,11 +10035,11 @@ def _recommendation_summary(recommended: list[dict[str, Any]], fallbacks: list[d
         best = recommended[0]
         negative_ev_note = "（置信模式，负EV，非价值单）" if "confidence_mode_negative_ev_allowed" in (best.get("risk_flags") or []) else ""
         return {
-            "action": "recommend_parlay",
-            "headline": f"推荐{best.get('parlay_type')}{negative_ev_note}，仓位 {best.get('stake_level')}，总赔率 {best.get('combined_decimal_odds')}",
+            "action": "parlay_analysis_candidate",
+            "headline": f"组合分析候选：{best.get('parlay_type')}{negative_ev_note}，总赔率 {best.get('combined_decimal_odds')}",
             "primary": {
                 "parlay_type": best.get("parlay_type"),
-                "stake_level": best.get("stake_level"),
+                "evidence_tag": best.get("stake_level"),
                 "combined_decimal_odds": best.get("combined_decimal_odds"),
                 "estimated_hit_probability": best.get("estimated_hit_probability"),
             },
@@ -9384,17 +10047,17 @@ def _recommendation_summary(recommended: list[dict[str, Any]], fallbacks: list[d
     recommended_fallbacks = [item for item in fallbacks if item.get("single_recommendation") == "single_recommended"]
     if recommended_fallbacks:
         return {
-            "action": "single_bet_fallback",
-            "headline": "没有达到 MCP 风险阈值的串单；优先参考单关候选。",
+            "action": "single_analysis_fallback",
+            "headline": "没有达到 MCP 风险阈值的组合结构；优先参考单项分析候选。",
             "primary": {
                 "selection": recommended_fallbacks[0].get("selection"),
-                "stake_level": recommended_fallbacks[0].get("stake_level"),
+                "evidence_tag": recommended_fallbacks[0].get("stake_level"),
                 "single_expected_multiplier": recommended_fallbacks[0].get("single_expected_multiplier"),
             },
         }
     return {
-        "action": "no_bettable_candidate",
-        "headline": "没有可用串单或单关候选。",
+        "action": "no_clear_analysis_candidate",
+        "headline": "没有可用组合结构或单项候选。",
         "primary": {},
     }
 
@@ -9425,13 +10088,17 @@ async def recommend_jingcai_parlay(
     """Build MCP-owned 2串1/3串1 tickets from shortlist picks without agent-side recomputation."""
     effective_window_minutes = int(window_minutes or JINGCAI_PARLAY_DEFAULT_WINDOW_MINUTES)
     parlay_mode = _normalize_parlay_mode(parlay_mode)
+    requested_include_non_official_markets = bool(include_non_official_markets)
+    include_non_official_markets = False
     official_jingcai_source: dict[str, Any] = {
-        "enabled": not include_non_official_markets,
+        "enabled": True,
         "source": None,
         "selling_count": 0,
         "analyzed_count": 0,
         "eligible_pick_count": 0,
         "rejected_count": 0,
+        "requested_include_non_official_markets": requested_include_non_official_markets,
+        "non_official_markets_enabled": False,
         "rule": (
             "Official Jingcai mode uses Sporttery Selling HAD fixtures first. "
             "It does not build official Jingcai parlays from Asian handicap or totals candidates. "
@@ -9605,6 +10272,7 @@ async def recommend_jingcai_parlay(
     return {
         "status": "ok",
         "tool": "recommend_jingcai_parlay",
+        "analysis_output_policy": analysis_output_policy(),
         "query": query or "",
         "league": league or "",
         "window_minutes": effective_window_minutes,
@@ -9633,16 +10301,17 @@ async def recommend_jingcai_parlay(
             "supported_parlay_types": ["2串1", "3串1"] if max_leg_count >= 3 else ["2串1"],
             "default_window_rule": "Parlay uses a Jingcai day-style default window of next 24 hours; it is not limited to the live/near-kickoff 60-minute shortlist window unless the user explicitly asks.",
             "official_jingcai_rule": "Only 1x2 legs are marked jingcai_supported in this MCP because they map cleanly to 胜平负-style output.",
-            "non_official_market_rule": "Asian handicap and over/under legs are excluded by default for Jingcai parlay. They are allowed only when include_non_official_markets=true and must not be described as official Jingcai odds.",
-            "calculation_rule": "Combination odds and hit probability are calculated inside MCP from final_execution_advice and best_candidate fields.",
-            "parlay_mode_rule": "Default confidence mode ranks by estimated hit probability first and may recommend high-probability low-odds official HAD parlays with small negative EV proxy; value mode requires the configured positive edge proxy.",
+            "non_official_market_rule": "Asian handicap and overseas over/under legs are disabled for Jingcai parlay in this MCP.",
+            "calculation_rule": "Combination odds and hit probability are calculated inside MCP from legacy final_execution_advice and best_candidate diagnostics.",
+            "parlay_mode_rule": "Default confidence mode ranks by estimated hit probability first for combination analysis and may surface high-probability low-odds official HAD combinations with small negative EV proxy; value mode requires the configured positive edge proxy.",
         },
         "recommendation_log": log_result,
         "agent_guidance": (
-            "No recommended parlay ticket meets MCP risk thresholds; display recommendation_summary and single_bet_fallbacks first, then explain risk_candidate_tickets."
+            "No combination passes the MCP risk thresholds; display recommendation_summary and single_bet_fallbacks as analysis diagnostics, not betting advice."
             if not recommended_tickets
-            else "Use recommended_tickets as the only串单 conclusion. Display parlay_type, legs, combined_decimal_odds, "
-            "estimated_hit_probability, edge_proxy, stake_level, and risk_flags. Do not build extra combinations outside MCP."
+            else "Use recommended_tickets as combination-analysis candidates only. Display parlay_type, legs, combined_decimal_odds, "
+            "estimated_hit_probability, edge_proxy, and risk_flags, but do not present them as betting recommendations or stake instructions. "
+            "Do not build extra combinations outside MCP."
         ),
     }
 
@@ -9894,7 +10563,7 @@ async def settle_learning_recommendations(
     )
     AUTO_LEARNING_STATE["last_clv_tracking"] = clv_tracking
     calibration = learning_store.recompute_calibration(db_path=db_path)
-    strategy_state = learning_store.update_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
+    strategy_state = learning_store.update_strategy_state(db_path=db_path, market="1x2", mode="confidence")
     shadow_prediction_metrics = learning_store.shadow_prediction_metrics(db_path=db_path)
     return {
         "status": "ok",
@@ -10053,13 +10722,27 @@ def _learning_policy_for_shortlist(
 ) -> dict[str, Any]:
     if not use_learning_policy:
         return {"status": "disabled", "active": False, "reason": "use_learning_policy_false"}
-    if mode != "balanced" or target_market != "asian_handicap":
+    if target_market == "1x2" and mode in {"confidence", "balanced"}:
+        policy = learning_store.update_strategy_state(db_path=db_path, market="1x2", mode="confidence")
         return {
-            "status": "not_applicable",
-            "active": False,
-            "reason": "learning_policy_currently_targets_balanced_asian_handicap",
+            **policy,
+            "policy_scope": "jingcai_1x2",
+            "requested_mode": mode,
+            "requested_target_market": target_market,
         }
-    return learning_store.update_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
+    if target_market == "jingcai_hhad" and mode in {"confidence", "balanced"}:
+        policy = learning_store.update_strategy_state(db_path=db_path, market="jingcai_hhad", mode="balanced")
+        return {
+            **policy,
+            "policy_scope": "jingcai_hhad",
+            "requested_mode": mode,
+            "requested_target_market": target_market,
+        }
+    return {
+        "status": "not_applicable",
+        "active": False,
+        "reason": "learning_policy_currently_targets_jingcai_1x2_or_jingcai_hhad",
+    }
 
 
 def _apply_learning_policy_to_analysis(
@@ -10414,8 +11097,8 @@ def _snapshot_reanalysis_record_item(
             "best_candidate": payload["best_candidate"],
             "run_id": run_id,
             "tool": "snapshot_reanalysis",
-            "mode": "balanced_observation",
-            "target_market": "asian_handicap",
+            "mode": "confidence_observation",
+            "target_market": "1x2",
             "caution_flags": payload["caution_flags"],
             "raw": {
                 "kind": "snapshot_reanalysis",
@@ -10426,14 +11109,14 @@ def _snapshot_reanalysis_record_item(
             },
         }
 
-    pick = _shortlist_pick_from_analysis(targeted_analysis, mode="balanced")
+    pick = _shortlist_pick_from_analysis(targeted_analysis, mode="confidence")
     return {
         **pick,
         "record_key": record.get("record_key"),
         "run_id": run_id,
         "tool": "snapshot_reanalysis",
-        "mode": "balanced",
-        "target_market": "asian_handicap",
+        "mode": "confidence",
+        "target_market": "1x2",
         "raw": {
             "kind": "snapshot_reanalysis",
             "previous_record_id": record.get("id"),
@@ -10456,7 +11139,7 @@ def _snapshot_reanalysis_update_blocker(analysis: dict[str, Any]) -> str:
     best = analysis.get("best_candidate") or support.get("best_candidate") or {}
     if not best:
         return "market_candidate_missing"
-    if str(best.get("market") or analysis.get("_shortlist_target_market") or "") != "asian_handicap":
+    if str(best.get("market") or analysis.get("_shortlist_target_market") or "") != "1x2":
         return "target_market_missing"
     return ""
 
@@ -10479,8 +11162,8 @@ async def reanalyze_snapshot_backlog(
         limit=bounded_limit,
     )
     learning_policy = _learning_policy_for_shortlist(
-        mode="balanced",
-        target_market="asian_handicap",
+        mode="confidence",
+        target_market="1x2",
         use_learning_policy=True,
         db_path=db_path,
     )
@@ -10517,10 +11200,10 @@ async def reanalyze_snapshot_backlog(
                 window_hours=1,
                 include_source_probe=False,
             )
-            targeted_analysis = _shortlist_analysis_for_target_market(analysis, "asian_handicap")
+            targeted_analysis = _shortlist_analysis_for_target_market(analysis, "1x2")
             targeted_analysis = _apply_learning_policy_to_analysis(
                 targeted_analysis,
-                mode="balanced",
+                mode="confidence",
                 learning_policy=learning_policy,
                 db_path=db_path,
             )
@@ -10537,7 +11220,7 @@ async def reanalyze_snapshot_backlog(
                 targeted_analysis,
                 min_edge=0.01,
                 require_core_markets=True,
-                mode="balanced",
+                mode="confidence",
                 min_calibrated_probability=thresholds["min_calibrated_probability"],
                 min_decimal_odds=thresholds["min_decimal_odds"],
                 max_decimal_odds=thresholds["max_decimal_odds"],
@@ -10607,11 +11290,13 @@ async def run_auto_learning_cycle(
     league: str | None = None,
     as_of: str | None = None,
     timezone_name: str | None = None,
+    jingcai_window_minutes: int | None = None,
     asian_window_minutes: int = 10,
     parlay_window_minutes: int = 10,
     top_n: int = 3,
     limit: int = 30,
-    include_asian_shortlist: bool = True,
+    include_jingcai_shortlist: bool = True,
+    include_asian_shortlist: bool = False,
     include_jingcai_parlay: bool = True,
     include_learning_observations: bool = True,
     learning_observation_limit: int = 30,
@@ -10641,7 +11326,26 @@ async def run_auto_learning_cycle(
     run_id = learning_store.make_run_id("auto-learning")
     saved_record_count = 0
     saved_shadow_prediction_count = 0
-    asian_summary: dict[str, Any] = {"enabled": include_asian_shortlist, "record_count": 0}
+    analysis_policy = jingcai_analysis_policy()
+    effective_jingcai_window_minutes = max(
+        1,
+        min(int((jingcai_window_minutes if jingcai_window_minutes is not None else asian_window_minutes) or 10), 24 * 60),
+    )
+    jingcai_summary: dict[str, Any] = {
+        "enabled": include_jingcai_shortlist,
+        "record_count": 0,
+        "target_market": "1x2",
+        "analysis_policy": analysis_policy,
+    }
+    asian_summary: dict[str, Any] = {
+        "enabled": False,
+        "status": "disabled",
+        "record_count": 0,
+        "target_market": "asian_handicap",
+        "reason": "asian_handicap_analysis_disabled_jingcai_only",
+        "requested": bool(include_asian_shortlist),
+        "analysis_policy": analysis_policy,
+    }
     parlay_summary: dict[str, Any] = {"enabled": include_jingcai_parlay, "record_count": 0}
     bounded_shadow_prediction_limit = max(0, min(int(shadow_prediction_limit or 0), 500))
     bounded_analysis_candidate_limit = max(1, min(int(analysis_candidate_limit or 80), 100))
@@ -10707,18 +11411,18 @@ async def run_auto_learning_cycle(
         "failed_count": 0,
     }
 
-    if include_asian_shortlist:
-        AUTO_LEARNING_STATE["current_step"] = "asian_shortlist"
-        asian_result = await shortlist_value_matches(
+    if include_jingcai_shortlist:
+        AUTO_LEARNING_STATE["current_step"] = "jingcai_shortlist"
+        shortlist_result = await shortlist_value_matches(
             query=query or "",
             league=league,
             as_of=as_of,
             timezone_name=timezone_name,
-            window_minutes=asian_window_minutes,
+            window_minutes=effective_jingcai_window_minutes,
             top_n=top_n,
             limit=limit,
-            mode="balanced",
-            target_market="asian_handicap",
+            mode="confidence",
+            target_market="1x2",
             require_core_markets=True,
             analysis_candidate_limit=bounded_analysis_candidate_limit,
             analysis_concurrency=bounded_analysis_concurrency,
@@ -10728,12 +11432,12 @@ async def run_auto_learning_cycle(
             league_allowlist=league_allowlist,
             db_path=db_path,
         )
-        asian_records = learning_store.build_records_from_shortlist(asian_result, run_id=run_id)
-        saved_record_count += learning_store.save_recommendation_records(asian_records, db_path=db_path)
+        shortlist_records = learning_store.build_records_from_shortlist(shortlist_result, run_id=run_id)
+        saved_record_count += learning_store.save_recommendation_records(shortlist_records, db_path=db_path)
         shadow_prediction_records = []
         if include_shadow_predictions:
             shadow_prediction_records = learning_store.build_shadow_prediction_records_from_shortlist(
-                asian_result,
+                shortlist_result,
                 run_id=run_id,
                 limit=bounded_shadow_prediction_limit,
             )
@@ -10744,12 +11448,12 @@ async def run_auto_learning_cycle(
         learning_observation_records = []
         if include_learning_observations:
             learning_observation_records = learning_store.build_learning_observation_records_from_shortlist(
-                asian_result,
+                shortlist_result,
                 run_id=run_id,
                 limit=learning_observation_limit,
             )
             saved_record_count += learning_store.save_recommendation_records(learning_observation_records, db_path=db_path)
-        calibrated_picks = _apply_live_calibration_to_picks(asian_result.get("picks") or [], db_path=db_path)
+        calibrated_picks = _apply_live_calibration_to_picks(shortlist_result.get("picks") or [], db_path=db_path)
         calibrated_picks.sort(
             key=lambda item: (
                 parse_float((item.get("live_calibration") or {}).get("adjusted_probability")) or 0.0,
@@ -10758,24 +11462,36 @@ async def run_auto_learning_cycle(
             ),
             reverse=True,
         )
-        asian_summary = {
+        shortlist_summary = {
             "enabled": True,
-            "status": asian_result.get("status"),
-            "record_count": len(asian_records),
+            "status": shortlist_result.get("status"),
+            "record_count": len(shortlist_records),
             "learning_observation_record_count": len(learning_observation_records),
             "shadow_prediction_record_count": len(shadow_prediction_records),
             "saved_shadow_prediction_count": saved_shadow_prediction_count,
-            "total_candidates": asian_result.get("total_candidates"),
-            "analyzed_count": asian_result.get("analyzed_count"),
-            "not_analyzed_count": asian_result.get("not_analyzed_count"),
-            "eligible_count": asian_result.get("eligible_count"),
-            "returned_count": asian_result.get("returned_count"),
-            "rejected_count": asian_result.get("rejected_count"),
-            "funnel_report": asian_result.get("funnel_report") or {},
-            "analysis_market_snapshot_sync": asian_result.get("analysis_market_snapshot_sync") or {},
-            "target_market": asian_result.get("target_market"),
-            "mode": asian_result.get("mode"),
+            "total_candidates": shortlist_result.get("total_candidates"),
+            "analyzed_count": shortlist_result.get("analyzed_count"),
+            "not_analyzed_count": shortlist_result.get("not_analyzed_count"),
+            "eligible_count": shortlist_result.get("eligible_count"),
+            "returned_count": shortlist_result.get("returned_count"),
+            "rejected_count": shortlist_result.get("rejected_count"),
+            "funnel_report": shortlist_result.get("funnel_report") or {},
+            "analysis_market_snapshot_sync": shortlist_result.get("analysis_market_snapshot_sync") or {},
+            "target_market": shortlist_result.get("target_market"),
+            "mode": shortlist_result.get("mode"),
             "picks": calibrated_picks,
+            "analysis_policy": analysis_policy,
+        }
+        jingcai_summary = shortlist_summary
+        asian_summary = {
+            **asian_summary,
+            "legacy_alias_for": "jingcai_shortlist",
+        }
+    elif include_asian_shortlist:
+        asian_summary = {
+            **asian_summary,
+            "status": "disabled",
+            "reason": "include_asian_shortlist_ignored_jingcai_only",
         }
 
     if include_jingcai_parlay:
@@ -10982,7 +11698,7 @@ async def run_auto_learning_cycle(
                 else:
                     oddsportal_snapshot_sync = await data_source_service.start_oddsportal_sync(
                         event_urls=[],
-                        markets=["asian_handicap"],
+                        markets=["h2h"],
                         limit=bounded_oddsportal_snapshot_limit,
                         force=True,
                         auto_discover=True,
@@ -11074,7 +11790,11 @@ async def run_auto_learning_cycle(
         strategy_state = settlement.get("strategy_state") or {}
     else:
         calibration = learning_store.recompute_calibration(db_path=db_path)
-        strategy_state = learning_store.update_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
+        strategy_state = learning_store.update_strategy_state(
+            db_path=db_path,
+            market="1x2",
+            mode="confidence",
+        )
     AUTO_LEARNING_STATE["current_step"] = "idle"
     shadow_prediction_metrics = learning_store.shadow_prediction_metrics(db_path=db_path)
     learning_phase = "collecting_samples"
@@ -11088,9 +11808,10 @@ async def run_auto_learning_cycle(
         "db_path": db_path or learning_store.learning_db_path(),
         "saved_record_count": saved_record_count,
         "saved_shadow_prediction_count": saved_shadow_prediction_count,
+        "jingcai_shortlist": jingcai_summary,
         "asian_shortlist": asian_summary,
         "jingcai_parlay": parlay_summary,
-        "analysis_market_snapshot_sync": asian_summary.get("analysis_market_snapshot_sync") or {},
+        "analysis_market_snapshot_sync": jingcai_summary.get("analysis_market_snapshot_sync") or {},
         "market_snapshot_sync": market_snapshot_sync,
         "oddsportal_snapshot_sync": oddsportal_snapshot_sync,
         "betexplorer_snapshot_sync": betexplorer_snapshot_sync,
@@ -11102,6 +11823,7 @@ async def run_auto_learning_cycle(
         "strategy_state": strategy_state,
         "shadow_prediction_metrics": shadow_prediction_metrics,
         "learning_phase": learning_phase,
+        "analysis_policy": analysis_policy,
         "safety_policy": "Paper-learning only. This loop records recommendations and outcomes; it never places real-money bets.",
     }
 
@@ -12236,13 +12958,33 @@ def _dashboard_prediction_ledger(
             [record for _source, record in source_records],
             db_path=market_db_path,
         )
+    strategy_state_cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _strategy_state_for_record(record: dict[str, Any]) -> dict[str, Any] | None:
+        market = str(record.get("market") or "asian_handicap")
+        mode = _dashboard_strategy_mode(record)
+        if (
+            strategy_state
+            and str(strategy_state.get("market") or "") == market
+            and str(strategy_state.get("mode") or "") == mode
+        ):
+            return strategy_state
+        key = (market, mode)
+        if key not in strategy_state_cache:
+            strategy_state_cache[key] = learning_store.get_strategy_state(
+                db_path=db_path,
+                market=market,
+                mode=mode,
+            )
+        return strategy_state_cache[key]
+
     rows = [
         _dashboard_prediction_row(
             record,
             source=source,
             snapshot_coverage=snapshot_coverage,
             market_db_path=market_db_path,
-            strategy_state=strategy_state,
+            strategy_state=_strategy_state_for_record(record),
             probability_governance=probability_governance,
         )
         for source, record in source_records
@@ -14260,15 +15002,28 @@ def _dashboard_recommendation_opportunity(
         title = "暂无预测样本"
         detail = "自动学习循环还没有写入预测样本。"
 
-    visible_signal_rows = [
-        row
-        for row in eligible_signal_rows
-        if str(row.get("recommendation") or "") == "condition_observe"
-    ]
     candidates = sorted(
-        visible_signal_rows,
+        [
+            row
+            for row in eligible_signal_rows
+            if _dashboard_row_threshold_ready(row)
+            and (
+                bool(row.get("has_odds_snapshot") or int(row.get("odds_snapshot_count") or 0) > 0)
+                or str(
+                    (row.get("prediction_diagnostic") or {}).get("primary_reason")
+                    or row.get("rejection_reason")
+                    or ""
+                )
+                != "multi_bookmaker_snapshot_missing"
+            )
+        ],
         key=lambda row: (
             1 if _dashboard_row_threshold_ready(row) else 0,
+            1
+            if str((row.get("prediction_diagnostic") or {}).get("primary_reason") or row.get("rejection_reason") or "")
+            == "awaiting_reanalysis_after_snapshot"
+            else 0,
+            1 if bool(row.get("has_odds_snapshot") or int(row.get("odds_snapshot_count") or 0) > 0) else 0,
             parse_float(row.get("edge")) or -999.0,
             parse_float(row.get("learned_probability")) or -999.0,
             str(row.get("created_at_utc") or ""),
@@ -14342,6 +15097,14 @@ def _dashboard_recommendation_opportunity(
             )[:6]
         ],
     }
+
+
+def _dashboard_primary_market_mode() -> tuple[str, str]:
+    return "1x2", "confidence"
+
+
+def _dashboard_primary_market_label(market: str) -> str:
+    return "jingcai" if market in {"1x2", "jingcai_hhad"} else "asian"
 
 
 def _dashboard_contract_section(
@@ -17736,13 +18499,14 @@ def dashboard_snapshot(
         _ensure_dongqiudi_logo_cache_warm()
     calibration = learning_store.calibration_status(db_path=db_path, limit=20)
     strategy_states = calibration.get("strategy_states") or []
+    primary_market, primary_mode = _dashboard_primary_market_mode()
     strategy_state = next(
         (
             item
             for item in strategy_states
-            if item.get("market") == "asian_handicap" and item.get("mode") == "balanced"
+            if item.get("market") == primary_market and item.get("mode") == primary_mode
         ),
-        learning_store.get_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced"),
+        learning_store.get_strategy_state(db_path=db_path, market=primary_market, mode=primary_mode),
     )
     open_records = [
         record
@@ -17759,10 +18523,11 @@ def dashboard_snapshot(
         db_path=market_db_path,
     )
     observations = [record for record in open_records if _dashboard_is_observation(record)]
-    asian_picks: list[dict[str, Any]] = []
+    primary_market_picks: list[dict[str, Any]] = []
+    legacy_asian_picks: list[dict[str, Any]] = []
     policy_rejected_picks: list[dict[str, Any]] = []
     for record in open_records:
-        if record.get("market") != "asian_handicap" or _dashboard_is_observation(record):
+        if _dashboard_is_observation(record):
             continue
         policy_rejection = _dashboard_open_pick_policy_rejection(
             record,
@@ -17771,8 +18536,11 @@ def dashboard_snapshot(
         )
         if policy_rejection:
             policy_rejected_picks.append({**record, "_dashboard_policy_rejection_reason": policy_rejection})
-        else:
-            asian_picks.append(record)
+            continue
+        if record.get("market") == "asian_handicap":
+            legacy_asian_picks.append(record)
+        if record.get("market") == primary_market:
+            primary_market_picks.append(record)
     record_counts = calibration.get("record_counts") or {}
     recent_settlement_records = _dashboard_recent_settlement_records(settled_records, limit=12)
     recent_settlements = [_dashboard_settlement_row(record) for record in recent_settlement_records]
@@ -17818,7 +18586,12 @@ def dashboard_snapshot(
         "settled_records": len(settled_records),
         "tracked_only_records": int(record_counts.get("tracked_only") or 0),
         "duplicate_ignored_records": int(record_counts.get("duplicate_ignored") or 0),
-        "asian_pick_count": len(asian_picks),
+        "primary_market": primary_market,
+        "primary_mode": primary_mode,
+        "primary_market_label": _dashboard_primary_market_label(primary_market),
+        "primary_pick_count": len(primary_market_picks),
+        "jingcai_pick_count": len(primary_market_picks) if primary_market in {"1x2", "jingcai_hhad"} else 0,
+        "asian_pick_count": len(legacy_asian_picks),
         "observation_count": len(observations),
         "calibration_bucket_count": int(calibration.get("bucket_count") or 0),
         "strategy_sample_count": int(strategy_state.get("sample_count") or 0),
@@ -17958,7 +18731,11 @@ def dashboard_snapshot(
         "market_snapshot_summary": market_snapshot_summary,
         "context_coverage": context_coverage,
         "strategy_state": strategy_state,
-        "asian_picks": [_dashboard_record_row(record) for record in asian_picks[:20]],
+        "primary_picks": [_dashboard_record_row(record) for record in primary_market_picks[:20]],
+        "jingcai_picks": [_dashboard_record_row(record) for record in primary_market_picks[:20]]
+        if primary_market in {"1x2", "jingcai_hhad"}
+        else [],
+        "asian_picks": [_dashboard_record_row(record) for record in legacy_asian_picks[:20]],
         "candidate_filters": candidate_filters,
         "recent_settlements": recent_settlements,
         "prediction_ledger": prediction_ledger,
@@ -18035,6 +18812,7 @@ async def auto_learning_daemon(
     timezone_name: str | None = None,
     top_n: int = 12,
     limit: int = 80,
+    jingcai_window_minutes: int | None = None,
     asian_window_minutes: int = 10,
     parlay_window_minutes: int = 10,
     learning_observation_limit: int = 30,
@@ -18057,7 +18835,9 @@ async def auto_learning_daemon(
     enforce_settlement_coverage: bool = True,
     league_allowlist: list[str] | frozenset[str] | None = None,
 ) -> None:
-    bounded_asian_window_minutes = max(1, min(int(asian_window_minutes or 60), 48 * 60))
+    base_jingcai_window_minutes = jingcai_window_minutes if jingcai_window_minutes is not None else asian_window_minutes
+    bounded_jingcai_window_minutes = max(1, min(int(base_jingcai_window_minutes or 60), 48 * 60))
+    bounded_legacy_asian_window_minutes = max(1, min(int(asian_window_minutes or 60), 48 * 60))
     bounded_parlay_window_minutes = max(1, min(int(parlay_window_minutes or JINGCAI_PARLAY_DEFAULT_WINDOW_MINUTES), 48 * 60))
     bounded_learning_observation_limit = max(0, min(int(learning_observation_limit or 0), 100))
     bounded_shadow_prediction_limit = max(0, min(int(shadow_prediction_limit or 0), 500))
@@ -18080,7 +18860,9 @@ async def auto_learning_daemon(
             "timezone_name": timezone_name or "Asia/Shanghai",
             "top_n": top_n,
             "limit": limit,
-            "asian_window_minutes": bounded_asian_window_minutes,
+            "jingcai_window_minutes": bounded_jingcai_window_minutes,
+            "asian_window_minutes": bounded_legacy_asian_window_minutes,
+            "asian_window_deprecated": True,
             "parlay_window_minutes": bounded_parlay_window_minutes,
             "learning_observation_limit": bounded_learning_observation_limit,
             "shadow_prediction_limit": bounded_shadow_prediction_limit,
@@ -18115,7 +18897,7 @@ async def auto_learning_daemon(
         AUTO_LEARNING_STATE["last_started_at_utc"] = now_utc().isoformat()
         # Adaptive widening 抽到纯函数，便于单测覆盖。
         effective_window = adaptive_asian_window_minutes(
-            base_minutes=bounded_asian_window_minutes,
+            base_minutes=bounded_jingcai_window_minutes,
             consecutive_empty_cycles=consecutive_empty_cycles,
         )
         AUTO_LEARNING_STATE["effective_window_minutes"] = effective_window
@@ -18141,7 +18923,10 @@ async def auto_learning_daemon(
             result = await asyncio.wait_for(
                 run_auto_learning_cycle(
                     timezone_name=timezone_name or "Asia/Shanghai",
-                    asian_window_minutes=effective_window,
+                    include_jingcai_shortlist=True,
+                    include_asian_shortlist=False,
+                    jingcai_window_minutes=effective_window,
+                    asian_window_minutes=bounded_legacy_asian_window_minutes,
                     parlay_window_minutes=bounded_parlay_window_minutes,
                     learning_observation_limit=bounded_learning_observation_limit,
                     shadow_prediction_limit=bounded_shadow_prediction_limit,
@@ -18175,23 +18960,25 @@ async def auto_learning_daemon(
                 "saved_record_count": result.get("saved_record_count"),
                 "saved_shadow_prediction_count": result.get("saved_shadow_prediction_count"),
                 "learning_phase": result.get("learning_phase"),
-                "asian_record_count": (result.get("asian_shortlist") or {}).get("record_count"),
-                "asian_learning_observation_record_count": (result.get("asian_shortlist") or {}).get(
+                "jingcai_record_count": (result.get("jingcai_shortlist") or {}).get("record_count"),
+                "jingcai_learning_observation_record_count": (result.get("jingcai_shortlist") or {}).get(
                     "learning_observation_record_count"
                 ),
-                "asian_shadow_prediction_record_count": (result.get("asian_shortlist") or {}).get(
+                "jingcai_shadow_prediction_record_count": (result.get("jingcai_shortlist") or {}).get(
                     "shadow_prediction_record_count"
                 ),
-                "asian_total_candidates": (result.get("asian_shortlist") or {}).get("total_candidates"),
-                "asian_analyzed_count": (result.get("asian_shortlist") or {}).get("analyzed_count"),
-                "asian_not_analyzed_count": (result.get("asian_shortlist") or {}).get("not_analyzed_count"),
-                "asian_eligible_count": (result.get("asian_shortlist") or {}).get("eligible_count"),
-                "asian_returned_count": (result.get("asian_shortlist") or {}).get("returned_count"),
-                "asian_rejected_count": (result.get("asian_shortlist") or {}).get("rejected_count"),
-                "asian_rejection_reasons": (
-                    ((result.get("asian_shortlist") or {}).get("funnel_report") or {}).get("rejection_reasons")
+                "jingcai_total_candidates": (result.get("jingcai_shortlist") or {}).get("total_candidates"),
+                "jingcai_analyzed_count": (result.get("jingcai_shortlist") or {}).get("analyzed_count"),
+                "jingcai_not_analyzed_count": (result.get("jingcai_shortlist") or {}).get("not_analyzed_count"),
+                "jingcai_eligible_count": (result.get("jingcai_shortlist") or {}).get("eligible_count"),
+                "jingcai_returned_count": (result.get("jingcai_shortlist") or {}).get("returned_count"),
+                "jingcai_rejected_count": (result.get("jingcai_shortlist") or {}).get("rejected_count"),
+                "jingcai_rejection_reasons": (
+                    ((result.get("jingcai_shortlist") or {}).get("funnel_report") or {}).get("rejection_reasons")
                     or {}
                 ),
+                "asian_shortlist_status": (result.get("asian_shortlist") or {}).get("status"),
+                "asian_shortlist_reason": (result.get("asian_shortlist") or {}).get("reason"),
                 "parlay_record_count": (result.get("jingcai_parlay") or {}).get("record_count"),
                 "analysis_market_snapshot_sync": result.get("analysis_market_snapshot_sync"),
                 "market_snapshot_sync": result.get("market_snapshot_sync"),
@@ -18210,10 +18997,10 @@ async def auto_learning_daemon(
             else:
                 consecutive_empty_cycles += 1
             # Log a one-line summary for nightly visibility
-            cands = (result.get("asian_shortlist") or {}).get("total_candidates") or 0
+            cands = (result.get("jingcai_shortlist") or {}).get("total_candidates") or 0
             print(
                 f"[daemon] cycle done: window={effective_window}min "
-                f"candidates={cands} saved_rec={result.get('saved_record_count')} "
+                f"jingcai_candidates={cands} saved_rec={result.get('saved_record_count')} "
                 f"saved_shadow={result.get('saved_shadow_prediction_count')} "
                 f"settled={((result.get('settlement') or {}).get('settlement') or {}).get('settled_count')} "
                 f"empty_streak={consecutive_empty_cycles}",
@@ -18349,7 +19136,18 @@ async def shortlist_value_matches(
     mode = {"balance": "balanced"}.get(mode, mode)
     if mode not in {"value", "confidence", "balanced"}:
         mode = "value"
+    raw_target_market = str(target_market or "any").strip()
+    bounded_window_minutes = max(1, min(int(window_minutes or 60), 24 * 60))
+    if _is_asian_handicap_target_alias(raw_target_market):
+        return _unsupported_asian_handicap_shortlist_response(
+            query=query or "",
+            league=league,
+            mode=mode,
+            target_market=raw_target_market or "asian_handicap",
+            window_minutes=bounded_window_minutes,
+        )
     target_market = _normalize_shortlist_target_market(target_market)
+    analysis_policy = jingcai_analysis_policy()
     learning_policy = _learning_policy_for_shortlist(
         mode=mode,
         target_market=target_market,
@@ -18376,7 +19174,6 @@ async def shortlist_value_matches(
             min_value_edge,
             parse_float(learning_policy.get("min_value_edge")) or min_value_edge,
         )
-    bounded_window_minutes = max(1, min(int(window_minutes or 60), 24 * 60))
     window_hours = max(1, math.ceil(bounded_window_minutes / 60))
 
     match_list = await list_matches(
@@ -18641,6 +19438,7 @@ async def shortlist_value_matches(
         "rejected_count": len(rejected),
         "funnel_report": funnel_report,
         "picks": returned,
+        "analysis_policy": analysis_policy,
         "analysis_market_snapshot_sync": analysis_market_snapshot_sync,
     }
     log_result = _append_recommendation_log(record, recommendation_log_path)
@@ -18652,6 +19450,21 @@ async def shortlist_value_matches(
         "league": league or "",
         "mode": mode,
         "target_market": target_market,
+        "analysis_policy": analysis_policy,
+        "analysis_output_policy": analysis_output_policy(),
+        "jingcai_scope": {
+            "primary": target_market in {"1x2", "jingcai_hhad", "any"},
+            "market_label": (
+                "竞彩足球胜平负"
+                if target_market == "1x2"
+                else "竞彩足球让球胜平负"
+                if target_market == "jingcai_hhad"
+                else "混合候选"
+                if target_market == "any"
+                else "非竞彩官方市场，仅作辅助信号"
+            ),
+            "asian_handicap_role": analysis_policy["asian_handicap_role"],
+        },
         "balanced_thresholds": {
             "min_calibrated_probability": round_metric(min_calibrated_probability),
             "min_decimal_odds": round_metric(min_decimal_odds, 4),
@@ -18679,7 +19492,9 @@ async def shortlist_value_matches(
             "The shortlist scans all schedule-anchored fixtures in the time window, then analyze_single_match tries to "
             "resolve usable odds from fixture odds, detail pages, and supplemental sources. Matches without calculable "
             "odds are rejected as data-blocked and are not given a betting direction. Reserve/youth, women, friendlies, "
-            "and non-mainstream lower-tier/regional cup fixtures are hard-excluded before analysis."
+            "and non-mainstream lower-tier/regional cup fixtures are hard-excluded before analysis. Jingcai analysis "
+            "requires a full fundamental review for regular major competitions before mapping model or market signals "
+            "to 胜平负, 让球胜平负, 总进球, 比分, 半全场, or 串关."
         ),
         "ranking_policy": (
             "MCP lightly lists upcoming matches, concurrently analyzes up to 100 listed candidates, "
@@ -18698,9 +19513,10 @@ async def shortlist_value_matches(
         ),
         "recommendation_log": log_result,
         "agent_guidance": (
-            "Use picks as the shortlist conclusion. For each pick, display final_execution_advice.headline as the final action, "
-            "final_decision.headline only as raw MCP pre-risk recommendation, plus best_candidate, value_score, and main caution flags. "
-            "Do not recalculate probabilities outside MCP."
+            "Use picks[].analysis_result as the shortlist analysis conclusion. For each pick, explain the supported direction, "
+            "evidence strength, market mapping, and caution flags without presenting it as a betting recommendation, stake plan, "
+            "or command to buy. Do not recalculate probabilities outside MCP. For Jingcai requests, map 1x2 to 胜平负 first; "
+            "treat Asian handicap and overseas totals as supporting signals only."
         ),
     }
 
@@ -18959,16 +19775,24 @@ async def analyze_single_match(
         "audit_id": decision_audit["audit_id"],
         "agent_contract": decision_audit["agent_contract"],
     }
+    analysis_policy = jingcai_analysis_policy()
+    analysis_pack["analysis_policy"] = analysis_policy
     analysis_pack["agent_brief"]["model_card"] = model_card
     analysis_pack["agent_brief"]["professional_scorecard"] = professional_scorecard
     analysis_pack["agent_brief"]["decision_audit_id"] = decision_audit["audit_id"]
+    analysis_pack["agent_brief"]["analysis_policy"] = analysis_policy
+    output_policy = betting_decision_support.get("analysis_output_policy") or analysis_output_policy()
+    analysis_result = betting_decision_support.get("analysis_result") or {}
 
     return {
         "status": "ok",
         "agent_brief": analysis_pack.get("agent_brief") or {},
+        "analysis_output_policy": output_policy,
+        "analysis_result": analysis_result,
         "final_decision": betting_decision_support.get("final_decision") or {},
         "market_candidates": betting_decision_support.get("market_candidates") or [],
         "best_candidate": betting_decision_support.get("best_candidate") or {},
+        "analysis_policy": analysis_policy,
         "final_execution_advice": betting_decision_support.get("final_execution_advice") or {},
         "risk_overlay": betting_decision_support.get("risk_overlay") or {},
         "professional_scorecard": professional_scorecard,

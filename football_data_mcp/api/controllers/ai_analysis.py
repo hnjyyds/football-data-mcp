@@ -9,6 +9,7 @@ from football_data_mcp.api.controllers._helpers import api_error_response, bool_
 from football_data_mcp.api.registry import SupportsCustomRoute
 from football_data_mcp.api.schemas.ai_analysis import (
     AIMatchAnalysisResponse,
+    AIMatchLiveResponse,
     AIMatchOddsResponse,
     AIMatchesWindowResponse,
     AIOddsSourceStatusResponse,
@@ -26,6 +27,7 @@ def register(mcp: SupportsCustomRoute) -> list[dict[str, object]]:
         ("/api/ai/shortlist", ["GET", "OPTIONS"], ai_shortlist_api),
         ("/api/ai/match/analysis", ["GET", "OPTIONS"], ai_match_analysis_api),
         ("/api/ai/match/odds", ["GET", "OPTIONS"], ai_match_odds_api),
+        ("/api/ai/match/live", ["GET", "OPTIONS"], ai_match_live_api),
         ("/api/ai/review/summary", ["GET", "OPTIONS"], ai_review_summary_api),
         ("/api/ai/review/match/{ledger_id}", ["GET", "OPTIONS"], ai_review_match_api),
         ("/api/ai/odds-source-status", ["GET", "OPTIONS"], ai_odds_source_status_api),
@@ -67,8 +69,8 @@ async def ai_shortlist_api(request: Request) -> Response:
             window_minutes=int(request.query_params.get("window_minutes") or 360),
             top_n=int(request.query_params.get("top_n") or 5),
             limit=int(request.query_params.get("limit") or 40),
-            mode=request.query_params.get("mode") or "balanced",
-            target_market=request.query_params.get("target_market") or "asian_handicap",
+            mode=request.query_params.get("mode") or "confidence",
+            target_market=request.query_params.get("target_market") or "1x2",
             min_calibrated_probability=float(request.query_params.get("min_calibrated_probability") or 0.58),
             min_decimal_odds=float(request.query_params.get("min_decimal_odds") or 1.65),
             max_decimal_odds=float(request.query_params.get("max_decimal_odds") or 2.05),
@@ -119,6 +121,31 @@ async def ai_match_odds_api(request: Request) -> Response:
             window_hours=int(request.query_params.get("window_hours") or 24),
         )
         return success_json(AIMatchOddsResponse.model_validate(result), headers=headers)
+    except Exception as exc:
+        return api_error_response(exc, headers=headers)
+
+
+async def ai_match_live_api(request: Request) -> Response:
+    headers = headers_for(request)
+    if request.method == "OPTIONS":
+        return options_response(headers)
+    try:
+        result = await AIAnalysisService().match_live(
+            query=request.query_params.get("query") or "",
+            home_team=request.query_params.get("home_team") or None,
+            away_team=request.query_params.get("away_team") or None,
+            league=request.query_params.get("league") or None,
+            as_of=request.query_params.get("as_of") or None,
+            timezone_name=request.query_params.get("timezone_name") or "Asia/Shanghai",
+            lookback_hours=float(request.query_params.get("lookback_hours") or 4),
+            window_hours=float(request.query_params.get("window_hours") or 8),
+            leisu_match_id=request.query_params.get("leisu_match_id") or None,
+            include_odds=(
+                (request.query_params.get("include_odds") or "").strip().lower()
+                not in {"0", "false", "no", "off"}
+            ),
+        )
+        return success_json(AIMatchLiveResponse.model_validate(result), headers=headers)
     except Exception as exc:
         return api_error_response(exc, headers=headers)
 

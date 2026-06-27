@@ -62,14 +62,18 @@ configure_health_dependencies(
 mcp = FastMCP(
     "football-data-mcp",
     instructions=(
-        "Single-match and short-list football data MCP. Use it to resolve a user-specified match, "
-        "probe multiple football data sources, fetch numeric 1X2 and Asian handicap odds, normalized lineup_analysis, and return schedule/form evidence. "
+        "Jingcai-first football data MCP. Use it to resolve a user-specified match, "
+        "probe multiple football data sources, fetch numeric 1X2/Jingcai odds plus supporting market context, normalized lineup_analysis, and return schedule/form evidence. "
+        "For Chinese Sports Lottery / 竞彩足球 requests, default to 胜平负, 让球胜平负, 总进球, 比分, 半全场, and 串关 mapping; Asian handicap is supporting context only and is not a final MCP target market. "
+        "Because Jingcai fixtures are usually regular major competitions, agents must perform comprehensive fundamentals review: motivation, competition context, schedule, injuries/lineups, tactical style, home/away context, form, head-to-head, table position, weather/venue, market movement, and scoreline distribution. "
+        "Treat Jingcai value as hit-rate plus odds-support/combination quality, not as a pure EV hunt: check whether odds are overheated,诱高, and whether the price can support the team's real ability before stating an analysis conclusion. "
+        "Outputs are analysis-only: explain evidence, tendency, Jingcai mapping, and risks; do not present results as betting recommendations, stake plans, or instructions to buy. "
         "When paid-source keys are configured, sync_market_snapshots stores The Odds API market snapshots locally and get_match_data_bundle returns multi-source consensus. "
         "When Leisu access is configured, sync_leisu_odds_snapshots stores gated Leisu multi-company odds snapshots locally for time-series audit. "
-        "For 'pick the most valuable upcoming matches' requests, use shortlist_value_matches with mode='value'. "
-        "For 'pick the most reliable / highest confidence match' requests, use shortlist_value_matches with mode='confidence' and audit with run_top_k_confidence_backtest. "
-        "For balanced hit-rate plus non-crushed odds requests, use shortlist_value_matches with mode='balanced'. "
-        "For parlay/串单 requests, use recommend_jingcai_parlay so combinations, total odds, stake_level, and risk flags stay MCP-driven. "
+        "For Jingcai shortlist or 胆/防 requests, use shortlist_value_matches with mode='confidence' and target_market='1x2' unless the user names another Jingcai market. "
+        "For 'pick the most valuable upcoming matches' requests, interpret value as 命中率+赔率支撑 first; use mode='value' only when the user explicitly asks for strict edge/EV diagnostics, and still map conclusions back to Jingcai. "
+        "Do not call shortlist_value_matches with target_market='asian_handicap'; it is disabled in this Jingcai-only MCP. "
+        "For parlay/串单 requests, use recommend_jingcai_parlay only as combination analysis so total odds and risk flags stay MCP-driven; do not output stake instructions. "
         "For automated paper-learning loops, use run_auto_learning_cycle, settle_learning_recommendations, and learning_calibration_status. "
         "When lineup data is present, use match_context.lineup.lineup_analysis only; do not infer from raw formation codes. "
         "Leisu schedule is supplemental Chinese fixture corroboration; Leisu odds become usable only after explicit odds parsing and quality-gated snapshot sync."
@@ -271,11 +275,13 @@ async def run_auto_learning_cycle(
     league: str = "",
     as_of: str = "",
     timezone_name: str = "Asia/Shanghai",
+    jingcai_window_minutes: int = 10,
     asian_window_minutes: int = 10,
     parlay_window_minutes: int = 10,
     top_n: int = 3,
     limit: int = 30,
-    include_asian_shortlist: bool = True,
+    include_jingcai_shortlist: bool = True,
+    include_asian_shortlist: bool = False,
     include_jingcai_parlay: bool = True,
     include_shadow_predictions: bool = True,
     shadow_prediction_limit: int = 100,
@@ -298,21 +304,25 @@ async def run_auto_learning_cycle(
     """
     Run one automated paper-learning loop.
 
-    This records future-window Asian handicap balanced picks and Jingcai parlay
-    recommendations into the learning database, optionally fetches public
+    This records future-window Jingcai-first 1X2 analysis candidates and Jingcai
+    combination diagnostics into the learning database, optionally fetches public
     completed scores, settles open records, and recomputes calibration buckets.
-    It is paper learning only and never places real-money bets.
+    Asian handicap sampling is disabled in this Jingcai-only MCP; legacy
+    asian_window_minutes/include_asian_shortlist inputs are accepted for
+    compatibility but ignored. It is paper learning only and never places real-money bets.
     """
     return await sources.run_auto_learning_cycle(
         query=query or "",
         league=league or None,
         as_of=as_of or None,
         timezone_name=timezone_name or "Asia/Shanghai",
+        include_jingcai_shortlist=include_jingcai_shortlist,
+        include_asian_shortlist=False,
+        jingcai_window_minutes=jingcai_window_minutes or asian_window_minutes or 10,
         asian_window_minutes=asian_window_minutes or 10,
         parlay_window_minutes=parlay_window_minutes or 10,
         top_n=top_n or 3,
         limit=limit or 30,
-        include_asian_shortlist=include_asian_shortlist,
         include_jingcai_parlay=include_jingcai_parlay,
         include_shadow_predictions=include_shadow_predictions,
         shadow_prediction_limit=shadow_prediction_limit or 100,
@@ -344,7 +354,7 @@ async def settle_learning_recommendations(
     days_forward: int = 1,
 ) -> dict[str, Any]:
     """
-    Settle open paper recommendations and recompute calibration buckets.
+    Settle open paper prediction records and recompute calibration buckets.
 
     Pass explicit score rows when available, or leave auto_fetch=true to attempt
     public-source score discovery. Results must include home_team, away_team,
@@ -365,7 +375,7 @@ async def learning_calibration_status(limit: int = 50) -> dict[str, Any]:
     """
     Show current paper-learning record counts and calibration buckets.
 
-    Use this before trusting live-calibrated recommendations; small buckets are
+    Use this before trusting live-calibrated analysis signals; small buckets are
     diagnostic only and should not be treated as reliable edges.
     """
     return sources.learning_calibration_status(limit=limit or 50)
@@ -524,7 +534,7 @@ async def shortlist_value_matches(
     limit: int = 30,
     min_edge: float = 0.01,
     mode: str = "confidence",
-    target_market: str = "any",
+    target_market: str = "1x2",
     min_calibrated_probability: float = 0.58,
     min_decimal_odds: float = 1.65,
     max_decimal_odds: float = 2.05,
@@ -538,19 +548,24 @@ async def shortlist_value_matches(
     league_allowlist: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Pick the most valuable football matches starting in the next window, default next 60 minutes.
+    Analyze the most useful Jingcai football candidates starting in the next window, default next 60 minutes.
 
     Use this when the user asks for "未来1小时内最有把握", "精选几场", "挑最有价值的比赛",
-    or similar shortlist requests. Set mode="confidence" for稳胆/highest-confidence requests,
-    mode="balanced" (or alias mode="balance") for high-confidence picks whose odds are not crushed, and explicit mode="value"
-    for value/edge requests. Set target_market="asian_handicap" for亚盘-only
-    requests. The tool lists upcoming matches, runs MCP single-match
+    "今天竞彩足球怎么选", "胜平负胆防", or similar shortlist requests. Default target_market="1x2"
+    maps to 竞彩足球胜平负 and is the normal Jingcai research path. Set mode="confidence" for稳胆/highest-confidence requests,
+    mode="balanced" (or alias mode="balance") for high-confidence analysis candidates whose odds are not crushed, and explicit mode="value"
+    only for strict edge/EV diagnostics. In Jingcai, value means 命中率+赔率支撑/组合性价比:
+    review fundamentals, historical record/head-to-head, odds movement, overheated pricing,诱高 risk, and whether odds support team ability.
+    Supported target markets are "1x2", "jingcai_hhad", "over_under", and "any";
+    target_market="asian_handicap" now returns unsupported_market because this MCP is Jingcai-only. The tool lists upcoming matches, runs MCP single-match
     analysis for up to 100 listed candidates concurrently, rejects hard blockers/missing core markets/no positive
-    edge, ranks the remaining picks, and returns how to bet via final_decision.headline.
-    For mode="balanced" with target_market="asian_handicap", use_learning_policy=true lets settled paper results
-    tighten thresholds and live-calibrate probabilities automatically after enough samples.
+    edge, ranks the remaining analysis candidates, and returns how to map the result to Jingcai via analysis_result and analysis_policy.
+    For regular Jingcai competitions, agents must still review motivation, schedule, injuries/lineups,
+    tactical style, competition context, form, table, weather/venue, market movement, and scoreline distribution.
+    use_learning_policy=true lets settled Jingcai paper results tighten thresholds
+    and live-calibrate probabilities automatically after enough samples.
     It intentionally skips repeated per-match source probes so the call fits normal tool timeouts.
-    Downstream agents should not recalculate probabilities outside MCP.
+    Downstream agents should not recalculate probabilities outside MCP or convert analysis results into betting recommendations.
     """
     return await sources.shortlist_value_matches(
         query=query or "",
@@ -562,7 +577,7 @@ async def shortlist_value_matches(
         limit=limit or 30,
         min_edge=min_edge,
         mode=mode or "confidence",
-        target_market=target_market or "any",
+        target_market=target_market or "1x2",
         min_calibrated_probability=min_calibrated_probability,
         min_decimal_odds=min_decimal_odds,
         max_decimal_odds=max_decimal_odds,
@@ -600,19 +615,18 @@ async def recommend_jingcai_parlay(
     allow_observe_legs: bool = False,
 ) -> dict[str, Any]:
     """
-    Recommend 2串1/3串1 tickets from MCP shortlist picks.
+    Analyze 2串1/3串1 combination structures from MCP Jingcai candidates.
 
-    Use this when the user asks for 竞彩串单, 串关, 2串1, 3串1, or combined tickets.
+    Use this when the user asks for 竞彩串单, 串关, 2串1, 3串1, or combined-ticket analysis.
     Default parlay_mode="confidence" targets higher-hit-rate official HAD legs,
-    accepting lower odds and small negative EV proxy for parlays. Use
+    accepting lower odds and small negative EV proxy for combination diagnostics. Use
     parlay_mode="value" for strict positive-edge combinations.
-    The tool first runs MCP shortlist selection, then builds combinations inside MCP.
+    The tool first runs MCP shortlist selection, then builds combination diagnostics inside MCP.
     Default window is next 24 hours, because Jingcai parlays are not near-kickoff-only.
-    By default this returns only 1X2 legs marked as jingcai_supported, because they
-    map cleanly to 胜平负-style Jingcai output. Asian handicap and over/under legs
-    are included only when include_non_official_markets=True and must not be
-    described as official Jingcai odds. Downstream agents must display returned
-    parlay_tickets and must not create extra combinations outside MCP.
+    This Jingcai-only MCP returns only legs marked as jingcai_supported. The
+    legacy include_non_official_markets parameter is accepted for compatibility
+    but ignored. Downstream agents may display returned parlay_tickets as analysis candidates, but must not
+    present them as betting recommendations or create extra combinations outside MCP.
     """
     return await sources.recommend_jingcai_parlay(
         query=query or "",
@@ -632,7 +646,7 @@ async def recommend_jingcai_parlay(
         min_confidence_edge=min_confidence_edge,
         min_confidence_combined_odds_2=min_confidence_combined_odds_2,
         min_confidence_combined_odds_3=min_confidence_combined_odds_3,
-        include_non_official_markets=include_non_official_markets,
+        include_non_official_markets=False,
         allow_observe_legs=allow_observe_legs,
     )
 
@@ -651,7 +665,7 @@ async def run_historical_backtest(
     Run a Football-Data walk-forward paper backtest for one league season.
 
     Use this to audit whether MCP model_engine probabilities beat the market
-    baseline before trusting shortlist or parlay recommendations. The backtest
+    baseline before trusting shortlist or parlay analysis signals. The backtest
     builds form features only from matches earlier than each evaluated sample.
     Profit is flat-stake paper trading, not real-money authorization.
     """
@@ -678,7 +692,7 @@ async def run_backtest_sweep(
     historical_rho_min_samples: int = 20,
 ) -> dict[str, Any]:
     """
-    Sweep Football-Data walk-forward backtests across leagues, seasons, and recommendation thresholds.
+    Sweep Football-Data walk-forward backtests across leagues, seasons, and signal thresholds.
 
     Use this before changing model weights or enabling paper/live automation. The
     result ranks configs, summarizes league/season segments, warns on small
@@ -779,13 +793,13 @@ async def get_match_odds(
     window_hours: int = 24,
 ) -> dict[str, Any]:
     """
-    Return numeric 1X2, Asian handicap, and over/under odds for one match.
+    Return numeric 1X2/Jingcai odds plus supporting market context for one match.
 
     For Dongqiudi matches this fetches the match odds index and returns
     preferred_moneyline_1x2, preferred_asian_handicap, the full
-    asian_handicap_markets list, and asian_handicap_consensus. Use one supported
-    market at a time for calculations, but inspect consensus before Asian
-    handicap recommendations. Keep schedule snapshots as backup evidence only.
+    asian_handicap_markets list, and asian_handicap_consensus. Use Asian handicap
+    only as context for strength/margin/heat; final MCP analysis outputs remain Jingcai-only.
+    Keep schedule snapshots as backup evidence only.
     Leave as_of empty unless the user explicitly supplied an absolute local time.
     """
     best, search = await sources.get_best_match(
@@ -813,8 +827,7 @@ async def get_match_odds(
         "match_context_readiness": (match_context or {}).get("readiness") or {},
         "source_policy": (
             "For 1X2 calculations use odds.preferred_moneyline_1x2 when present. "
-            "For Asian handicap calculations use odds.preferred_asian_handicap when present, "
-            "and inspect odds.asian_handicap_consensus plus odds.asian_handicap_markets before recommendations. "
+            "Use odds.preferred_asian_handicap only as supporting context; do not output Asian handicap recommendations. "
             "Do not mix schedule_snapshot odds with the preferred market. "
             "Dongqiudi covers broad match lists including J.League; Football-Data covers supported European leagues. "
             "Leisu can corroborate Chinese schedule links but is not an odds source unless explicit odds numbers are returned."
@@ -835,18 +848,19 @@ async def analyze_single_match(
 ) -> dict[str, Any]:
     """
     Resolve one match and aggregate schedule, odds, time-window status, recent form, normalized lineup_analysis,
-    market_intelligence, analysis_pack, and betting_decision_support.
+    market_intelligence, analysis_pack, analysis_result, and legacy betting_decision_support diagnostics.
 
-    This tool is the preferred first call for single-match betting analysis. Leave
+    This tool is the preferred first call for single-match Jingcai analysis. Leave
     as_of empty unless the user explicitly supplied an absolute local time; empty
     as_of uses the server's current Asia/Shanghai time. If match_context.lineup is
     returned, downstream agents should use lineup_analysis, respect its warnings,
     and ignore raw formation codes such as formation_raw when formation_valid is false.
     Downstream agents must distinguish betting_decision_support.blocking_flags from
-    caution_flags: only blocking_flags force no-bet; caution_flags reduce stake or
-    require conditional observation. analysis_pack gives agents a compact data
+    caution_flags as analysis diagnostics: blocking_flags mean the method cannot support
+    a clear conclusion, while caution_flags lower evidence strength or require more context.
+    analysis_pack gives agents a compact data
     coverage map and structured model inputs; market_intelligence summarizes 1X2,
-    Asian handicap, and over/under consensus without replacing raw odds.
+    Asian handicap, and over/under consensus as supporting context without replacing raw odds.
     """
     return await sources.analyze_single_match(
         query,

@@ -52,6 +52,12 @@ class AutoLearningSettings:
     top_n: int = field(default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_TOP_N", 12))
     limit: int = field(default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_LIMIT", 80))
     timezone_name: str = field(default_factory=lambda: env_str("FOOTBALL_DATA_AUTO_LEARNING_TIMEZONE", "Asia/Shanghai"))
+    jingcai_window_minutes: int = field(
+        default_factory=lambda: env_int(
+            "FOOTBALL_DATA_AUTO_LEARNING_JINGCAI_WINDOW_MINUTES",
+            env_int("FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES", 10),
+        )
+    )
     asian_window_minutes: int = field(
         default_factory=lambda: env_int("FOOTBALL_DATA_AUTO_LEARNING_ASIAN_WINDOW_MINUTES", 10)
     )
@@ -120,6 +126,7 @@ class AutoLearningSettings:
             "top_n": self.top_n,
             "limit": self.limit,
             "timezone_name": self.timezone_name,
+            "jingcai_window_minutes": self.jingcai_window_minutes,
             "asian_window_minutes": self.asian_window_minutes,
             "parlay_window_minutes": self.parlay_window_minutes,
             "learning_observation_limit": self.learning_observation_limit,

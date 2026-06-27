@@ -1,4 +1,4 @@
 interface:
   display_name: "AI Odds Analyst"
-  short_description: "Analyze football odds, blockers, and review state"
-  default_prompt: "Use $ai-odds-analyst to analyze football matches with this repository's /api/ai routes and return conservative action guidance."
+  short_description: "Analyze Jingcai football picks and risk"
+  default_prompt: "Use $ai-odds-analyst to analyze Jingcai football matches with this repository's /api/ai routes and return conservative practical guidance."

@@ -73,8 +73,8 @@ class AIAnalysisService:
         window_minutes: int = 360,
         top_n: int = 5,
         limit: int = 40,
-        mode: str = "balanced",
-        target_market: str = "asian_handicap",
+        mode: str = "confidence",
+        target_market: str = "1x2",
         min_calibrated_probability: float = 0.58,
         min_decimal_odds: float = 1.65,
         max_decimal_odds: float = 2.05,
@@ -93,8 +93,8 @@ class AIAnalysisService:
             window_minutes=window_minutes or 360,
             top_n=top_n or 5,
             limit=limit or 40,
-            mode=mode or "balanced",
-            target_market=target_market or "asian_handicap",
+            mode=mode or "confidence",
+            target_market=target_market or "1x2",
             min_calibrated_probability=min_calibrated_probability,
             min_decimal_odds=min_decimal_odds,
             max_decimal_odds=max_decimal_odds,
@@ -108,6 +108,7 @@ class AIAnalysisService:
         return {
             **result,
             "tool": "ai_shortlist",
+            "analysis_policy": sources.jingcai_analysis_policy(),
         }
 
     async def match_analysis(
@@ -171,6 +172,35 @@ class AIAnalysisService:
             "odds": odds,
             "match_context_readiness": (match_context or {}).get("readiness") or {},
         }
+
+    async def match_live(
+        self,
+        *,
+        query: str,
+        home_team: str | None = None,
+        away_team: str | None = None,
+        league: str | None = None,
+        as_of: str | None = None,
+        timezone_name: str = "Asia/Shanghai",
+        lookback_hours: float = 4,
+        window_hours: float = 8,
+        leisu_match_id: str | None = None,
+        include_odds: bool = True,
+    ) -> dict[str, Any]:
+        result = await sources.live_match_snapshot(
+            query=query or "",
+            home_team=home_team or None,
+            away_team=away_team or None,
+            league=league or None,
+            as_of=as_of or None,
+            timezone_name=timezone_name or "Asia/Shanghai",
+            lookback_hours=lookback_hours or 4,
+            window_hours=window_hours or 8,
+            leisu_match_id=leisu_match_id or None,
+            include_odds=include_odds,
+        )
+        result["tool"] = "ai_match_live"
+        return result
 
     async def review_summary(self, *, refresh: bool = False) -> dict[str, Any]:
         snapshot = await self._dashboard_service.snapshot(force_refresh=refresh)

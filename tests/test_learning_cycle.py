@@ -164,9 +164,11 @@ def test_dashboard_model_failure_diagnostics_waits_for_enough_settled_samples():
 
 def test_run_auto_learning_cycle_records_shortlist_and_parlay(monkeypatch, tmp_path):
     db_path = str(tmp_path / "learning.sqlite3")
+    shortlist_calls = []
 
     async def fake_shortlist_value_matches(**kwargs):
         assert kwargs["db_path"] == db_path
+        shortlist_calls.append(kwargs)
         return {
             "status": "ok",
             "tool": "shortlist_value_matches",
@@ -181,10 +183,9 @@ def test_run_auto_learning_cycle_records_shortlist_and_parlay(monkeypatch, tmp_p
                         "kickoff_utc_plus_8": "2026-05-24T20:00:00+08:00",
                     },
                     "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "主队A -0.5",
-                        "selection_key": "home_cover",
-                        "line": -0.5,
+                        "market": "1x2",
+                        "selection": "主队A 主胜",
+                        "selection_key": "home",
                         "decimal_odds": 1.9,
                         "model_probability": 0.62,
                         "edge": 0.05,
@@ -235,12 +236,57 @@ def test_run_auto_learning_cycle_records_shortlist_and_parlay(monkeypatch, tmp_p
 
     assert result["status"] == "ok"
     assert result["saved_record_count"] == 2
-    assert result["asian_shortlist"]["record_count"] == 1
+    assert shortlist_calls[0]["mode"] == "confidence"
+    assert shortlist_calls[0]["target_market"] == "1x2"
+    assert result["jingcai_shortlist"]["record_count"] == 1
+    assert result["jingcai_shortlist"]["target_market"] == "1x2"
+    assert result["asian_shortlist"]["legacy_alias_for"] == "jingcai_shortlist"
     assert result["jingcai_parlay"]["record_count"] == 1
     assert result["lark_notification"]["status"] == "not_configured"
     assert result["lark_notification"]["sent_count"] == 0
     records = learning_store.list_recommendation_records(db_path=db_path)
-    assert {record["market"] for record in records} == {"asian_handicap", "parlay"}
+    assert {record["market"] for record in records} == {"1x2", "parlay"}
+
+
+def test_run_auto_learning_cycle_ignores_asian_shortlist_request(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "learning.sqlite3")
+    shortlist_calls = []
+
+    async def fake_shortlist_value_matches(**kwargs):
+        shortlist_calls.append(kwargs)
+        return {
+            "status": "ok",
+            "tool": "shortlist_value_matches",
+            "mode": kwargs["mode"],
+            "target_market": kwargs["target_market"],
+            "picks": [],
+            "rejected": [],
+        }
+
+    async def fake_recommend_jingcai_parlay(**kwargs):
+        return {"status": "ok", "tool": "recommend_jingcai_parlay", "parlay_mode": kwargs["parlay_mode"], "recommended_tickets": []}
+
+    monkeypatch.setattr(sources_module, "shortlist_value_matches", fake_shortlist_value_matches)
+    monkeypatch.setattr(sources_module, "recommend_jingcai_parlay", fake_recommend_jingcai_parlay)
+
+    result = asyncio.run(
+        sources_module.run_auto_learning_cycle(
+            include_jingcai_shortlist=True,
+            include_asian_shortlist=True,
+            jingcai_window_minutes=30,
+            asian_window_minutes=90,
+            db_path=db_path,
+            auto_settle=False,
+        )
+    )
+
+    assert len(shortlist_calls) == 1
+    assert shortlist_calls[0]["target_market"] == "1x2"
+    assert shortlist_calls[0]["mode"] == "confidence"
+    assert shortlist_calls[0]["window_minutes"] == 30
+    assert result["asian_shortlist"]["status"] == "disabled"
+    assert result["asian_shortlist"]["requested"] is True
+    assert result["asian_shortlist"]["record_count"] == 0
 
 
 def test_settle_learning_recommendations_recomputes_calibration(tmp_path):
@@ -278,8 +324,8 @@ def test_settle_learning_recommendations_recomputes_calibration(tmp_path):
     assert result["settlement"]["settled_count"] == 1
     assert result["calibration"]["settled_count"] == 1
     assert result["calibration"]["buckets"][0]["hit_rate"] == 1.0
-    assert result["strategy_state"]["market"] == "asian_handicap"
-    assert result["strategy_state"]["mode"] == "balanced"
+    assert result["strategy_state"]["market"] == "1x2"
+    assert result["strategy_state"]["mode"] == "confidence"
 
 
 def test_settle_learning_recommendations_persists_clv_before_calibration(monkeypatch, tmp_path):
@@ -518,10 +564,9 @@ def test_auto_learning_cycle_reports_refreshed_record_count_for_open_predictions
                         "kickoff_utc_plus_8": "2026-05-24T20:00:00+08:00",
                     },
                     "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "主队A -0.5",
-                        "selection_key": "home_cover",
-                        "line": -0.5,
+                        "market": "1x2",
+                        "selection": "主队A 主胜",
+                        "selection_key": "home",
                         "decimal_odds": 1.9,
                         "model_probability": 0.62,
                         "edge": 0.05,
@@ -570,10 +615,9 @@ def test_auto_learning_cycle_records_rejected_as_learning_observations(monkeypat
                         "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
                     },
                     "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "观察客队 +0.5",
-                        "selection_key": "away_cover",
-                        "line": 0.5,
+                        "market": "1x2",
+                        "selection": "观察客队 客胜",
+                        "selection_key": "away",
                         "decimal_odds": 1.86,
                         "model_probability": 0.53,
                         "edge": -0.01,
@@ -592,10 +636,10 @@ def test_auto_learning_cycle_records_rejected_as_learning_observations(monkeypat
     result = asyncio.run(sources_module.run_auto_learning_cycle(db_path=db_path, auto_settle=False))
 
     assert result["saved_record_count"] == 1
-    assert result["asian_shortlist"]["record_count"] == 0
-    assert result["asian_shortlist"]["learning_observation_record_count"] == 1
+    assert result["jingcai_shortlist"]["record_count"] == 0
+    assert result["jingcai_shortlist"]["learning_observation_record_count"] == 1
     record = learning_store.list_recommendation_records(db_path=db_path)[0]
-    assert record["mode"] == "balanced_observation"
+    assert record["mode"] == "confidence_observation"
     assert record["recommendation"] == "no_value"
     assert record["settlement_status"] == "open"
 
@@ -835,10 +879,9 @@ def test_auto_learning_cycle_records_shadow_predictions_from_all_analyzed_items(
                         "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
                     },
                     "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "扩样主队 -0.5",
-                        "selection_key": "home_cover",
-                        "line": -0.5,
+                        "market": "1x2",
+                        "selection": "扩样主队 主胜",
+                        "selection_key": "home",
                         "decimal_odds": 1.9,
                         "model_probability": 0.62,
                         "calibrated_probability": 0.61,
@@ -858,10 +901,9 @@ def test_auto_learning_cycle_records_shadow_predictions_from_all_analyzed_items(
                         "kickoff_utc_plus_8": "2026-05-25T21:00:00+08:00",
                     },
                     "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "观察客队 +0.5",
-                        "selection_key": "away_cover",
-                        "line": 0.5,
+                        "market": "1x2",
+                        "selection": "观察客队 客胜",
+                        "selection_key": "away",
                         "decimal_odds": 1.86,
                         "model_probability": 0.53,
                         "edge": -0.01,
@@ -887,8 +929,8 @@ def test_auto_learning_cycle_records_shadow_predictions_from_all_analyzed_items(
 
     assert shortlist_kwargs[0]["analysis_candidate_limit"] == 80
     assert shortlist_kwargs[0]["analysis_concurrency"] == 10
-    assert result["asian_shortlist"]["record_count"] == 1
-    assert result["asian_shortlist"]["shadow_prediction_record_count"] == 2
+    assert result["jingcai_shortlist"]["record_count"] == 1
+    assert result["jingcai_shortlist"]["shadow_prediction_record_count"] == 2
     assert result["saved_shadow_prediction_count"] == 2
     shadows = learning_store.list_shadow_prediction_records(db_path=db_path)
     assert [shadow["decision"] for shadow in shadows] == ["rejected", "accepted"]
@@ -1189,10 +1231,9 @@ def test_auto_learning_cycle_records_observation_when_candidate_is_not_publishab
                         "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
                     },
                     "best_candidate": {
-                        "market": "asian_handicap",
-                        "selection": "观察主队 +0.25",
-                        "selection_key": "home_cover",
-                        "line": 0.25,
+                        "market": "1x2",
+                        "selection": "观察主队 主胜",
+                        "selection_key": "home",
                         "decimal_odds": 1.88,
                         "model_probability": 0.53,
                         "market_probability": 0.51,
@@ -1214,14 +1255,14 @@ def test_auto_learning_cycle_records_observation_when_candidate_is_not_publishab
         )
     )
 
-    assert result["asian_shortlist"]["record_count"] == 0
-    assert result["asian_shortlist"]["learning_observation_record_count"] == 1
-    assert result["asian_shortlist"]["shadow_prediction_record_count"] == 1
-    assert result["asian_shortlist"]["analyzed_count"] == 1
+    assert result["jingcai_shortlist"]["record_count"] == 0
+    assert result["jingcai_shortlist"]["learning_observation_record_count"] == 1
+    assert result["jingcai_shortlist"]["shadow_prediction_record_count"] == 1
+    assert result["jingcai_shortlist"]["analyzed_count"] == 1
     assert result["saved_record_count"] == 1
     records = learning_store.list_recommendation_records(db_path=db_path)
     assert len(records) == 1
-    assert records[0]["mode"] == "balanced_observation"
+    assert records[0]["mode"] == "confidence_observation"
     assert records[0]["recommendation"] == "condition_observe"
 
 
@@ -1230,23 +1271,22 @@ def test_shortlist_balanced_mode_uses_learned_strategy_thresholds(monkeypatch, t
     learning_store.save_recommendation_records(
         [
             {
-                "run_id": f"cycle-{index}",
-                "tool": "shortlist_value_matches",
-                "mode": "balanced",
-                "target_market": "asian_handicap",
-                "match_id": f"learned-threshold-{index}",
-                "league": "策略联赛",
-                "home_team": f"策略主队{index}",
-                "away_team": f"策略客队{index}",
-                "market": "asian_handicap",
-                "selection": f"策略主队{index} -0.5",
-                "selection_key": "home_cover",
-                "line": -0.5,
-                "decimal_odds": 1.8,
-                "model_probability": 0.62,
-                "calibrated_probability": 0.62,
-                "edge": 0.06,
-            }
+                    "run_id": f"cycle-{index}",
+                    "tool": "shortlist_value_matches",
+                    "mode": "confidence",
+                    "target_market": "1x2",
+                    "match_id": f"learned-threshold-{index}",
+                    "league": "策略联赛",
+                    "home_team": f"策略主队{index}",
+                    "away_team": f"策略客队{index}",
+                    "market": "1x2",
+                    "selection": f"策略主队{index} 主胜",
+                    "selection_key": "home",
+                    "decimal_odds": 1.8,
+                    "model_probability": 0.62,
+                    "calibrated_probability": 0.62,
+                    "edge": 0.06,
+                }
             for index in range(20)
         ],
         db_path=db_path,
@@ -1265,7 +1305,7 @@ def test_shortlist_balanced_mode_uses_learned_strategy_thresholds(monkeypatch, t
         db_path=db_path,
     )
     learning_store.recompute_calibration(db_path=db_path)
-    learning_store.update_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
+    learning_store.update_strategy_state(db_path=db_path, market="1x2", mode="confidence")
 
     async def fake_list_matches(**kwargs):
         return {
@@ -1307,10 +1347,9 @@ def test_shortlist_balanced_mode_uses_learned_strategy_thresholds(monkeypatch, t
             },
             "odds": {},
             "best_candidate": {
-                "market": "asian_handicap",
-                "selection": "候选主队 -0.5",
-                "selection_key": "home_cover",
-                "line": -0.5,
+                "market": "1x2",
+                "selection": "候选主队 主胜",
+                "selection_key": "home",
                 "decimal_odds": 1.85,
                 "model_probability": 0.60,
                 "calibrated_probability": 0.60,
@@ -1332,7 +1371,7 @@ def test_shortlist_balanced_mode_uses_learned_strategy_thresholds(monkeypatch, t
     result = asyncio.run(
         sources_module.shortlist_value_matches(
             mode="balance",
-            target_market="asian_handicap",
+            target_market="1x2",
             db_path=db_path,
         )
     )
@@ -1442,8 +1481,10 @@ def test_dashboard_snapshot_separates_picks_observations_settlements_and_strateg
     assert snapshot["kpis"]["open_records"] == 2
     assert snapshot["kpis"]["settled_records"] == 1
     assert snapshot["kpis"]["asian_pick_count"] == 1
+    assert snapshot["kpis"]["primary_market"] == "1x2"
+    assert snapshot["kpis"]["primary_pick_count"] == 0
     assert snapshot["kpis"]["observation_count"] == 1
-    assert snapshot["strategy_state"]["market"] == "asian_handicap"
+    assert snapshot["strategy_state"]["market"] == "1x2"
     assert snapshot["asian_picks"][0]["matchup"] == "清水鼓动 vs 大阪钢巴"
     assert snapshot["asian_picks"][0]["home_team_logo_url"] == "https://assets.example.com/shimizu.png"
     assert snapshot["asian_picks"][0]["away_team_logo_url"] == "https://assets.example.com/gamba.png"
@@ -1740,63 +1781,60 @@ def test_dashboard_probability_governance_uses_market_guardrail_when_learning_la
         {
             "run_id": "cycle-governance",
             "tool": "shortlist_value_matches",
-            "mode": "balanced_observation",
-            "target_market": "asian_handicap",
+            "mode": "confidence_observation",
+            "target_market": "1x2",
             "match_id": "governance-hit",
             "league": "治理联赛",
             "home_team": "治理主队A",
             "away_team": "治理客队A",
             "kickoff_utc_plus_8": "2026-05-25T19:00:00+08:00",
-            "market": "asian_handicap",
-            "selection": "治理主队A -0.5",
-            "selection_key": "home_cover",
-            "line": -0.5,
+            "market": "1x2",
+            "selection": "治理主队A 主胜",
+            "selection_key": "home",
             "decimal_odds": 1.9,
             "model_probability": 0.45,
             "calibrated_probability": 0.55,
             "market_probability": 0.70,
             "edge": -0.05,
-            "recommendation": "no_value",
+            "recommendation": "condition_observe",
             "stake_level": "none",
-            "raw": {"kind": "learning_observation", "reason": "no_positive_edge"},
+            "raw": {"kind": "learning_observation", "reason": "paper_track"},
         },
         {
             "run_id": "cycle-governance",
             "tool": "shortlist_value_matches",
-            "mode": "balanced_observation",
-            "target_market": "asian_handicap",
+            "mode": "confidence_observation",
+            "target_market": "1x2",
             "match_id": "governance-miss",
             "league": "治理联赛",
             "home_team": "治理主队B",
             "away_team": "治理客队B",
             "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
-            "market": "asian_handicap",
-            "selection": "治理主队B -0.5",
-            "selection_key": "home_cover",
-            "line": -0.5,
+            "market": "1x2",
+            "selection": "治理主队B 主胜",
+            "selection_key": "home",
             "decimal_odds": 1.9,
             "model_probability": 0.55,
             "calibrated_probability": 0.45,
             "market_probability": 0.30,
             "edge": -0.05,
-            "recommendation": "no_value",
+            "recommendation": "condition_observe",
             "stake_level": "none",
-            "raw": {"kind": "learning_observation", "reason": "no_positive_edge"},
+            "raw": {"kind": "learning_observation", "reason": "paper_track"},
         },
         {
             "run_id": "cycle-governance",
             "tool": "shortlist_value_matches",
-            "mode": "balanced_observation",
-            "target_market": "asian_handicap",
+            "mode": "confidence_observation",
+            "target_market": "1x2",
             "match_id": "governance-open",
             "league": "治理联赛",
             "home_team": "治理主队C",
             "away_team": "治理客队C",
             "kickoff_utc_plus_8": "2026-05-26T20:00:00+08:00",
-            "market": "asian_handicap",
-            "selection": "治理主队C -0.5",
-            "selection_key": "home_cover",
-            "line": -0.5,
+            "market": "1x2",
+            "selection": "治理主队C 主胜",
+            "selection_key": "home",
             "decimal_odds": 1.9,
             "model_probability": 0.60,
             "calibrated_probability": 0.70,
@@ -1988,25 +2026,24 @@ def test_dashboard_detects_inverted_probability_bands_and_counter_signal_watchli
             {
                 "run_id": "cycle-inverted-low",
                 "tool": "shortlist_value_matches",
-                "mode": "balanced_observation",
-                "target_market": "asian_handicap",
+                "mode": "confidence_observation",
+                "target_market": "1x2",
                 "match_id": f"inverted-low-{index}",
                 "league": "校准联赛",
                 "home_team": f"低概率主队{index}",
                 "away_team": f"低概率客队{index}",
                 "kickoff_utc_plus_8": "2026-05-25T19:00:00+08:00",
-                "market": "asian_handicap",
-                "selection": f"低概率主队{index} -0.5",
-                "selection_key": "home_cover",
-                "line": -0.5,
+                "market": "1x2",
+                "selection": f"低概率主队{index} 主胜",
+                "selection_key": "home",
                 "decimal_odds": 1.9,
                 "model_probability": 0.48,
                 "calibrated_probability": 0.42,
                 "market_probability": 0.52,
                 "edge": -0.03,
-                "recommendation": "no_value",
+                "recommendation": "condition_observe",
                 "stake_level": "none",
-                "raw": {"kind": "learning_observation", "reason": "no_positive_edge"},
+                "raw": {"kind": "learning_observation", "reason": "paper_backtest"},
             }
         )
         home_score, away_score = (2, 0) if index < 8 else (0, 2)
@@ -2024,25 +2061,24 @@ def test_dashboard_detects_inverted_probability_bands_and_counter_signal_watchli
             {
                 "run_id": "cycle-inverted-mid",
                 "tool": "shortlist_value_matches",
-                "mode": "balanced_observation",
-                "target_market": "asian_handicap",
+                "mode": "confidence_observation",
+                "target_market": "1x2",
                 "match_id": f"inverted-mid-{index}",
                 "league": "校准联赛",
                 "home_team": f"中概率主队{index}",
                 "away_team": f"中概率客队{index}",
                 "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
-                "market": "asian_handicap",
-                "selection": f"中概率主队{index} -0.5",
-                "selection_key": "home_cover",
-                "line": -0.5,
+                "market": "1x2",
+                "selection": f"中概率主队{index} 主胜",
+                "selection_key": "home",
                 "decimal_odds": 1.9,
                 "model_probability": 0.55,
                 "calibrated_probability": 0.52,
                 "market_probability": 0.52,
                 "edge": 0.0,
-                "recommendation": "no_value",
+                "recommendation": "condition_observe",
                 "stake_level": "none",
-                "raw": {"kind": "learning_observation", "reason": "no_positive_edge"},
+                "raw": {"kind": "learning_observation", "reason": "paper_backtest"},
             }
         )
         home_score, away_score = (2, 0) if index < 6 else (0, 2)
@@ -2059,17 +2095,16 @@ def test_dashboard_detects_inverted_probability_bands_and_counter_signal_watchli
         {
             "run_id": "cycle-inverted-open",
             "tool": "shortlist_value_matches",
-            "mode": "balanced_observation",
-            "target_market": "asian_handicap",
+            "mode": "confidence_observation",
+            "target_market": "1x2",
             "match_id": "inverted-open",
             "league": "校准联赛",
             "home_team": "反向观察主队",
             "away_team": "反向观察客队",
             "kickoff_utc_plus_8": "2026-05-25T21:00:00+08:00",
-            "market": "asian_handicap",
-            "selection": "反向观察主队 -0.5",
-            "selection_key": "home_cover",
-            "line": -0.5,
+            "market": "1x2",
+            "selection": "反向观察主队 主胜",
+            "selection_key": "home",
             "decimal_odds": 1.9,
             "model_probability": 0.48,
             "calibrated_probability": 0.42,
@@ -2083,7 +2118,7 @@ def test_dashboard_detects_inverted_probability_bands_and_counter_signal_watchli
     learning_store.save_recommendation_records(records, db_path=db_path)
     learning_store.settle_recommendations(results, db_path=db_path)
     learning_store.recompute_calibration(db_path=db_path)
-    learning_store.update_strategy_state(db_path=db_path, market="asian_handicap", mode="balanced")
+    learning_store.update_strategy_state(db_path=db_path, market="1x2", mode="confidence")
 
     snapshot = sources_module.dashboard_snapshot(db_path=db_path, limit=100)
     calibration_health = snapshot["learning_effectiveness"]["calibration_health"]
@@ -2463,7 +2498,7 @@ def test_dashboard_prediction_ledger_exposes_paper_prediction_diagnostic(tmp_pat
     explanation_labels = [item["label"] for item in diagnostic["feature_explanations"]]
     assert explanation_labels == ["概率来源", "学习校准", "价值边际", "赔率覆盖", "情报完整度"]
     explanation_by_key = {item["key"]: item for item in diagnostic["feature_explanations"]}
-    assert explanation_by_key["probability_source"]["value"] == "市场基准 58.1%"
+    assert explanation_by_key["probability_source"]["value"] == "原始模型 61.0%"
     assert "模型 61.0%" in explanation_by_key["learning_adjustment"]["detail"]
     assert explanation_by_key["value_edge"]["tone"] == "bad"
     assert explanation_by_key["odds_coverage"]["tone"] == "caution"
@@ -2475,12 +2510,12 @@ def test_dashboard_prediction_ledger_exposes_paper_prediction_diagnostic(tmp_pat
     assert detail["record"]["prediction_diagnostic"]["actionability"] == "paper_prediction"
     assert detail["record"]["prediction_diagnostic"]["learning_active"] is True
     assert detail["record"]["prediction_diagnostic"]["learning_application_label"] == "学习校准仅降权"
-    assert detail["record"]["prediction_diagnostic"]["probability_source_label"] == "市场基准"
-    assert detail["record"]["prediction_diagnostic"]["feature_explanations"][0]["value"] == "市场基准 58.1%"
+    assert detail["record"]["prediction_diagnostic"]["probability_source_label"] == "原始模型"
+    assert detail["record"]["prediction_diagnostic"]["feature_explanations"][0]["value"] == "原始模型 61.0%"
     assert detail["evidence"]["prediction_diagnostic"]["threshold_passed"] is False
     assert detail["evidence"]["prediction_diagnostic"]["learning_active"] is True
     assert detail["evidence"]["prediction_diagnostic"]["learning_application_status"] == "down_weight_only"
-    assert detail["evidence"]["prediction_diagnostic"]["feature_explanations"][0]["value"] == "市场基准 58.1%"
+    assert detail["evidence"]["prediction_diagnostic"]["feature_explanations"][0]["value"] == "原始模型 61.0%"
     assert detail["evidence"]["final_execution_advice"]["source"] == "dashboard_synthesized_advice"
     assert detail["evidence"]["final_execution_advice"]["action"] == "paper_track"
     assert detail["evidence"]["final_execution_advice"]["action_label"] == "纸面预测"
@@ -3171,7 +3206,7 @@ def test_dashboard_snapshot_exposes_recommendation_opportunity_audit(tmp_path):
     assert opportunity["gate_thresholds"]["min_value_edge"] == 0.02
     assert len(opportunity["top_candidates"]) == 1
     assert opportunity["top_candidates"][0]["ledger_id"].startswith("recommendation:")
-    assert opportunity["top_candidates"][0]["recommendation"] == "condition_observe"
+    assert opportunity["top_candidates"][0]["recommendation"] == "immediate_bet"
     assert opportunity["top_candidates"][0]["primary_blocker"] == "awaiting_reanalysis_after_snapshot"
     assert opportunity["top_candidates"][0]["threshold_ready"] is True
     assert opportunity["top_candidates"][0]["has_odds_snapshot"] is True
@@ -3334,7 +3369,7 @@ def test_dashboard_recommendation_opportunity_explains_negative_roi_paper_only_g
     assert gates["prediction_policy"]["title"] == "持续预测回测"
     assert gates["sample_count"]["status"] == "warning"
     assert gates["signal_backtest"]["status"] == "blocked"
-    assert gates["global_backtest_roi"]["status"] == "warning"
+    assert gates["global_backtest_roi"]["status"] == "ok"
     assert gates["market_quality"]["status"] == "blocked"
     assert gates["candidate_threshold"]["status"] == "warning"
     assert all(gate["label"] for gate in release_gate["gates"])
@@ -4101,17 +4136,16 @@ def test_reanalyze_snapshot_backlog_promotes_observation_when_odds_are_now_compl
             {
                 "run_id": "cycle-reanalysis-before",
                 "tool": "shortlist_value_matches",
-                "mode": "balanced_observation",
-                "target_market": "asian_handicap",
+                "mode": "confidence_observation",
+                "target_market": "1x2",
                 "match_id": "reanalyze-ready",
                 "league": "复算联赛",
                 "home_team": "复算主队",
                 "away_team": "复算客队",
                 "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
-                "market": "asian_handicap",
-                "selection": "复算主队 +0.5",
-                "selection_key": "home_cover",
-                "line": 0.5,
+                "market": "1x2",
+                "selection": "复算主队 主胜",
+                "selection_key": "home",
                 "decimal_odds": 1.88,
                 "model_probability": 0.61,
                 "calibrated_probability": 0.61,
@@ -4139,14 +4173,14 @@ def test_reanalyze_snapshot_backlog_promotes_observation_when_odds_are_now_compl
                 source_key="leisu:reanalyze-ready",
                 event_id="reanalyze-ready",
                 league="复算联赛",
-                home_team="复算主队",
-                away_team="复算客队",
-                kickoff_utc="2026-05-25T12:00:00+00:00",
-                bookmaker="公司A",
-                market_type="asian_handicap",
-                selection="复算主队 +0.5",
-                decimal_odds=1.88,
-                line=0.5,
+                    home_team="复算主队",
+                    away_team="复算客队",
+                    kickoff_utc="2026-05-25T12:00:00+00:00",
+                    bookmaker="公司A",
+                    market_type="1x2",
+                    selection="复算主队 主胜",
+                    decimal_odds=1.88,
+                    line=None,
                 source_time_utc="2026-05-25T11:50:00+00:00",
                 fetched_at_utc="2026-05-25T11:55:00+00:00",
                 raw={},
@@ -4171,10 +4205,9 @@ def test_reanalyze_snapshot_backlog_promotes_observation_when_odds_are_now_compl
             "final_decision": {"headline": "复算后可正式跟踪", "recommendation": "immediate_bet"},
             "final_execution_advice": {"headline": "最终执行：正式跟踪", "action": "bet_now"},
             "best_candidate": {
-                "market": "asian_handicap",
-                "selection": "复算主队 +0.5",
-                "selection_key": "home_cover",
-                "line": 0.5,
+                "market": "1x2",
+                "selection": "复算主队 主胜",
+                "selection_key": "home",
                 "recommendation": "immediate_bet",
                 "edge": 0.055,
                 "model_probability": 0.63,
@@ -4222,7 +4255,7 @@ def test_reanalyze_snapshot_backlog_promotes_observation_when_odds_are_now_compl
     assert result["still_observation_count"] == 0
     assert calls[0][0] == "复算主队 vs 复算客队"
     assert calls[0][1]["include_source_probe"] is False
-    assert record["mode"] == "balanced"
+    assert record["mode"] == "confidence"
     assert record["raw"]["kind"] == "snapshot_reanalysis"
     assert record["raw"]["previous_reason"] == "multi_bookmaker_snapshot_missing"
     assert snapshot["recommendation_opportunity"]["formal_count"] == 1
@@ -4313,17 +4346,16 @@ def test_reanalyze_snapshot_backlog_uses_fuzzy_snapshot_coverage(monkeypatch, tm
             {
                 "run_id": "cycle-reanalysis-fuzzy-before",
                 "tool": "shortlist_value_matches",
-                "mode": "balanced_observation",
-                "target_market": "asian_handicap",
+                "mode": "confidence_observation",
+                "target_market": "1x2",
                 "match_id": "boca-fuzzy",
                 "league": "阿甲女",
                 "home_team": "博卡青年女足",
                 "away_team": "飓风女足",
                 "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
-                "market": "asian_handicap",
-                "selection": "博卡青年女足 -1.5",
-                "selection_key": "home_cover",
-                "line": -1.5,
+                "market": "1x2",
+                "selection": "博卡青年女足 主胜",
+                "selection_key": "home",
                 "decimal_odds": 1.86,
                 "model_probability": 0.62,
                 "calibrated_probability": 0.62,
@@ -4351,14 +4383,14 @@ def test_reanalyze_snapshot_backlog_uses_fuzzy_snapshot_coverage(monkeypatch, tm
                 source_key="leisu:boca-fuzzy",
                 event_id="boca-fuzzy",
                 league="阿甲女",
-                home_team="博卡女足",
-                away_team="飓风女足",
-                kickoff_utc="2026-05-25T12:00:00+00:00",
-                bookmaker="公司A",
-                market_type="asian_handicap",
-                selection="博卡女足 -1.5",
-                decimal_odds=1.86,
-                line=-1.5,
+                    home_team="博卡女足",
+                    away_team="飓风女足",
+                    kickoff_utc="2026-05-25T12:00:00+00:00",
+                    bookmaker="公司A",
+                    market_type="1x2",
+                    selection="博卡女足 主胜",
+                    decimal_odds=1.86,
+                    line=None,
                 source_time_utc="2026-05-25T11:50:00+00:00",
                 fetched_at_utc="2026-05-25T11:55:00+00:00",
                 raw={},
@@ -4381,10 +4413,9 @@ def test_reanalyze_snapshot_backlog_uses_fuzzy_snapshot_coverage(monkeypatch, tm
                 "kickoff_utc_plus_8": "2026-05-25T20:00:00+08:00",
             },
             "best_candidate": {
-                "market": "asian_handicap",
-                "selection": "博卡青年女足 -1.5",
-                "selection_key": "home_cover",
-                "line": -1.5,
+                "market": "1x2",
+                "selection": "博卡青年女足 主胜",
+                "selection_key": "home",
                 "recommendation": "immediate_bet",
                 "edge": 0.055,
                 "model_probability": 0.64,
@@ -6619,7 +6650,8 @@ def test_auto_learning_daemon_passes_background_sampling_windows(monkeypatch):
             "run_id": "cycle-test",
             "saved_record_count": 3,
             "learning_phase": "collecting_samples",
-            "asian_shortlist": {"record_count": 2},
+            "asian_shortlist": {"status": "disabled", "record_count": 0},
+            "jingcai_shortlist": {"record_count": 2},
             "jingcai_parlay": {"record_count": 1},
             "settlement": {"settlement": {"settled_count": 0}},
         }
@@ -6655,6 +6687,7 @@ def test_auto_learning_daemon_passes_background_sampling_windows(monkeypatch):
 
     assert calls[0]["top_n"] == 12
     assert calls[0]["limit"] == 80
+    assert calls[0]["jingcai_window_minutes"] == 24 * 60
     assert calls[0]["asian_window_minutes"] == 24 * 60
     assert calls[0]["parlay_window_minutes"] == 24 * 60
     assert calls[0]["learning_observation_limit"] == 40
@@ -6668,6 +6701,7 @@ def test_auto_learning_daemon_passes_background_sampling_windows(monkeypatch):
     assert calls[0]["oddsportal_snapshot_limit"] == 4
     assert calls[0]["oddsportal_target_limit"] == 40
     assert sources_module.AUTO_LEARNING_STATE["asian_window_minutes"] == 24 * 60
+    assert sources_module.AUTO_LEARNING_STATE["asian_window_deprecated"] is True
     assert sources_module.AUTO_LEARNING_STATE["parlay_window_minutes"] == 24 * 60
     assert sources_module.AUTO_LEARNING_STATE["learning_observation_limit"] == 40
     assert sources_module.AUTO_LEARNING_STATE["market_snapshot_sync_enabled"] is True
@@ -6701,6 +6735,7 @@ def test_auto_learning_daemon_defaults_to_near_kickoff_predictions_and_wide_snap
     with pytest.raises(StopLoop):
         asyncio.run(sources_module.auto_learning_daemon(interval_seconds=120))
 
+    assert calls[0]["jingcai_window_minutes"] == 10
     assert calls[0]["asian_window_minutes"] == 10
     assert calls[0]["parlay_window_minutes"] == 10
     assert calls[0]["market_snapshot_window_minutes"] == 24 * 60
@@ -6712,7 +6747,7 @@ def test_auto_learning_daemon_times_out_stuck_cycle_and_resets_state(monkeypatch
         pass
 
     async def fake_run_auto_learning_cycle(**kwargs):
-        sources_module.AUTO_LEARNING_STATE["current_step"] = "asian_shortlist"
+        sources_module.AUTO_LEARNING_STATE["current_step"] = "jingcai_shortlist"
         await asyncio.sleep(3600)
         return {"saved_record_count": 1}
 

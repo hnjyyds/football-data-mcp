@@ -25,6 +25,10 @@ class AIMatchOddsResponse(AIAnalysisLooseResponse):
     pass
 
 
+class AIMatchLiveResponse(AIAnalysisLooseResponse):
+    pass
+
+
 class AIReviewSummaryResponse(AIAnalysisLooseResponse):
     pass
 
